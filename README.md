@@ -15,10 +15,12 @@ The collected events are designed for downstream analysis, correlation, risk sco
 * Hook-only event collection
 * No required `audit.event()` calls in application logic
 * LLM request and error event collection
+* Native Ollama Python SDK hook for `ollama.chat(...)` and `ollama.Client.chat(...)`
 * MCP tool call request, completion, and failure event collection
 * Generic non-MCP tool call request, completion, and failure event collection
 * RAG retrieval, embedding, and query lifecycle event collection
 * OpenAI Agents SDK, LangChain, LangGraph, and LlamaIndex integration examples
+* Langflow example integration for GUI-built agent, RAG, and MCP workflows
 * Agent and PromptOps runtime event examples
 * JSONL, stdout, null, and Parquet exporters
 * Redaction and capture controls
@@ -30,6 +32,19 @@ The collected events are designed for downstream analysis, correlation, risk sco
 * CLI tools for validation, inspection, trace viewing, statistics, and conversion
 * Unit tests that do not require external API keys
 
+## v0.5.0 verification summary
+
+The v0.5.0 release adds native Ollama Python SDK instrumentation and a Langflow example integration. The following local verification was completed on macOS with an Apple Silicon arm64 Python 3.12 environment:
+
+* `pytest` passed with the Ollama SDK instrumentor tests included.
+* `ollama.Client.chat(...)` was verified against `argus-qwen25-14b-toolplan:latest`.
+* Langflow started successfully and loaded custom components from `LANGFLOW_COMPONENTS_PATH`.
+* A Langflow custom component calling `ollama.Client.chat(...)` emitted a privacy-safe `llm.request` event to JSONL.
+* `senda-hooks validate` returned `valid: true`.
+* `senda-hooks inspect --summary` reported one `llm.request` event for the Langflow/Ollama smoke test.
+
+The verified event included `source.sdk = "ollama"`, `source.operation = "Client.chat"`, `model = "argus-qwen25-14b-toolplan:latest"`, and `security.redacted = true`. Raw prompt and response bodies were not stored by default; hashes and metadata were emitted instead.
+
 ## Hook targets
 
 | Target                         | Status             | Hook approach                  | Test coverage                  | Typical events                                                               |
@@ -37,11 +52,13 @@ The collected events are designed for downstream analysis, correlation, risk sco
 | OpenAI SDK                     | Experimental       | SDK method hook / monkey patch | Fake SDK hook test             | `llm.request`, `llm.error`                                                   |
 | Anthropic SDK                  | Experimental       | SDK method hook / monkey patch | Fake SDK hook test             | `llm.request`, `llm.error`                                                   |
 | LiteLLM                        | Experimental       | SDK method hook / monkey patch | Fake SDK hook test             | `llm.request`, `llm.error`                                                   |
+| Ollama Python SDK              | Experimental       | SDK method hook / monkey patch | Fake SDK hook test             | `llm.request`, `llm.error`                                                   |
 | MCP Python SDK                 | Experimental       | Client/session hook            | Fake `ClientSession` hook test | `mcp.tool_call.requested`, `mcp.tool_call.completed`, `mcp.tool_call.failed` |
 | OpenAI Agents SDK | Experimental | Runner hook / trace processor helper | Real SDK import/patch smoke test; invalid API key error-path test | `agent.run.*`, `agent.step.*`, `tool_call.*`, `llm.*` |
 | LangChain | Experimental | Callback handler | Real `CallbackManager` smoke test | `llm.*`, `tool_call.*`, `agent.step.*`, `agent.decision` |
 | LangGraph | Experimental | Stream wrapper / event stream integration | Real `StateGraph` stream smoke test | `agent.run.*`, `agent.step.*` |
 | LlamaIndex / RAG | Experimental | `register(..., rag={...})` / `instrument_rag()` / wrapper helpers | Fake component tests; `register(..., rag={...})` smoke test | `retrieval.*`, `embedding.*`, `rag.query.*` |
+| Langflow | Example | Custom component helper / LangChain callback reuse / SDK hooks | Compile smoke test; local custom component smoke test | `llm.*`, `tool_call.*`, `mcp.tool_call.*`, `retrieval.*`, `agent.step.*` |
 | Built-in mock MCP client | Tested | Runtime hook example | Unit test | `mcp.tool_call.requested`, `mcp.tool_call.completed`, `mcp.tool_call.failed` |
 | PromptOps / Agent examples     | Tested as examples | Runtime hook example           | Unit test                      | `agent.decision`, `promptops.run.completed`                                  |
 | Built-in Ollama example client | Example            | Runtime hook example           | Example client hook            | `llm.request`, `llm.error`                                                   |
@@ -61,11 +78,13 @@ Senda-Argus Hooks separates low-level SDK hooks from framework integrations.
 | OpenAI SDK | Experimental | SDK method hook / monkey patch | v0.2.0 | Captures `llm.request` and `llm.error` where supported |
 | Anthropic SDK | Experimental | SDK method hook / monkey patch | v0.2.0 | Captures `llm.request` and `llm.error` where supported |
 | LiteLLM | Experimental | SDK method hook / monkey patch | v0.2.0 | Wrapper SDKs may also invoke lower-level provider SDKs |
+| Ollama Python SDK | Experimental | SDK method hook / monkey patch | v0.5.0 | Captures native `ollama.chat(...)` and `ollama.Client.chat(...)` calls; install optional `ollama` package separately |
 | MCP Python SDK | Experimental | Client/session hook | v0.2.0 | Captures MCP `ClientSession.call_tool` lifecycle events |
 | OpenAI Agents SDK | Experimental | Runner/tracing integration | v0.3.0 | Captures agent run lifecycle events and tracing-style spans |
 | LangChain | Experimental | Callback handler | v0.3.0 | Captures LLM, tool, chain, and agent callback events |
 | LangGraph | Experimental | Stream wrapper / event stream integration | v0.3.0 | Captures graph run and step events from streamed execution |
 | LlamaIndex / RAG | Experimental | `register(..., rag={...})` / `instrument_rag()` / wrapper helpers | v0.4.0 | Captures retrieval, embedding, and query lifecycle events |
+| Langflow | Example | Custom component helper / LangChain callback reuse / SDK hooks | v0.5.0 example | Use `examples/langflow/` to monitor Langflow-based agent, RAG, and MCP workflows |
 | Built-in mock MCP client | Tested | Runtime hook example | v0.2.0 | Used for local tests and smoke tests |
 | PromptOps examples | Tested as examples | Runtime hook example | v0.2.0 | Used for local tests and smoke tests |
 | Built-in Ollama example client | Example | Runtime hook example | v0.2.0 | Useful for local error-path checks |
@@ -74,6 +93,133 @@ Real API success-path tests for OpenAI, Anthropic, and LiteLLM require valid pro
 
 When multiple SDK hooks are enabled at the same time, wrapper SDKs such as LiteLLM may also call lower-level provider SDKs. In that case, multiple events may be emitted for a single application-level request. Disable lower-level hooks if you only want wrapper-level events.
 
+
+## Ollama Python SDK hook
+
+Senda-Argus Hooks supports the official Ollama Python SDK as an optional instrumentor. The `ollama` package is not a required dependency of the base installation. Install it only when you need local Ollama SDK tracing:
+
+```bash
+pip install ollama
+# or
+pip install 'senda-argus-hooks[ollama]'
+```
+
+Supported in v0.5.0:
+
+* `ollama.chat(...)`
+* `ollama.Client.chat(...)`
+
+Example:
+
+```python
+import ollama
+from senda_argus_hooks import register, flush, shutdown
+
+register(
+    project="ollama-local-test",
+    environment="local",
+    auto_instrument=True,
+    exporters=[{"type": "jsonl", "path": "./logs/ollama-events.jsonl"}],
+    capture_prompt=False,
+    capture_response=False,
+    redact=True,
+)
+
+try:
+    client = ollama.Client(host="http://127.0.0.1:11434")
+    client.chat(
+        model="argus-qwen25-14b-toolplan:latest",
+        messages=[{"role": "user", "content": "Why is tool-call logging important?"}],
+    )
+finally:
+    flush()
+    shutdown()
+```
+
+Current limitations:
+
+* Streaming calls are recorded as request/error events and successful returned stream objects are not expanded into per-chunk events.
+* `ollama.AsyncClient`, `generate()`, and `embeddings()` are planned for a future release.
+
+Local verification command:
+
+```bash
+mkdir -p logs
+export OLLAMA_BASE_URL="http://127.0.0.1:11434"
+export OLLAMA_MODEL="argus-qwen25-14b-toolplan:latest"
+export ARGUS_EXPORT_PATH="./logs/langflow-events.jsonl"
+
+python examples/ollama_sdk_basic.py
+senda-hooks validate ./logs/langflow-events.jsonl
+senda-hooks inspect ./logs/langflow-events.jsonl --summary
+```
+
+Expected summary:
+
+```json
+{
+  "count": 1,
+  "event_types": {
+    "llm.request": 1
+  }
+}
+```
+
+## Langflow example integration
+
+Langflow support is provided as an example integration under `examples/langflow/`.
+
+Langflow workflows may combine LLM providers, LangChain-compatible components, LangGraph-style agent flows, RAG retrievers, MCP tools, and custom Python components. Senda-Argus Hooks can be registered near the beginning of a Langflow flow to collect normalized audit events from these execution paths where hooks and callbacks are available.
+
+Recommended approaches:
+
+* Add `examples/langflow/custom_component_senda_argus_register.py` as a Langflow custom component.
+* Use `senda_argus_hooks.integrations.langflow.register_langflow_hooks()` from a Python/custom component.
+* Use `senda_argus_hooks.integrations.langflow.langflow_callback_handler()` for LangChain-compatible Langflow components that accept callbacks.
+* Enable MCP hooks when the Langflow flow connects to external MCP servers.
+* For guaranteed Ollama SDK-level logging, call `ollama.chat(...)` or `ollama.Client.chat(...)` from a Langflow custom component after registering hooks.
+
+Default privacy posture for the example is prompt/response capture disabled, tool argument capture enabled, result-body capture disabled, and redaction enabled.
+
+### Verified Langflow + Ollama SDK path
+
+The v0.5.0 local smoke test verified this path:
+
+```text
+Langflow custom component
+  -> senda_argus_hooks.register(auto_instrument=True)
+  -> ollama.Client.chat(model="argus-qwen25-14b-toolplan:latest")
+  -> JSONL exporter
+  -> senda-hooks validate / inspect
+```
+
+Observed event characteristics:
+
+* `event_type`: `llm.request`
+* `source.sdk`: `ollama`
+* `source.operation`: `Client.chat`
+* `model`: `argus-qwen25-14b-toolplan:latest`
+* `security.redacted`: `true`
+* raw prompt and response bodies disabled by default
+* prompt, message, argument, and response hashes emitted for correlation
+
+### Important Langflow note
+
+Langflow built-in nodes may use internal HTTP clients or framework-specific wrappers instead of the provider SDK directly. SDK-level hooks only observe calls that pass through supported SDK surfaces such as `ollama.Client.chat(...)`, OpenAI SDK methods, Anthropic SDK methods, LiteLLM methods, MCP client methods, or supported callback integrations.
+
+If a built-in Langflow Ollama node does not emit events, use one of these approaches:
+
+* call the Ollama SDK from a Langflow custom component
+* pass the Senda-Argus LangChain callback handler to LangChain-compatible components
+* add a future HTTP/client-level instrumentor for the specific built-in component implementation
+
+## Agentic AI security monitoring
+
+AI workflow platforms can become high-value attack surfaces because they often hold LLM provider keys, cloud credentials, database credentials, MCP connection details, internal tool access, and RAG data source access.
+
+Senda-Argus Hooks is intended to help monitor not only prompt and response activity, but also tool execution, MCP calls, RAG retrieval, retries, and workflow behavior across agentic AI applications. This helps investigate suspicious patterns such as unexpected tool usage, calls to unapproved MCP servers, unusual RAG source access, repeated failure-and-retry behavior, and potentially destructive database or system operations.
+
+See `docs/use-cases/agentic-ransomware-monitoring.md` for the recommended detection and monitoring model.
 
 ## Tested SDK versions
 
@@ -91,6 +237,8 @@ The following versions were installed in a clean virtual environment and used fo
 | LangChain | Installed in real SDK smoke test | Real `CallbackManager` smoke test; verified `llm.request.started`, `llm.request`, `tool_call.requested`, `tool_call.completed` | Experimental |
 | LangGraph | Installed in real SDK smoke test | Real `StateGraph.stream` wrapper smoke test; verified `agent.run.started`, `agent.step.completed`, `agent.run.completed` | Experimental |
 | LlamaIndex / RAG | Optional / wrapper based | `register(..., rag={...})` smoke test; verified `retrieval.requested`, `retrieval.completed`, `embedding.requested`, `embedding.completed`, `rag.query.started`, `rag.query.completed`; `senda-hooks retrievals` verified | Experimental |
+| Ollama Python SDK | 0.6.2 local smoke test / optional | Fake SDK hook test for `ollama.chat` and `Client.chat`; local `argus-qwen25-14b-toolplan:latest` smoke test verified `llm.request` | Experimental |
+| Langflow | Local macOS arm64 Python 3.12 smoke test | Custom component using `ollama.Client.chat(...)`; verified JSONL `llm.request` and CLI validation | Example |
 | Built-in mock MCP client | packaged | Unit test and hook smoke test | Tested |
 | PromptOps examples | packaged | Unit test and hook smoke test | Tested |
 | Built-in Ollama example client | packaged | Error-path hook smoke test | Example |
@@ -852,6 +1000,8 @@ The following smoke tests were verified in a clean virtual environment.
 | LangGraph | Passed with real `StateGraph.stream` wrapper | `agent.run.started`, `agent.step.completed`, `agent.run.completed` |
 | RAG instrumentation | Passed with `register(..., rag={...})` component instrumentation | `retrieval.requested`, `retrieval.completed`, `embedding.requested`, `embedding.completed`, `rag.query.started`, `rag.query.completed` |
 | RAG CLI summary | Passed with `senda-hooks retrievals` | Retriever and embedding summary output |
+| Ollama Python SDK | Passed with local Ollama model `argus-qwen25-14b-toolplan:latest` | `llm.request`, `source.sdk=ollama`, `source.operation=Client.chat` |
+| Langflow custom component | Passed on macOS arm64 Python 3.12 with Langflow custom component calling Ollama SDK | JSONL `llm.request`; `senda-hooks validate` returned `valid: true` |
 
 
 ## Development
@@ -905,13 +1055,14 @@ The test suite covers:
 * generic `tool_call.*` events for non-MCP tools
 * generic `retrieval.*`, `embedding.*`, and `rag.query.*` events for RAG flows
 * PromptOps and built-in mock runtime events
+* fake Ollama Python SDK hook behavior
 
 Tests do not require external API keys.
 
-The v0.4.0 test suite is expected to pass with:
+The v0.5.0 test suite is expected to pass with:
 
 ```text
-31 passed
+31 passed, 2 skipped
 ```
 
 ## Release verification
@@ -937,12 +1088,80 @@ python3 -m venv .venv
 source .venv/bin/activate
 
 python -m pip install --upgrade pip
-python -m pip install /path/to/senda_argus_hooks-0.4.0-py3-none-any.whl
+python -m pip install /path/to/senda_argus_hooks-0.5.0-py3-none-any.whl
 
 senda-hooks --help
 ```
 
 Then run the smoke tests above.
+
+### macOS Langflow + Ollama verification
+
+For Langflow verification on Apple Silicon macOS, use an arm64 Python environment. Mixing Intel/Rosetta Homebrew under `/usr/local` with arm64 Command Line Tools can cause native dependency build failures for packages such as `bottleneck` or `fastparquet`.
+
+Recommended environment checks:
+
+```bash
+uname -m
+which brew
+brew --prefix
+python -c "import platform, sys; print(platform.machine()); print(sys.executable)"
+clang --version
+```
+
+Expected values on Apple Silicon:
+
+```text
+arm64
+/opt/homebrew/bin/brew
+/opt/homebrew
+arm64
+Apple clang ... Target: arm64-apple-darwin...
+```
+
+Install and run Langflow verification:
+
+```bash
+cd /tmp
+rm -rf senda-argus-langflow-test
+mkdir -p senda-argus-langflow-test
+cd senda-argus-langflow-test
+
+/opt/homebrew/bin/python3.12 -m venv .venv
+source .venv/bin/activate
+
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install -e /path/to/senda_argus_hooks
+python -m pip install ollama langflow
+
+mkdir -p components/argus logs
+cp /path/to/senda_argus_hooks/examples/langflow/custom_component_senda_argus_register.py \
+  components/argus/senda_argus_register.py
+
+export PYTHONPATH="/path/to/senda_argus_hooks/src:$PYTHONPATH"
+export LANGFLOW_COMPONENTS_PATH="$PWD/components"
+export ARGUS_EXPORT_PATH="$PWD/logs/langflow-events.jsonl"
+
+langflow run --host 127.0.0.1 --port 7860
+```
+
+Then create or load a Langflow custom component that calls `ollama.Client.chat(...)` after registering hooks. Validate the result:
+
+```bash
+senda-hooks validate ./logs/langflow-events.jsonl
+senda-hooks inspect ./logs/langflow-events.jsonl --summary
+```
+
+Expected summary for the minimal Ollama SDK smoke test:
+
+```json
+{
+  "count": 1,
+  "event_types": {
+    "llm.request": 1
+  }
+}
+```
 
 ## Security and privacy notes
 
@@ -1029,6 +1248,54 @@ Check that:
 * `auto_instrument=True` is enabled
 * the SDK method being used is one of the hooked methods
 * the application imports and registers hooks before creating or using SDK clients
+
+### Langflow event file is empty
+
+If `logs/langflow-events.jsonl` exists but has zero events, check that:
+
+* the Senda-Argus registration component or helper actually ran in the executed flow
+* the exporter path is absolute or points to the expected Langflow working directory
+* the flow invoked a supported SDK method after registration
+* the built-in Langflow node is not bypassing SDK-level hooks by using an internal HTTP client
+
+For Ollama verification, the confirmed path is a Langflow custom component that calls `ollama.Client.chat(...)`.
+
+### Langflow built-in Ollama node does not emit events
+
+The built-in Langflow Ollama node may use an internal HTTP client or framework wrapper rather than the official Ollama Python SDK. In that case, the Ollama SDK instrumentor will not see the request.
+
+Use one of these alternatives:
+
+* call `ollama.chat(...)` or `ollama.Client.chat(...)` from a Langflow custom component
+* use OpenAI-compatible Ollama endpoints through a supported OpenAI SDK hook where appropriate
+* add a dedicated instrumentor for the specific internal client used by that Langflow component
+
+### macOS native dependency build errors
+
+If `pip install langflow` fails while building packages such as `bottleneck` or `fastparquet`, check for architecture mismatches. On Apple Silicon, avoid mixing `/usr/local` Intel/Rosetta Homebrew with arm64 Command Line Tools.
+
+Useful checks:
+
+```bash
+uname -m
+which brew
+brew --prefix
+python -c "import platform, sys; print(platform.machine()); print(sys.executable)"
+clang --version
+xcode-select -p
+```
+
+Expected Apple Silicon values include `/opt/homebrew`, `platform.machine() == "arm64"`, and `clang` targeting `arm64-apple-darwin`.
+
+If Command Line Tools are broken, reinstall them:
+
+```bash
+sudo rm -rf /Library/Developer/CommandLineTools
+softwareupdate --list
+sudo softwareupdate --install "Command Line Tools for Xcode <version from softwareupdate>"
+sudo xcode-select --switch /Library/Developer/CommandLineTools
+clang --version
+```
 
 ## License
 
