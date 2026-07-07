@@ -10,7 +10,7 @@ class PromptOpsClient:
     instrumentor that wraps these methods.
     """
 
-    def agent_decision(self, *, task_id: str | None = None, agent_id: str | None = None, selected_tool: str | None = None, reason: str | None = None, alternatives: list[str] | None = None, risk_level: str | None = None, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    def agent_decision(self, *, task_id: str | None = None, agent_id: str | None = None, selected_tool: str | None = None, reason: str | None = None, alternatives: list[str | dict[str, Any]] | None = None, risk_level: str | None = None, extra: dict[str, Any] | None = None) -> dict[str, Any]:
         payload = {
             "task_id": task_id,
             "agent_id": agent_id,

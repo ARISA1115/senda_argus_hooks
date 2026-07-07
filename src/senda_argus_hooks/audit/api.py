@@ -11,7 +11,7 @@ def event(event_type: str, data: dict[str, Any] | None = None, source: dict[str,
     return emit_event(event_type, data=data or {}, source=source or {"component": "custom"}, status=status)
 
 
-def agent_decision(*, task_id: str | None = None, agent_id: str | None = None, selected_tool: str | None = None, reason: str | None = None, alternatives: list[str] | None = None, risk_level: str | None = None, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+def agent_decision(*, task_id: str | None = None, agent_id: str | None = None, selected_tool: str | None = None, reason: str | None = None, alternatives: list[str | dict[str, Any]] | None = None, risk_level: str | None = None, extra: dict[str, Any] | None = None) -> dict[str, Any]:
     data = {
         "task_id": task_id,
         "agent_id": agent_id,
