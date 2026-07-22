@@ -13,6 +13,16 @@ class MockMCPClient:
     def __init__(self, tools: Mapping[str, Callable[..., Any]], *, server: str = "mock_mcp"):
         self.tools = dict(tools)
         self.server = server
+        try:
+            from senda_argus_hooks.core.purpose_registry import register_mcp_tool_source
+
+            for tool_name in self.tools:
+                register_mcp_tool_source(
+                    tool_name=tool_name,
+                    mcp_server_name=server,
+                )
+        except Exception:
+            pass
 
     def call_tool(self, tool: str, arguments: dict[str, Any] | None = None, *, capability: str | None = None) -> Any:
         args = arguments or {}

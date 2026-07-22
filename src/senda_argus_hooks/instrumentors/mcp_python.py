@@ -4,7 +4,7 @@ import time
 from typing import Any, Callable
 
 from senda_argus_hooks.core.hashing import sha256_value
-from senda_argus_hooks.core.identity import derive_mcp_profile_id, derive_purpose_id, normalize_url
+from senda_argus_hooks.core.identity import data_source_hash, derive_mcp_profile_id, derive_purpose_id, mcp_data_source_profile, normalize_url
 from senda_argus_hooks.core.runtime import emit_event, get_config
 from .base import BaseInstrumentor
 
@@ -112,7 +112,9 @@ def _mcp_metadata(obj, operation: str, args, kwargs) -> dict[str, Any]:
     capability = kwargs.get("capability") or getattr(obj, "capability", None)
     args_hash = sha256_value(arguments)
     mcp_profile_id = derive_mcp_profile_id(mcp_server_name=server_name, mcp_server_url=server_url)
+    purpose_profile = mcp_data_source_profile(mcp_server_name=server_name, mcp_server_url=server_url, tool_name=str(tool_name), capability=capability)
     purpose_id = derive_purpose_id(mcp_server_name=server_name, mcp_server_url=server_url, tool_name=str(tool_name), capability=capability)
+    source_hash = data_source_hash(purpose_profile)
     meta = {
         "operation": operation,
         "server": server_name,
@@ -121,10 +123,13 @@ def _mcp_metadata(obj, operation: str, args, kwargs) -> dict[str, Any]:
         "capability": capability,
         "mcp_profile_id": mcp_profile_id,
         "purpose_id": purpose_id,
+        "purpose_source": "mcp_data_source_hash",
+        "purpose_profile": purpose_profile,
+        "data_source_hash": source_hash,
         "arguments_hash": args_hash,
     }
     if cfg.capture_arguments:
-        meta["arguments"] = arguments
+        meta["arguments"] = {**arguments, "purpose_id": purpose_id, "data_source_hash": source_hash}
     return meta
 
 

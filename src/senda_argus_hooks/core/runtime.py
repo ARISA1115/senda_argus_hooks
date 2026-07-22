@@ -83,7 +83,7 @@ def emit_event(
         run_id=get_run_id() or _config.run_id,
         turn_id=get_turn_id() or _config.turn_id,
         agent_id=effective_agent_id(source, agent_id),
-        purpose_id=purpose_id or get_purpose_id() or _config.purpose_id,
+        purpose_id=purpose_id or get_purpose_id(),
         runtime=_runtime_metadata,
     ).to_dict()
     if _config.redact:

@@ -5,8 +5,9 @@ import time
 from typing import Any, Callable
 
 from senda_argus_hooks.core.hashing import sha256_value
-from senda_argus_hooks.core.identity import derive_mcp_profile_id, derive_purpose_id, normalize_url
+from senda_argus_hooks.core.identity import data_source_hash, derive_mcp_profile_id, derive_purpose_id, mcp_data_source_profile, normalize_url
 from senda_argus_hooks.core.runtime import emit_event, get_config
+from senda_argus_hooks.core.purpose_registry import register_mcp_tool_source, selected_tool_purpose
 from .base import BaseInstrumentor
 
 
@@ -45,7 +46,7 @@ class ArgusSDKInstrumentor(BaseInstrumentor):
         def wrapper(obj, *args, **kwargs):
             cfg = get_config()
             start = time.perf_counter()
-            input_payload = _input_payload(args, kwargs, cfg.capture_prompt)
+            input_payload = _input_payload(args, kwargs, cfg.capture_prompt, cfg.capture_hash)
             provider = "ollama" if operation.startswith("ollama") else "mock"
             model = kwargs.get("model") or getattr(obj, "model", provider)
             purpose = kwargs.get("purpose") or _purpose_from_args(args) or ("refiner" if "refine" in operation else "answer")
@@ -53,6 +54,7 @@ class ArgusSDKInstrumentor(BaseInstrumentor):
             try:
                 response = original(obj, *args, **kwargs)
                 latency_ms = int((time.perf_counter() - start) * 1000)
+                output_payload = _output_payload(response, cfg.capture_response, cfg.capture_hash)
                 if isinstance(response, dict):
                     model = response.get("model") or model
                     purpose = response.get("purpose") or purpose
@@ -67,7 +69,6 @@ class ArgusSDKInstrumentor(BaseInstrumentor):
                             data={"senda_argus_report": report, "steering_detected": steering_detected},
                             status="success",
                         )
-                output_payload = _safe_response(response) if cfg.capture_response else {"response_hash": sha256_value(_safe_response(response))}
                 llm_data = {"provider": provider, "operation": operation, "purpose": purpose, "model": model, "input": input_payload, "output": output_payload}
                 if messages_hash:
                     llm_data["messages_hash"] = messages_hash
@@ -104,9 +105,17 @@ class ArgusSDKInstrumentor(BaseInstrumentor):
             capability = kwargs.get("capability")
             server = getattr(obj, "server", "unknown")
             server_url = getattr(obj, "url", None) or getattr(obj, "base_url", None) or getattr(obj, "server_url", None)
+            purpose_profile = mcp_data_source_profile(mcp_server_name=server, mcp_server_url=server_url, tool_name=tool, capability=capability)
             purpose_id = derive_purpose_id(mcp_server_name=server, mcp_server_url=server_url, tool_name=tool, capability=capability)
             mcp_profile_id = derive_mcp_profile_id(mcp_server_name=server, mcp_server_url=server_url, tools=list(getattr(obj, "tools", {}).keys()) if hasattr(obj, "tools") else [])
-            args_payload = {"tool": tool, "arguments": arguments, "capability": capability}
+            register_mcp_tool_source(
+                tool_name=tool,
+                mcp_server_name=server,
+                mcp_server_url=server_url,
+                capability=capability,
+            )
+            raw_args_payload = {"tool": tool, "arguments": arguments, "capability": capability}
+            args_payload = {**raw_args_payload, "purpose_id": purpose_id, "data_source_hash": data_source_hash(purpose_profile)}
             base_mcp = {
                 "server": server,
                 "server_url": normalize_url(str(server_url)) if server_url else None,
@@ -114,8 +123,11 @@ class ArgusSDKInstrumentor(BaseInstrumentor):
                 "tool": tool,
                 "capability": capability,
                 "purpose_id": purpose_id,
+                "purpose_source": "mcp_data_source_hash",
+                "purpose_profile": purpose_profile,
+                "data_source_hash": data_source_hash(purpose_profile),
                 "mcp_profile_id": mcp_profile_id,
-                "arguments_hash": sha256_value(args_payload),
+                "arguments_hash": sha256_value(raw_args_payload),
             }
             if cfg.capture_arguments:
                 base_mcp["arguments"] = args_payload
@@ -167,7 +179,17 @@ class ArgusSDKInstrumentor(BaseInstrumentor):
                 latency_ms = int((time.perf_counter() - start) * 1000)
                 event_type = operation
                 source = {"component": "instrumentor", "sdk": "senda_argus_hooks.sdk", "operation": operation}
-                emit_event(event_type, source=source, data=response if isinstance(response, dict) else {"result": response}, status="success", latency_ms=latency_ms)
+                data = dict(response) if isinstance(response, dict) else {"result": response}
+                if event_type == "agent.decision" and isinstance(data, dict):
+                    selected_tool = data.get("selected_tool")
+                    purpose_meta = selected_tool_purpose(
+                        selected_tool,
+                        default_capability=data.get("capability") or data.get("selected_tool_capability") or "security_intelligence",
+                    )
+                    if purpose_meta:
+                        for key, value in purpose_meta.items():
+                            data.setdefault(key, value)
+                emit_event(event_type, source=source, data=data, status="success", latency_ms=latency_ms)
                 return response
             except Exception as exc:
                 latency_ms = int((time.perf_counter() - start) * 1000)
@@ -182,10 +204,136 @@ class ArgusSDKInstrumentor(BaseInstrumentor):
         return True
 
 
-def _input_payload(args, kwargs, capture: bool) -> dict[str, Any]:
+def _input_payload(args, kwargs, capture: bool, capture_hash: bool = True) -> dict[str, Any]:
     payload = {"args": args, "kwargs": kwargs}
-    return payload if capture else {"input_hash": sha256_value(payload)}
+    metadata = _llm_input_hash_metadata(args, kwargs) if capture_hash else {}
+    if capture:
+        return {**payload, **metadata}
+    return {"input_hash": sha256_value(payload), **metadata}
 
+
+def _llm_input_hash_metadata(args, kwargs) -> dict[str, Any]:
+    messages = _extract_messages(args, kwargs)
+    metadata: dict[str, Any] = {
+        "args_hash": sha256_value(args),
+        "kwargs_hash": sha256_value(kwargs),
+    }
+    if messages is not None:
+        message_hashes = []
+        for index, message in enumerate(messages):
+            if isinstance(message, dict):
+                role = message.get("role")
+                content = message.get("content")
+            else:
+                role = getattr(message, "role", None)
+                content = getattr(message, "content", None)
+            item = {
+                "index": index,
+                "role": role,
+                "content_hash": sha256_value(content),
+            }
+            if isinstance(content, str):
+                item["content_length"] = len(content)
+            message_hashes.append({k: v for k, v in item.items() if v is not None})
+        metadata.update(
+            {
+                "messages_count": len(messages),
+                "messages_hash": sha256_value(messages),
+                "message_content_hashes": message_hashes,
+            }
+        )
+    return metadata
+
+
+def _extract_messages(args, kwargs) -> list[Any] | None:
+    messages = kwargs.get("messages")
+    if messages is None and args:
+        first = args[0]
+        if isinstance(first, list):
+            messages = first
+        elif isinstance(first, dict):
+            messages = first.get("messages") or first.get("request_body", {}).get("messages")
+    if messages is None:
+        request_body = kwargs.get("request_body")
+        if isinstance(request_body, dict):
+            messages = request_body.get("messages")
+    if isinstance(messages, tuple):
+        messages = list(messages)
+    return messages if isinstance(messages, list) else None
+
+
+
+def _output_payload(response: Any, capture: bool, capture_hash: bool = True) -> dict[str, Any]:
+    safe = _safe_response(response)
+    metadata = _llm_output_hash_metadata(safe) if capture_hash else {}
+    if capture:
+        if isinstance(safe, dict):
+            return {**safe, **metadata}
+        return {"response": safe, **metadata}
+    payload = {"response_hash": sha256_value(safe), **metadata}
+    structured = _extract_senda_argus_content(safe)
+    if structured is not None:
+        payload["senda_argus_content"] = structured
+        payload["senda_argus_content_hash"] = sha256_value(structured)
+    return payload
+
+
+def _llm_output_hash_metadata(safe_response: Any) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    content = _extract_message_content(safe_response)
+    if content is not None:
+        metadata["message_content_hash"] = sha256_value(content)
+        if isinstance(content, str):
+            metadata["message_content_length"] = len(content)
+    return metadata
+
+
+def _extract_message_content(safe_response: Any) -> Any:
+    if isinstance(safe_response, dict):
+        message = safe_response.get("message")
+        if isinstance(message, dict) and "content" in message:
+            return message.get("content")
+        choices = safe_response.get("choices")
+        if isinstance(choices, list) and choices:
+            msg = choices[0].get("message") if isinstance(choices[0], dict) else None
+            if isinstance(msg, dict) and "content" in msg:
+                return msg.get("content")
+        if "content" in safe_response:
+            return safe_response.get("content")
+    return None
+
+
+def _extract_senda_argus_content(safe_response: Any) -> dict[str, Any] | None:
+    content = _extract_message_content(safe_response)
+    if not isinstance(content, str):
+        return None
+    try:
+        parsed = json.loads(content)
+    except Exception:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    sac = parsed.get("senda_argus_content")
+    if not isinstance(sac, dict):
+        return None
+    selected_tool = sac.get("selected_tool")
+    safe_selected_tool = None
+    if isinstance(selected_tool, dict):
+        safe_selected_tool = {
+            "name": selected_tool.get("name"),
+            "arguments_hash": sha256_value(selected_tool.get("arguments") or {}),
+        }
+        if isinstance(selected_tool.get("arguments"), dict):
+            safe_selected_tool["arguments_count"] = len(selected_tool.get("arguments", {}))
+    safe_content = {
+        "task_summary": sac.get("task_summary"),
+        "reason_summary": sac.get("reason_summary"),
+        "selected_tool": safe_selected_tool,
+        "planned_tool_call_count": sac.get("planned_tool_call_count"),
+        "uncertainty": sac.get("uncertainty"),
+        "missing_information_count": len(sac.get("missing_information") or []) if isinstance(sac.get("missing_information"), list) else None,
+    }
+    return {k: v for k, v in safe_content.items() if v is not None}
 
 def _purpose_from_args(args) -> str | None:
     if args and isinstance(args[0], dict):

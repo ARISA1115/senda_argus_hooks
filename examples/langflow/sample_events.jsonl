@@ -1,0 +1,3 @@
+{"schema_version":"0.1","event_type":"llm.request.started","source":{"component":"integration","sdk":"langflow","operation":"on_llm_start"},"status":"start","data":{"llm":{"input_hash":"sha256:example"}}}
+{"schema_version":"0.1","event_type":"tool_call.requested","source":{"component":"integration","sdk":"langflow","operation":"on_tool_start"},"status":"start","data":{"tool":{"framework":"langflow","tool_name":"db_query","tool_type":"function","purpose_id":"tool:example","arguments_hash":"sha256:example"}}}
+{"schema_version":"0.1","event_type":"mcp.tool_call.requested","source":{"component":"instrumentor","sdk":"mcp_python","operation":"call_tool"},"status":"start","data":{"mcp":{"server_name":"internal-mcp","tool_name":"lookup_ioc","arguments_hash":"sha256:example"}}}

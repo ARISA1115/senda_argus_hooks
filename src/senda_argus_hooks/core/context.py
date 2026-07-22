@@ -10,10 +10,10 @@ from uuid import uuid4
 class RuntimeConfig:
     project: str = "default"
     environment: str = "dev"
-    capture_prompt: bool = True
-    capture_response: bool = True
-    capture_arguments: bool = True
-    capture_result: bool = True
+    capture_prompt: bool = False
+    capture_response: bool = False
+    capture_arguments: bool = False
+    capture_result: bool = False
     capture_hash: bool = True
     redact: bool = True
     actor: dict[str, Any] = field(default_factory=dict)

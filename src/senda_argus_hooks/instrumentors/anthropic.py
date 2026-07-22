@@ -41,7 +41,7 @@ class AnthropicInstrumentor(BaseInstrumentor):
         def wrapper(obj, *args, **kwargs):
             cfg = get_config()
             start = time.perf_counter()
-            input_payload = {"args": args, "kwargs": kwargs} if cfg.capture_prompt else {"input_hash": sha256_value({"args": args, "kwargs": kwargs})}
+            input_payload = _input_payload(args, kwargs, cfg.capture_prompt, cfg.capture_hash)
             try:
                 response = original(obj, *args, **kwargs)
                 latency_ms = int((time.perf_counter() - start) * 1000)
@@ -71,6 +71,64 @@ class AnthropicInstrumentor(BaseInstrumentor):
         self._patches = []
         return True
 
+
+
+def _input_payload(args, kwargs, capture: bool, capture_hash: bool = True) -> dict[str, Any]:
+    payload = {"args": args, "kwargs": kwargs}
+    metadata = _llm_input_hash_metadata(args, kwargs) if capture_hash else {}
+    if capture:
+        return {**payload, **metadata}
+    return {"input_hash": sha256_value(payload), **metadata}
+
+
+def _llm_input_hash_metadata(args, kwargs) -> dict[str, Any]:
+    messages = _extract_messages(args, kwargs)
+    metadata: dict[str, Any] = {
+        "args_hash": sha256_value(args),
+        "kwargs_hash": sha256_value(kwargs),
+    }
+    if messages is not None:
+        message_hashes = []
+        for index, message in enumerate(messages):
+            if isinstance(message, dict):
+                role = message.get("role")
+                content = message.get("content")
+            else:
+                role = getattr(message, "role", None)
+                content = getattr(message, "content", None)
+            item = {
+                "index": index,
+                "role": role,
+                "content_hash": sha256_value(content),
+            }
+            if isinstance(content, str):
+                item["content_length"] = len(content)
+            message_hashes.append({k: v for k, v in item.items() if v is not None})
+        metadata.update(
+            {
+                "messages_count": len(messages),
+                "messages_hash": sha256_value(messages),
+                "message_content_hashes": message_hashes,
+            }
+        )
+    return metadata
+
+
+def _extract_messages(args, kwargs) -> list[Any] | None:
+    messages = kwargs.get("messages")
+    if messages is None and args:
+        first = args[0]
+        if isinstance(first, list):
+            messages = first
+        elif isinstance(first, dict):
+            messages = first.get("messages") or first.get("request_body", {}).get("messages")
+    if messages is None:
+        request_body = kwargs.get("request_body")
+        if isinstance(request_body, dict):
+            messages = request_body.get("messages")
+    if isinstance(messages, tuple):
+        messages = list(messages)
+    return messages if isinstance(messages, list) else None
 
 def _safe_response(response: Any) -> Any:
     for attr in ("model_dump", "dict"):
