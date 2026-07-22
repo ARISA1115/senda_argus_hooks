@@ -8,7 +8,7 @@ from senda_argus_hooks.core.context import RuntimeConfig
 from senda_argus_hooks.core.queue import EventBus
 from senda_argus_hooks.core.runtime import configure, get_bus
 from senda_argus_hooks.exporters.registry import create_exporter
-from senda_argus_hooks.instrumentors import AnthropicInstrumentor, ArgusSDKInstrumentor, LiteLLMInstrumentor, MCPPythonInstrumentor, OllamaInstrumentor, OpenAIInstrumentor
+from senda_argus_hooks.instrumentors import AnthropicInstrumentor, ArgusSDKInstrumentor, BedrockInstrumentor, LiteLLMInstrumentor, MCPPythonInstrumentor, OllamaInstrumentor, OpenAIInstrumentor
 from senda_argus_hooks.integrations.openai_agents import OpenAIAgentsInstrumentor
 
 _ACTIVE_INSTRUMENTORS: list[Any] = []
@@ -25,6 +25,7 @@ def register(
     instrument_anthropic: bool = True,
     instrument_litellm: bool = True,
     instrument_ollama: bool = True,
+    instrument_bedrock: bool = True,
     instrument_mcp: bool = True,
     instrument_argus_sdk: bool = True,
     instrument_openai_agents: bool = True,
@@ -85,6 +86,8 @@ def register(
             installed["litellm"] = _activate(LiteLLMInstrumentor())
         if instrument_ollama:
             installed["ollama"] = _activate(OllamaInstrumentor())
+        if instrument_bedrock:
+            installed["bedrock"] = _activate(BedrockInstrumentor())
         if instrument_mcp:
             installed["mcp_python"] = _activate(MCPPythonInstrumentor())
         if instrument_argus_sdk:
