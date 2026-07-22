@@ -71,18 +71,21 @@ def _register(path: Path):
     )
 
 
-def test_invoke_model_emits_llm_request_with_usage_and_response_model(tmp_path, monkeypatch):
+def test_invoke_model_emits_llm_request_with_usage_and_swap_response_model(tmp_path, monkeypatch):
     _install_fake_botocore(monkeypatch)
     path = tmp_path / "events.jsonl"
     result = _register(path)
     assert result["instrumentors"]["bedrock"] is True
 
+    # リクエストは sonnet、応答は haiku を自己申告 = 実際のすり替えのみ送出する
     body = json.dumps({"model": "claude-3-haiku-20240307", "usage": {"input_tokens": 12, "output_tokens": 7}}).encode()
     client = _BaseClient(
         "bedrock-runtime",
         {"body": _StreamingBody(body, len(body)), "ResponseMetadata": {"HTTPHeaders": {}}},
     )
-    response = client._make_api_call("InvokeModel", {"modelId": "anthropic.claude-3-haiku", "body": b"{}"})
+    response = client._make_api_call(
+        "InvokeModel", {"modelId": "anthropic.claude-3-sonnet-20240229-v1:0", "body": b"{}"}
+    )
     # 観測がボディを消費しても呼び出し元は同内容を再度読める
     assert response["body"].read() == body
     shutdown()
@@ -90,10 +93,31 @@ def test_invoke_model_emits_llm_request_with_usage_and_response_model(tmp_path, 
     events = _read_events(path)
     llm_event = next(e for e in events if e["event_type"] == "llm.request")
     assert llm_event["source"]["sdk"] == "bedrock"
-    assert llm_event["data"]["llm"]["model"] == "anthropic.claude-3-haiku"
+    assert llm_event["data"]["llm"]["model"] == "anthropic.claude-3-sonnet-20240229-v1:0"
     assert llm_event["data"]["llm"]["response_model"] == "claude-3-haiku-20240307"
     assert llm_event["data"]["llm"]["usage"] == {"input_tokens": 12, "output_tokens": 7}
     assert "response_hash" in llm_event["data"]["llm"]["output"]
+
+
+def test_invoke_model_omits_response_model_for_healthy_anthropic_call(tmp_path, monkeypatch):
+    _install_fake_botocore(monkeypatch)
+    path = tmp_path / "events.jsonl"
+    _register(path)
+
+    # Bedrock 修飾 ID とネイティブ ID の表記差は偽陽性源のため送出しない
+    body = json.dumps({"model": "claude-3-sonnet-20240229"}).encode()
+    client = _BaseClient(
+        "bedrock-runtime",
+        {"body": _StreamingBody(body, len(body)), "ResponseMetadata": {"HTTPHeaders": {}}},
+    )
+    client._make_api_call(
+        "InvokeModel", {"modelId": "us.anthropic.claude-3-sonnet-20240229-v1:0", "body": b"{}"}
+    )
+    shutdown()
+
+    events = _read_events(path)
+    llm_event = next(e for e in events if e["event_type"] == "llm.request")
+    assert "response_model" not in llm_event["data"]["llm"]
 
 
 def test_invoke_model_prefers_header_token_counts(tmp_path, monkeypatch):
