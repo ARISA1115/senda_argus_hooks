@@ -5,6 +5,7 @@ from .mcp_python import MCPPythonInstrumentor
 from .argus_sdk import ArgusSDKInstrumentor
 from .ollama import OllamaInstrumentor
 from .bedrock import BedrockInstrumentor
+from .vertexai import VertexAIInstrumentor
 
 __all__ = [
     "OpenAIInstrumentor",
@@ -14,4 +15,5 @@ __all__ = [
     "ArgusSDKInstrumentor",
     "OllamaInstrumentor",
     "BedrockInstrumentor",
+    "VertexAIInstrumentor",
 ]
