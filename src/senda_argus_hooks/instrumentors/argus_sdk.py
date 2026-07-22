@@ -55,8 +55,12 @@ class ArgusSDKInstrumentor(BaseInstrumentor):
                 response = original(obj, *args, **kwargs)
                 latency_ms = int((time.perf_counter() - start) * 1000)
                 output_payload = _output_payload(response, cfg.capture_response, cfg.capture_hash)
+                # レスポンスが自己申告した実モデルは model を上書きせず response_model として
+                # 別フィールドで保持する。上書きするとリクエスト時に指定したモデルの情報が
+                # 失われ、Argus 側の ModelSwapRule がすり替えを検知できなくなる。
+                response_model = None
                 if isinstance(response, dict):
-                    model = response.get("model") or model
+                    response_model = response.get("model")
                     purpose = response.get("purpose") or purpose
                     report, actual_tools = _extract_senda_argus_report(response)
                     if report is not None:
@@ -75,6 +79,8 @@ class ArgusSDKInstrumentor(BaseInstrumentor):
                 usage = _extract_usage(response)
                 if usage:
                     llm_data["usage"] = usage
+                if isinstance(response_model, str) and response_model.strip():
+                    llm_data["response_model"] = response_model
                 emit_event(
                     "llm.request",
                     source={"component": "instrumentor", "sdk": "senda_argus_hooks.sdk", "provider": provider, "operation": operation},

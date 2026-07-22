@@ -31,11 +31,15 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
         self._starts: dict[str, float] = {}
         self._messages_hashes: dict[str, str] = {}
         self._tool_types: dict[str, str] = {}
+        self._requested_models: dict[str, str] = {}
 
     def on_llm_start(self, serialized: dict[str, Any], prompts: list[str], **kwargs: Any) -> None:
         run_id = _run_key(kwargs)
         self._starts[run_id] = time.perf_counter()
         self._messages_hashes[run_id] = sha256_value(prompts)
+        requested_model = _requested_model(serialized, kwargs)
+        if requested_model:
+            self._requested_models[run_id] = requested_model
         payload = {"serialized": serialized, "prompts": prompts, "kwargs": _safe_kwargs(kwargs)}
         emit_event(
             "llm.request.started",
@@ -48,6 +52,9 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
         run_id = _run_key(kwargs)
         self._starts[run_id] = time.perf_counter()
         self._messages_hashes[run_id] = sha256_value(messages)
+        requested_model = _requested_model(serialized, kwargs)
+        if requested_model:
+            self._requested_models[run_id] = requested_model
         payload = {"serialized": serialized, "messages": messages, "kwargs": _safe_kwargs(kwargs)}
         emit_event(
             "llm.request.started",
@@ -60,6 +67,7 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
         run_id = _run_key(kwargs)
         latency_ms = _latency_ms(self._starts.pop(run_id, None))
         messages_hash = self._messages_hashes.pop(run_id, None)
+        requested_model = self._requested_models.pop(run_id, None)
         usage = _extract_llm_usage(response)
         payload = _safe_value(response)
         llm_data = _payload_or_hash("output", payload, self._capture_response())
@@ -67,6 +75,13 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
             llm_data["messages_hash"] = messages_hash
         if usage:
             llm_data["usage"] = usage
+        # ModelSwapRule 用: リクエスト時に指定したモデルと、レスポンスが自己申告した
+        # 実モデルの両方を送出し、Argus 側でモデルすり替えを検知できるようにする。
+        if requested_model:
+            llm_data["model"] = requested_model
+        response_model = _extract_response_model(response)
+        if response_model:
+            llm_data["response_model"] = response_model
         emit_event(
             "llm.request",
             source={"component": "integration", "sdk": self.framework, "operation": "on_llm_end"},
@@ -236,6 +251,42 @@ def _extract_llm_usage(response: Any) -> dict[str, int] | None:
     if output_tokens is not None:
         result["output_tokens"] = int(output_tokens)
     return result or None
+
+
+def _requested_model(serialized: dict[str, Any] | None, kwargs: dict[str, Any]) -> str | None:
+    """リクエスト時に指定されたモデル識別子を抽出する。
+
+    LangChain の callback は invocation_params (実行時パラメータ) に model /
+    model_name を載せる。無い場合は serialized の kwargs から取得する。
+    """
+    invocation_params = kwargs.get("invocation_params")
+    if isinstance(invocation_params, dict):
+        model = invocation_params.get("model") or invocation_params.get("model_name")
+        if isinstance(model, str) and model.strip():
+            return model
+    serialized_kwargs = (serialized or {}).get("kwargs")
+    if isinstance(serialized_kwargs, dict):
+        model = serialized_kwargs.get("model") or serialized_kwargs.get("model_name")
+        if isinstance(model, str) and model.strip():
+            return model
+    return None
+
+
+def _extract_response_model(response: Any) -> str | None:
+    """LLMResult がレスポンス側で自己申告した実モデル識別子を抽出する。
+
+    LangChain の LLMResult は llm_output に model_name (OpenAI 系) または
+    model を載せる。取得できない場合は None。
+    """
+    llm_output = getattr(response, "llm_output", None)
+    if llm_output is None and isinstance(response, dict):
+        llm_output = response.get("llm_output")
+    if not isinstance(llm_output, dict):
+        return None
+    model = llm_output.get("model_name") or llm_output.get("model")
+    if isinstance(model, str) and model.strip():
+        return model
+    return None
 
 
 def _run_key(kwargs: dict[str, Any]) -> str:
