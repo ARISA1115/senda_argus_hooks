@@ -147,6 +147,7 @@ def test_llamaindex_embedding_wrappers_emit_embedding_events(tmp_path: Path):
     assert events[1]["data"]["embedding"]["vector_dimension"] == 3
     assert events[3]["data"]["embedding"]["vector_dimension"] == 2
     assert events[3]["data"]["embedding"]["vector_count"] == 2
+    assert events[1]["data"]["embedding"]["vector_sketch"] == [0.1, 0.2, 0.3]
 
 
 def test_llamaindex_query_with_argus_emits_rag_query_events(tmp_path: Path):

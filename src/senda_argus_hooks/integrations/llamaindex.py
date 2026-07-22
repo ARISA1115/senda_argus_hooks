@@ -4,7 +4,7 @@ import time
 from collections.abc import Iterable
 from typing import Any
 
-from senda_argus_hooks.core.hashing import sha256_value
+from senda_argus_hooks.core.hashing import derive_embedding_sketch, sha256_value
 from senda_argus_hooks.core.identity import derive_embedding_purpose_id, derive_retrieval_purpose_id
 from senda_argus_hooks.core.runtime import emit_event, get_config
 
@@ -988,9 +988,23 @@ def _embedding_result_payload(framework: str, vector: Any, meta: dict[str, Any])
             "vector_dimension": _vector_dimension(vector),
             "vector_count": _vector_count(vector),
             "vector_hash": sha256_value(vector),
+            "vector_sketch": derive_embedding_sketch(_representative_vector(vector)),
         }
     )
     return {k: v for k, v in payload.items() if v is not None}
+
+
+def _representative_vector(vector: Any) -> list | None:
+    """EMBEDDING_CLUSTERING_ANOMALY のスケッチ計算に使う代表ベクトルを1件取り出す。
+
+    get_text_embeddings のようなバッチ呼び出しでは複数ベクトルが返るが、
+    クラスタリングは1呼び出しにつき1ベクトルを前提とするため先頭を代表として使う。
+    """
+    if isinstance(vector, list) and vector and all(isinstance(v, (int, float)) for v in vector):
+        return vector
+    if isinstance(vector, list) and vector and isinstance(vector[0], (list, tuple)):
+        return list(vector[0])
+    return None
 
 
 def _retrieval_purpose(framework: str, meta: dict[str, Any]) -> str:
