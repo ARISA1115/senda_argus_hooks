@@ -4,6 +4,7 @@ import time
 from typing import Any, Callable
 
 from senda_argus_hooks.core.hashing import sha256_value
+from senda_argus_hooks.core.response_meta import extract_response_model as _extract_response_model
 from senda_argus_hooks.core.runtime import emit_event, get_config
 from .base import BaseInstrumentor
 
@@ -161,17 +162,3 @@ def _extract_usage(response: Any) -> dict[str, int] | None:
     if output_tokens is not None:
         result["output_tokens"] = int(output_tokens)
     return result or None
-
-
-def _extract_response_model(response: Any) -> str | None:
-    """レスポンスが自己申告する実モデル識別子を抽出する。
-
-    リクエストで指定した model との不一致を Argus 側の ModelSwapRule が
-    検知できるよう、response_model として別フィールドで送出する。
-    """
-    model = getattr(response, "model", None)
-    if model is None and isinstance(response, dict):
-        model = response.get("model")
-    if isinstance(model, str) and model.strip():
-        return model
-    return None

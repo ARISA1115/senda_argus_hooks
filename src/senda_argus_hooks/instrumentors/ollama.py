@@ -5,6 +5,7 @@ import time
 from typing import Any, Callable
 
 from senda_argus_hooks.core.hashing import sha256_value
+from senda_argus_hooks.core.response_meta import extract_response_model as _extract_response_model
 from senda_argus_hooks.core.runtime import emit_event, get_config
 
 from .base import BaseInstrumentor
@@ -70,19 +71,26 @@ class OllamaInstrumentor(BaseInstrumentor):
                 response = original(*args, **kwargs)
                 latency_ms = int((time.perf_counter() - start) * 1000)
                 output_payload = _safe_response(response) if cfg.capture_response else {"response_hash": sha256_value(_safe_response(response))}
+                llm_data: dict[str, Any] = {
+                    "provider": "ollama",
+                    "operation": operation,
+                    "model": model,
+                    "input": input_payload,
+                    "output": output_payload,
+                    "metadata": {"client": client_type, "stream": stream},
+                }
+                # ModelSwapRule / ModelHashVerificationRule 用: レスポンスが自己申告した
+                # 実モデルと、ローカル推論基盤が公開するモデルダイジェストを送出する。
+                response_model = _extract_response_model(response)
+                if response_model:
+                    llm_data["response_model"] = response_model
+                model_digest = _get_model_digest(model)
+                if model_digest:
+                    llm_data["model_digest"] = model_digest
                 emit_event(
                     "llm.request",
                     source={"component": "instrumentor", "sdk": "ollama", "provider": "ollama", "operation": operation},
-                    data={
-                        "llm": {
-                            "provider": "ollama",
-                            "operation": operation,
-                            "model": model,
-                            "input": input_payload,
-                            "output": output_payload,
-                            "metadata": {"client": client_type, "stream": stream},
-                        }
-                    },
+                    data={"llm": llm_data},
                     status="success",
                     latency_ms=latency_ms,
                 )
@@ -188,3 +196,38 @@ def _safe_response(response: Any) -> Any:
     if isinstance(response, (dict, list, str, int, float, bool)) or response is None:
         return response
     return str(response)
+
+
+_MODEL_DIGEST_CACHE: dict[str, str] = {}
+
+
+def _get_model_digest(model: Any) -> str | None:
+    """ollama の list API からモデルマニフェストの sha256 ダイジェストを取得する。
+
+    ローカル推論基盤である Ollama はモデルごとのダイジェストを公開しており、
+    Argus 側の ModelHashVerificationRule が重み差し替えとピン留めハッシュ不一致を
+    検知するための一次情報になる。呼び出しごとの追加レイテンシを避けるため
+    プロセス内でキャッシュし、取得失敗時は None を返して観測を阻害しない。
+    """
+    if not isinstance(model, str) or not model:
+        return None
+    cached = _MODEL_DIGEST_CACHE.get(model) or _MODEL_DIGEST_CACHE.get(f"{model}:latest")
+    if cached is not None:
+        return cached
+    try:
+        import ollama  # type: ignore
+
+        listing = ollama.list()
+        models = listing.get("models") if isinstance(listing, dict) else getattr(listing, "models", None)
+        for m in models or []:
+            if isinstance(m, dict):
+                name = m.get("model") or m.get("name")
+                digest = m.get("digest")
+            else:
+                name = getattr(m, "model", None) or getattr(m, "name", None)
+                digest = getattr(m, "digest", None)
+            if isinstance(name, str) and isinstance(digest, str) and name and digest:
+                _MODEL_DIGEST_CACHE[name] = digest
+    except Exception:
+        return None
+    return _MODEL_DIGEST_CACHE.get(model) or _MODEL_DIGEST_CACHE.get(f"{model}:latest")
