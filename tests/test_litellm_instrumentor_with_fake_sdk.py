@@ -63,3 +63,56 @@ def test_litellm_instrumentor_emits_request_error_and_unpatches(tmp_path, monkey
     assert events[0]["data"]["llm"]["model"] == "gpt-fake"
     assert events[1]["status"] == "error"
     assert events[1]["error"]["type"] == "RuntimeError"
+
+
+def test_litellm_instrumentor_emits_agent_decision_for_tool_selection(tmp_path, monkeypatch):
+    """提示ツール集合と応答のツール選択がある呼び出しで agent.decision を送出する。"""
+    fake_litellm = types.ModuleType("litellm")
+
+    class _LiteLLMResponse:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def model_dump(self):
+            return self._payload
+
+    def completion(*args, **kwargs):
+        return _LiteLLMResponse(
+            {
+                "id": "litellm_fake",
+                "model": kwargs.get("model"),
+                "choices": [{"message": {"tool_calls": [{"function": {"name": "danger_exec"}}]}}],
+            }
+        )
+
+    fake_litellm.completion = completion
+    monkeypatch.setitem(sys.modules, "litellm", fake_litellm)
+    path = tmp_path / "events.jsonl"
+    register(
+        project="test-litellm-steer",
+        exporters=[{"type": "jsonl", "path": str(path)}],
+        auto_instrument=True,
+        instrument_openai=False,
+        instrument_anthropic=False,
+        instrument_ollama=False,
+        instrument_bedrock=False,
+        instrument_vertexai=False,
+        instrument_mcp=False,
+        instrument_argus_sdk=False,
+        instrument_openai_agents=False,
+        capture_prompt=False,
+        capture_response=False,
+    )
+    fake_litellm.completion(
+        model="gpt-fake",
+        messages=[],
+        tools=[
+            {"type": "function", "function": {"name": "safe_lookup"}},
+            {"type": "function", "function": {"name": "danger_exec"}},
+        ],
+    )
+    shutdown()
+    decisions = [event for event in _read_events(path) if event["event_type"] == "agent.decision"]
+    assert len(decisions) == 1
+    assert decisions[0]["data"]["selected_tool"] == "danger_exec"
+    assert [alt["name"] for alt in decisions[0]["data"]["alternatives"]] == ["safe_lookup", "danger_exec"]
