@@ -62,6 +62,19 @@ class AnthropicInstrumentor(BaseInstrumentor):
                     status="success",
                     latency_ms=latency_ms,
                 )
+                offered = _offered_tool_names(kwargs)
+                selected = _selected_tool_name(response)
+                if offered and selected:
+                    emit_event(
+                        "agent.decision",
+                        source={"component": "instrumentor", "sdk": "anthropic", "provider": "anthropic", "operation": operation},
+                        data={
+                            "alternatives": [{"name": name} for name in offered],
+                            "selected_tool": selected,
+                        },
+                        status="success",
+                        latency_ms=latency_ms,
+                    )
                 return response
             except Exception as exc:
                 latency_ms = int((time.perf_counter() - start) * 1000)
@@ -133,6 +146,41 @@ def _extract_messages(args, kwargs) -> list[Any] | None:
     if isinstance(messages, tuple):
         messages = list(messages)
     return messages if isinstance(messages, list) else None
+
+def _offered_tool_names(kwargs) -> list[str]:
+    """Messages API に渡された提示ツール集合の名前を取り出す。
+
+    Anthropic は tools=[{"name":..., "input_schema":...}] の形をとる。
+    """
+    tools = kwargs.get("tools")
+    names: list[str] = []
+    if isinstance(tools, (list, tuple)):
+        for tool in tools:
+            name = ""
+            if isinstance(tool, dict):
+                name = str(tool.get("name") or "")
+            if name:
+                names.append(name)
+    return names
+
+
+def _selected_tool_name(response: Any) -> str:
+    """LLM 応答でモデルが選択したツール名を取り出す。無ければ空文字。
+
+    Anthropic は content=[{"type":"tool_use","name":...}] にツール選択が入る。
+    """
+    resp = _safe_response(response)
+    if not isinstance(resp, dict):
+        return ""
+    content = resp.get("content")
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                name = str(block.get("name") or "")
+                if name:
+                    return name
+    return ""
+
 
 def _safe_response(response: Any) -> Any:
     for attr in ("model_dump", "dict"):

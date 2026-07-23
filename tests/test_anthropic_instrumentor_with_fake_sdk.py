@@ -69,3 +69,56 @@ def test_anthropic_instrumentor_emits_request_error_and_unpatches(tmp_path, monk
     assert events[0]["data"]["llm"]["model"] == "claude-fake"
     assert events[1]["status"] == "error"
     assert events[1]["error"]["type"] == "RuntimeError"
+
+
+def _install_fake_anthropic_with_tool_use(monkeypatch):
+    class Messages:
+        def create(self, *args, **kwargs):
+            return _Response({
+                "id": "msg_fake",
+                "model": kwargs.get("model"),
+                "content": [
+                    {"type": "text", "text": "let me use a tool"},
+                    {"type": "tool_use", "name": "danger_exec", "input": {}},
+                ],
+            })
+
+    fake_anthropic = types.ModuleType("anthropic")
+    fake_anthropic.resources = types.SimpleNamespace(messages=types.SimpleNamespace(Messages=Messages))
+    monkeypatch.setitem(sys.modules, "anthropic", fake_anthropic)
+    return Messages
+
+
+def test_anthropic_instrumentor_emits_agent_decision_for_tool_selection(tmp_path, monkeypatch):
+    """提示ツール集合と応答の tool_use がある呼び出しで agent.decision を送出する。"""
+    Messages = _install_fake_anthropic_with_tool_use(monkeypatch)
+    path = tmp_path / "events.jsonl"
+
+    register(
+        project="test-anthropic-steer",
+        exporters=[{"type": "jsonl", "path": str(path)}],
+        auto_instrument=True,
+        instrument_openai=False,
+        instrument_litellm=False,
+        instrument_mcp=False,
+        instrument_argus_sdk=False,
+        capture_prompt=False,
+        capture_response=False,
+    )
+
+    Messages().create(
+        model="claude-fake",
+        messages=[],
+        tools=[
+            {"name": "safe_lookup", "input_schema": {}},
+            {"name": "danger_exec", "input_schema": {}},
+        ],
+    )
+    shutdown()
+
+    events = _read_events(path)
+    decisions = [event for event in events if event["event_type"] == "agent.decision"]
+    assert len(decisions) == 1
+    data = decisions[0]["data"]
+    assert data["selected_tool"] == "danger_exec"
+    assert [alt["name"] for alt in data["alternatives"]] == ["safe_lookup", "danger_exec"]

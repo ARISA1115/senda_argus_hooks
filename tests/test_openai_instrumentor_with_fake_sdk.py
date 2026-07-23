@@ -83,3 +83,95 @@ def test_openai_instrumentor_emits_request_error_and_unpatches(tmp_path, monkeyp
     assert "response_hash" in events[0]["data"]["llm"]["output"]
     assert events[1]["status"] == "error"
     assert events[1]["error"]["type"] == "RuntimeError"
+
+
+def _install_fake_openai_with_tool_call(monkeypatch):
+    class Completions:
+        def create(self, *args, **kwargs):
+            return _Response({
+                "id": "chatcmpl_fake",
+                "model": kwargs.get("model"),
+                "choices": [
+                    {"message": {"tool_calls": [{"function": {"name": "danger_exec"}}]}}
+                ],
+            })
+
+    class Responses:
+        def create(self, *args, **kwargs):
+            return _Response({"id": "resp_fake", "model": kwargs.get("model")})
+
+    class Embeddings:
+        def create(self, *args, **kwargs):
+            return _Response({"id": "emb_fake", "model": kwargs.get("model")})
+
+    fake_openai = types.ModuleType("openai")
+    fake_openai.resources = types.SimpleNamespace(
+        chat=types.SimpleNamespace(completions=types.SimpleNamespace(Completions=Completions)),
+        responses=types.SimpleNamespace(Responses=Responses),
+        embeddings=types.SimpleNamespace(Embeddings=Embeddings),
+    )
+    monkeypatch.setitem(sys.modules, "openai", fake_openai)
+    return Completions
+
+
+def test_openai_instrumentor_emits_agent_decision_for_tool_selection(tmp_path, monkeypatch):
+    """提示ツール集合と応答のツール選択がある呼び出しで agent.decision を送出する。
+
+    自動計装でも offered/selected を送出し、明示 API 経由と同じく Argus 側の
+    ステアリング検知が駆動できるようにする。
+    """
+    Completions = _install_fake_openai_with_tool_call(monkeypatch)
+    path = tmp_path / "events.jsonl"
+
+    register(
+        project="test-openai-steer",
+        exporters=[{"type": "jsonl", "path": str(path)}],
+        auto_instrument=True,
+        instrument_anthropic=False,
+        instrument_litellm=False,
+        instrument_mcp=False,
+        instrument_argus_sdk=False,
+        capture_prompt=False,
+        capture_response=False,
+    )
+
+    Completions().create(
+        model="gpt-fake",
+        messages=[],
+        tools=[
+            {"type": "function", "function": {"name": "safe_lookup"}},
+            {"type": "function", "function": {"name": "danger_exec"}},
+        ],
+    )
+    shutdown()
+
+    events = _read_events(path)
+    decisions = [event for event in events if event["event_type"] == "agent.decision"]
+    assert len(decisions) == 1
+    data = decisions[0]["data"]
+    assert data["selected_tool"] == "danger_exec"
+    assert [alt["name"] for alt in data["alternatives"]] == ["safe_lookup", "danger_exec"]
+
+
+def test_openai_instrumentor_no_agent_decision_without_tools(tmp_path, monkeypatch):
+    """tools を渡さない呼び出しでは agent.decision を送出しない。"""
+    Completions = _install_fake_openai_with_tool_call(monkeypatch)
+    path = tmp_path / "events.jsonl"
+
+    register(
+        project="test-openai-notool",
+        exporters=[{"type": "jsonl", "path": str(path)}],
+        auto_instrument=True,
+        instrument_anthropic=False,
+        instrument_litellm=False,
+        instrument_mcp=False,
+        instrument_argus_sdk=False,
+        capture_prompt=False,
+        capture_response=False,
+    )
+
+    Completions().create(model="gpt-fake", messages=[])
+    shutdown()
+
+    events = _read_events(path)
+    assert [event["event_type"] for event in events] == ["llm.request"]
