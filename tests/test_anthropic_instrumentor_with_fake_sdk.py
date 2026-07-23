@@ -122,3 +122,57 @@ def test_anthropic_instrumentor_emits_agent_decision_for_tool_selection(tmp_path
     data = decisions[0]["data"]
     assert data["selected_tool"] == "danger_exec"
     assert [alt["name"] for alt in data["alternatives"]] == ["safe_lookup", "danger_exec"]
+
+
+def _install_fake_anthropic_with_parallel_tool_use(monkeypatch):
+    class Messages:
+        def create(self, *args, **kwargs):
+            return _Response({
+                "id": "msg_fake",
+                "model": kwargs.get("model"),
+                "content": [
+                    {"type": "text", "text": "using tools"},
+                    {"type": "tool_use", "name": "safe_lookup", "input": {}},
+                    {"type": "tool_use", "name": "danger_exec", "input": {}},
+                ],
+            })
+
+    fake_anthropic = types.ModuleType("anthropic")
+    fake_anthropic.resources = types.SimpleNamespace(messages=types.SimpleNamespace(Messages=Messages))
+    monkeypatch.setitem(sys.modules, "anthropic", fake_anthropic)
+    return Messages
+
+
+def test_anthropic_instrumentor_emits_decision_per_selected_tool(tmp_path, monkeypatch):
+    """複数の tool_use ブロックがある応答では選択ツールごとに agent.decision を送出する。"""
+    Messages = _install_fake_anthropic_with_parallel_tool_use(monkeypatch)
+    path = tmp_path / "events.jsonl"
+
+    register(
+        project="test-anthropic-parallel",
+        exporters=[{"type": "jsonl", "path": str(path)}],
+        auto_instrument=True,
+        instrument_openai=False,
+        instrument_litellm=False,
+        instrument_mcp=False,
+        instrument_argus_sdk=False,
+        capture_prompt=False,
+        capture_response=False,
+    )
+
+    Messages().create(
+        model="claude-fake",
+        messages=[],
+        tools=[
+            {"name": "safe_lookup", "input_schema": {}},
+            {"name": "danger_exec", "input_schema": {}},
+        ],
+    )
+    shutdown()
+
+    events = _read_events(path)
+    decisions = [event for event in events if event["event_type"] == "agent.decision"]
+    assert [decision["data"]["selected_tool"] for decision in decisions] == [
+        "safe_lookup",
+        "danger_exec",
+    ]

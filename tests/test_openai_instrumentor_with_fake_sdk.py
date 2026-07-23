@@ -153,6 +153,79 @@ def test_openai_instrumentor_emits_agent_decision_for_tool_selection(tmp_path, m
     assert [alt["name"] for alt in data["alternatives"]] == ["safe_lookup", "danger_exec"]
 
 
+def _install_fake_openai_with_parallel_tool_calls(monkeypatch):
+    class Completions:
+        def create(self, *args, **kwargs):
+            return _Response({
+                "id": "chatcmpl_fake",
+                "model": kwargs.get("model"),
+                "choices": [
+                    {"message": {"tool_calls": [
+                        {"function": {"name": "safe_lookup"}},
+                        {"function": {"name": "danger_exec"}},
+                    ]}}
+                ],
+            })
+
+    class Responses:
+        def create(self, *args, **kwargs):
+            return _Response({"id": "resp_fake", "model": kwargs.get("model")})
+
+    class Embeddings:
+        def create(self, *args, **kwargs):
+            return _Response({"id": "emb_fake", "model": kwargs.get("model")})
+
+    fake_openai = types.ModuleType("openai")
+    fake_openai.resources = types.SimpleNamespace(
+        chat=types.SimpleNamespace(completions=types.SimpleNamespace(Completions=Completions)),
+        responses=types.SimpleNamespace(Responses=Responses),
+        embeddings=types.SimpleNamespace(Embeddings=Embeddings),
+    )
+    monkeypatch.setitem(sys.modules, "openai", fake_openai)
+    return Completions
+
+
+def test_openai_instrumentor_emits_decision_per_selected_tool(tmp_path, monkeypatch):
+    """並列ツール呼び出しでは選択されたツールごとに agent.decision を送出する。"""
+    Completions = _install_fake_openai_with_parallel_tool_calls(monkeypatch)
+    path = tmp_path / "events.jsonl"
+
+    register(
+        project="test-openai-parallel",
+        exporters=[{"type": "jsonl", "path": str(path)}],
+        auto_instrument=True,
+        instrument_anthropic=False,
+        instrument_litellm=False,
+        instrument_mcp=False,
+        instrument_argus_sdk=False,
+        capture_prompt=False,
+        capture_response=False,
+    )
+
+    Completions().create(
+        model="gpt-fake",
+        messages=[],
+        tools=[
+            {"type": "function", "function": {"name": "safe_lookup"}},
+            {"type": "function", "function": {"name": "danger_exec"}},
+        ],
+    )
+    shutdown()
+
+    events = _read_events(path)
+    decisions = [event for event in events if event["event_type"] == "agent.decision"]
+    # 選択された 2 ツールそれぞれに decision が出る
+    assert [decision["data"]["selected_tool"] for decision in decisions] == [
+        "safe_lookup",
+        "danger_exec",
+    ]
+    for decision in decisions:
+        assert [alt["name"] for alt in decision["data"]["alternatives"]] == [
+            "safe_lookup",
+            "danger_exec",
+        ]
+
+
 def test_openai_instrumentor_no_agent_decision_without_tools(tmp_path, monkeypatch):
     """tools を渡さない呼び出しでは agent.decision を送出しない。"""
     Completions = _install_fake_openai_with_tool_call(monkeypatch)
