@@ -125,3 +125,52 @@ class TestOpenAIWrapperIsolation:
                 Completions().create(model="gpt-fake", messages=[], fail=True)
         finally:
             shutdown()
+
+
+class TestGuardSurvivesLoggingFailure:
+    """記録そのものが失敗してもガードが破れないことの検証。
+
+    ログの送り先が落ちている環境でも、観測の失敗を本来の呼び出しへ波及させない。
+    """
+
+    def test_logger_raising_does_not_escape(self, monkeypatch):
+        import senda_argus_hooks.instrumentors.base as base
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("log sink down")
+
+        monkeypatch.setattr(base.logger, "warning", _boom)
+
+        with base.audit_guard("test.operation"):
+            raise RuntimeError("observation failed")
+
+    def test_logger_raising_does_not_break_instrumented_call(self, tmp_path, monkeypatch):
+        Completions = _install_fake_openai(monkeypatch)
+        register(
+            project="test-log-failure",
+            exporters=[{"type": "jsonl", "path": str(tmp_path / "events.jsonl")}],
+            auto_instrument=True,
+            instrument_anthropic=False,
+            instrument_litellm=False,
+            instrument_mcp=False,
+            instrument_argus_sdk=False,
+            capture_prompt=False,
+            capture_response=False,
+        )
+        try:
+            import senda_argus_hooks.instrumentors.base as base
+            import senda_argus_hooks.instrumentors.openai as inst
+
+            def _emit_boom(*args, **kwargs):
+                raise RuntimeError("emit failed")
+
+            def _log_boom(*args, **kwargs):
+                raise RuntimeError("log sink down")
+
+            monkeypatch.setattr(inst, "emit_event", _emit_boom)
+            monkeypatch.setattr(base.logger, "warning", _log_boom)
+
+            response = Completions().create(model="gpt-fake", messages=[])
+            assert response.model_dump()["model"] == "gpt-fake"
+        finally:
+            shutdown()
