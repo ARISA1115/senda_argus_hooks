@@ -8,7 +8,7 @@ from senda_argus_hooks.core.hashing import sha256_value
 from senda_argus_hooks.core.identity import data_source_hash, derive_mcp_profile_id, derive_purpose_id, mcp_data_source_profile, normalize_url
 from senda_argus_hooks.core.runtime import emit_event, get_config
 from senda_argus_hooks.core.purpose_registry import register_mcp_tool_source, selected_tool_purpose
-from .base import BaseInstrumentor
+from .base import BaseInstrumentor, audit_guard
 
 
 class ArgusSDKInstrumentor(BaseInstrumentor):
@@ -53,6 +53,20 @@ class ArgusSDKInstrumentor(BaseInstrumentor):
             messages_hash = sha256_value(args[0]) if args else None
             try:
                 response = original(obj, *args, **kwargs)
+            except Exception as exc:
+                latency_ms = int((time.perf_counter() - start) * 1000)
+                emit_event(
+                    "llm.error",
+                    source={"component": "instrumentor", "sdk": "senda_argus_hooks.sdk", "provider": provider, "operation": operation},
+                    data={"llm": {"provider": provider, "operation": operation, "purpose": purpose, "model": model, "input": input_payload}},
+                    status="error",
+                    latency_ms=latency_ms,
+                    error={"type": exc.__class__.__name__, "message": str(exc)},
+                )
+                raise
+
+            # 観測の後処理は本来の呼び出しから隔離する。ここで失敗しても応答は返す。
+            with audit_guard(operation):
                 latency_ms = int((time.perf_counter() - start) * 1000)
                 output_payload = _output_payload(response, cfg.capture_response, cfg.capture_hash)
                 # レスポンスが自己申告した実モデルは model を上書きせず response_model として
@@ -88,18 +102,7 @@ class ArgusSDKInstrumentor(BaseInstrumentor):
                     status="success",
                     latency_ms=latency_ms,
                 )
-                return response
-            except Exception as exc:
-                latency_ms = int((time.perf_counter() - start) * 1000)
-                emit_event(
-                    "llm.error",
-                    source={"component": "instrumentor", "sdk": "senda_argus_hooks.sdk", "provider": provider, "operation": operation},
-                    data={"llm": {"provider": provider, "operation": operation, "purpose": purpose, "model": model, "input": input_payload}},
-                    status="error",
-                    latency_ms=latency_ms,
-                    error={"type": exc.__class__.__name__, "message": str(exc)},
-                )
-                raise
+            return response
         return wrapper
 
     def _wrap_mcp(self, original: Callable, operation: str) -> Callable:
@@ -146,6 +149,21 @@ class ArgusSDKInstrumentor(BaseInstrumentor):
             )
             try:
                 response = original(obj, *args, **kwargs)
+            except Exception as exc:
+                latency_ms = int((time.perf_counter() - start) * 1000)
+                emit_event(
+                    "mcp.tool_call.failed",
+                    source={"component": "instrumentor", "sdk": "senda_argus_hooks.sdk", "operation": operation},
+                    data={"mcp": base_mcp},
+                    status="error",
+                    latency_ms=latency_ms,
+                    error={"type": exc.__class__.__name__, "message": str(exc)},
+                    purpose_id=purpose_id,
+                )
+                raise
+
+            # 観測の後処理は本来の呼び出しから隔離する。ここで失敗しても応答は返す。
+            with audit_guard(operation):
                 latency_ms = int((time.perf_counter() - start) * 1000)
                 raw_result = _safe_response(response)
                 result_payload = raw_result if cfg.capture_result else None
@@ -161,19 +179,7 @@ class ArgusSDKInstrumentor(BaseInstrumentor):
                     latency_ms=latency_ms,
                     purpose_id=purpose_id,
                 )
-                return response
-            except Exception as exc:
-                latency_ms = int((time.perf_counter() - start) * 1000)
-                emit_event(
-                    "mcp.tool_call.failed",
-                    source={"component": "instrumentor", "sdk": "senda_argus_hooks.sdk", "operation": operation},
-                    data={"mcp": base_mcp},
-                    status="error",
-                    latency_ms=latency_ms,
-                    error={"type": exc.__class__.__name__, "message": str(exc)},
-                    purpose_id=purpose_id,
-                )
-                raise
+            return response
         return wrapper
 
 
@@ -182,6 +188,13 @@ class ArgusSDKInstrumentor(BaseInstrumentor):
             start = time.perf_counter()
             try:
                 response = original(obj, *args, **kwargs)
+            except Exception as exc:
+                latency_ms = int((time.perf_counter() - start) * 1000)
+                emit_event("promptops.error", source={"component": "instrumentor", "sdk": "senda_argus_hooks.sdk", "operation": operation}, data={"args": args, "kwargs": kwargs}, status="error", latency_ms=latency_ms, error={"type": exc.__class__.__name__, "message": str(exc)})
+                raise
+
+            # 観測の後処理は本来の呼び出しから隔離する。ここで失敗しても応答は返す。
+            with audit_guard(operation):
                 latency_ms = int((time.perf_counter() - start) * 1000)
                 event_type = operation
                 source = {"component": "instrumentor", "sdk": "senda_argus_hooks.sdk", "operation": operation}
@@ -196,11 +209,7 @@ class ArgusSDKInstrumentor(BaseInstrumentor):
                         for key, value in purpose_meta.items():
                             data.setdefault(key, value)
                 emit_event(event_type, source=source, data=data, status="success", latency_ms=latency_ms)
-                return response
-            except Exception as exc:
-                latency_ms = int((time.perf_counter() - start) * 1000)
-                emit_event("promptops.error", source={"component": "instrumentor", "sdk": "senda_argus_hooks.sdk", "operation": operation}, data={"args": args, "kwargs": kwargs}, status="error", latency_ms=latency_ms, error={"type": exc.__class__.__name__, "message": str(exc)})
-                raise
+            return response
         return wrapper
 
     def uninstrument(self) -> bool:
