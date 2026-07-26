@@ -3,12 +3,22 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
 from senda_argus_hooks.exporters.argus import ArgusExporter
 from senda_argus_hooks.exporters import create_exporter
+
+
+def _wait_until(predicate, timeout: float = 2.0) -> None:
+    """送信は daemon スレッドに切り離されるため、キャプチャ到着まで待つ。"""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.01)
 
 
 class _CaptureHandler(BaseHTTPRequestHandler):
@@ -49,6 +59,7 @@ def test_export_sends_events(capture_server):
         }
     ]
     exporter.export(events)
+    _wait_until(lambda: len(httpd.captured) == 1)
     assert len(httpd.captured) == 1
     assert httpd.captured[0]["events"][0]["event_id"] == "e1"
 
@@ -65,6 +76,7 @@ def test_fixed_run_id_override(capture_server):
     exporter = ArgusExporter({"type": "argus", "endpoint": endpoint, "run_id": "fixed-run"})
     events = [{"event_id": "e1", "event_type": "llm.request", "agent_id": "a1", "data": {}}]
     exporter.export(events)
+    _wait_until(lambda: len(httpd.captured) >= 1)
     assert httpd.captured[0]["events"][0]["run_id"] == "fixed-run"
 
 
@@ -73,6 +85,7 @@ def test_existing_run_id_not_overwritten(capture_server):
     exporter = ArgusExporter({"type": "argus", "endpoint": endpoint, "run_id": "fixed-run"})
     events = [{"event_id": "e1", "event_type": "llm.request", "run_id": "original-run", "data": {}}]
     exporter.export(events)
+    _wait_until(lambda: len(httpd.captured) >= 1)
     assert httpd.captured[0]["events"][0]["run_id"] == "original-run"
 
 
@@ -85,3 +98,29 @@ def test_registry_creates_argus_exporter(capture_server):
     _, endpoint = capture_server
     exporter = create_exporter({"type": "argus", "endpoint": endpoint})
     assert isinstance(exporter, ArgusExporter)
+
+
+def test_shutdown_drains_pending_in_order():
+    # shutdown は積み残したバッチを FIFO 順に送り切る。
+    exporter = ArgusExporter({"type": "argus", "endpoint": "http://example"})
+    seen: list = []
+    exporter._send = lambda payload, headers: seen.append(
+        json.loads(payload)["events"][0]["event_id"]
+    )
+    for i in range(5):
+        exporter.export([{"event_id": f"e{i}", "data": {}}])
+    exporter.shutdown()
+    assert seen == ["e0", "e1", "e2", "e3", "e4"]
+
+
+def test_export_does_not_block_caller():
+    # 送信が遅くても export は即返る。キューへ積むだけで呼び出し側を待たせない。
+    exporter = ArgusExporter({"type": "argus", "endpoint": "http://example"})
+    release = threading.Event()
+    exporter._send = lambda payload, headers: release.wait(2.0)
+    t0 = time.monotonic()
+    exporter.export([{"event_id": "e1", "data": {}}])
+    elapsed = time.monotonic() - t0
+    release.set()
+    exporter.shutdown()
+    assert elapsed < 0.5
