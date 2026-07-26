@@ -98,3 +98,29 @@ def test_registry_creates_argus_exporter(capture_server):
     _, endpoint = capture_server
     exporter = create_exporter({"type": "argus", "endpoint": endpoint})
     assert isinstance(exporter, ArgusExporter)
+
+
+def test_shutdown_drains_pending_in_order():
+    # shutdown は積み残したバッチを FIFO 順に送り切る。
+    exporter = ArgusExporter({"type": "argus", "endpoint": "http://example"})
+    seen: list = []
+    exporter._send = lambda payload, headers: seen.append(
+        json.loads(payload)["events"][0]["event_id"]
+    )
+    for i in range(5):
+        exporter.export([{"event_id": f"e{i}", "data": {}}])
+    exporter.shutdown()
+    assert seen == ["e0", "e1", "e2", "e3", "e4"]
+
+
+def test_export_does_not_block_caller():
+    # 送信が遅くても export は即返る。キューへ積むだけで呼び出し側を待たせない。
+    exporter = ArgusExporter({"type": "argus", "endpoint": "http://example"})
+    release = threading.Event()
+    exporter._send = lambda payload, headers: release.wait(2.0)
+    t0 = time.monotonic()
+    exporter.export([{"event_id": "e1", "data": {}}])
+    elapsed = time.monotonic() - t0
+    release.set()
+    exporter.shutdown()
+    assert elapsed < 0.5
