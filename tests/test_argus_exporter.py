@@ -3,12 +3,22 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
 from senda_argus_hooks.exporters.argus import ArgusExporter
 from senda_argus_hooks.exporters import create_exporter
+
+
+def _wait_until(predicate, timeout: float = 2.0) -> None:
+    """送信は daemon スレッドに切り離されるため、キャプチャ到着まで待つ。"""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.01)
 
 
 class _CaptureHandler(BaseHTTPRequestHandler):
@@ -49,6 +59,7 @@ def test_export_sends_events(capture_server):
         }
     ]
     exporter.export(events)
+    _wait_until(lambda: len(httpd.captured) == 1)
     assert len(httpd.captured) == 1
     assert httpd.captured[0]["events"][0]["event_id"] == "e1"
 
@@ -65,6 +76,7 @@ def test_fixed_run_id_override(capture_server):
     exporter = ArgusExporter({"type": "argus", "endpoint": endpoint, "run_id": "fixed-run"})
     events = [{"event_id": "e1", "event_type": "llm.request", "agent_id": "a1", "data": {}}]
     exporter.export(events)
+    _wait_until(lambda: len(httpd.captured) >= 1)
     assert httpd.captured[0]["events"][0]["run_id"] == "fixed-run"
 
 
@@ -73,6 +85,7 @@ def test_existing_run_id_not_overwritten(capture_server):
     exporter = ArgusExporter({"type": "argus", "endpoint": endpoint, "run_id": "fixed-run"})
     events = [{"event_id": "e1", "event_type": "llm.request", "run_id": "original-run", "data": {}}]
     exporter.export(events)
+    _wait_until(lambda: len(httpd.captured) >= 1)
     assert httpd.captured[0]["events"][0]["run_id"] == "original-run"
 
 

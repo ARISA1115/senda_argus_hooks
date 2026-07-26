@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import urllib.error
 import urllib.request
 from typing import Any
@@ -31,6 +32,16 @@ class ArgusExporter(BaseExporter):
         self._run_id: str | None = config.get("run_id")
         self._timeout: int = int(config.get("timeout", 10))
 
+    def _send(self, payload: bytes, headers: dict[str, str]) -> None:
+        req = urllib.request.Request(
+            self._url, data=payload, method="POST", headers=headers
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self._timeout):
+                pass
+        except (urllib.error.URLError, OSError):
+            pass
+
     def export(self, events: list[dict[str, Any]]) -> None:
         if not events:
             return
@@ -40,11 +51,11 @@ class ArgusExporter(BaseExporter):
         headers = {"Content-Type": "application/json"}
         if self._api_key:
             headers["X-API-Key"] = self._api_key
-        req = urllib.request.Request(
-            self._url, data=payload, method="POST", headers=headers
-        )
+        # 送信を daemon スレッドに切り離し、ホストアプリの実行経路をブロックしない。
+        # Argus 側が応答しない場合でも urlopen のタイムアウト待ちが上乗せされない。
         try:
-            with urllib.request.urlopen(req, timeout=self._timeout):
-                pass
-        except (urllib.error.URLError, OSError):
-            pass
+            threading.Thread(
+                target=self._send, args=(payload, headers), daemon=True
+            ).start()
+        except RuntimeError:
+            self._send(payload, headers)
