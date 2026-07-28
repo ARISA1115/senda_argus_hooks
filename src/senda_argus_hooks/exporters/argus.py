@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import atexit
 import json
+import logging
 import queue
 import threading
 import urllib.error
@@ -17,6 +18,8 @@ from .base import BaseExporter
 _SEND_QUEUE_MAX = 1000
 _DRAIN_TIMEOUT = 3.0
 _SHUTDOWN = object()
+
+_logger = logging.getLogger("senda_argus_hooks.exporters.argus")
 
 
 class ArgusExporter(BaseExporter):
@@ -45,6 +48,20 @@ class ArgusExporter(BaseExporter):
         self._worker: threading.Thread | None = None
         self._worker_lock = threading.Lock()
         self._atexit_registered = False
+        self._drop_lock = threading.Lock()
+        self._dropped_events_count = 0
+
+    def _record_drop(self) -> None:
+        """送出キュー満杯で捨てたバッチを計数しログに残す。沈黙 drop で欠落を見失わない。"""
+        with self._drop_lock:
+            self._dropped_events_count += 1
+            total = self._dropped_events_count
+        _logger.warning("Argus 送出キューが満杯のためイベントを破棄しました。累計 %d 件", total)
+
+    def dropped_events(self) -> int:
+        """送出キュー満杯で捨てたバッチの累計を返す。"""
+        with self._drop_lock:
+            return self._dropped_events_count
 
     def _send(self, payload: bytes, headers: dict[str, str]) -> None:
         req = urllib.request.Request(
@@ -94,7 +111,7 @@ class ArgusExporter(BaseExporter):
         try:
             self._queue.put_nowait((payload, headers))
         except queue.Full:
-            pass
+            self._record_drop()
 
     def shutdown(self) -> None:
         # 終了時に積み残したバッチを送り切る。daemon ワーカーは通常終了で待たれないため、

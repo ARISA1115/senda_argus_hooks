@@ -124,3 +124,17 @@ def test_export_does_not_block_caller():
     release.set()
     exporter.shutdown()
     assert elapsed < 0.5
+
+
+def test_export_counts_queue_drops():
+    """送出キュー満杯時の drop を計数する。沈黙 drop で欠落を見失わない。"""
+    import queue as _queue
+
+    exporter = ArgusExporter({"type": "argus", "endpoint": "http://127.0.0.1:1", "api_key": "k"})
+    exporter._queue = _queue.Queue(maxsize=1)
+    exporter._ensure_worker = lambda: None  # ワーカーを起こさず満杯を作る
+    ev = [{"event_id": "e", "event_type": "llm.request"}]
+    exporter.export(ev)  # maxsize 1 を埋める
+    exporter.export(ev)  # 満杯で drop
+    exporter.export(ev)  # 満杯で drop
+    assert exporter.dropped_events() == 2
