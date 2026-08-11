@@ -27,6 +27,12 @@ _config = RuntimeConfig()
 _bus = EventBus(exporters=[])
 _runtime_metadata = runtime_metadata()
 
+# 受動計装は span を張らないため get_run_id() も _config.run_id も None になりうる。
+# その場合の最終フォールバックとして、プロセス寿命で安定な run_id を 1 つ持つ。
+# これにより run_id 空のイベントが取り込み側で無音ドロップされるのを防ぎ、run スコープの
+# 検知ルールが受動計装のイベントでも成立する。span / 明示 config はこれより優先される。
+_process_run_id = new_run_id()
+
 
 def configure(config: RuntimeConfig, bus: EventBus) -> None:
     global _config, _bus
@@ -80,7 +86,7 @@ def emit_event(
         tenant_id=_config.tenant_id,
         session_id=_config.session_id,
         conversation_id=_config.conversation_id,
-        run_id=get_run_id() or _config.run_id,
+        run_id=get_run_id() or _config.run_id or _process_run_id,
         turn_id=get_turn_id() or _config.turn_id,
         agent_id=effective_agent_id(source, agent_id),
         purpose_id=purpose_id or get_purpose_id(),
