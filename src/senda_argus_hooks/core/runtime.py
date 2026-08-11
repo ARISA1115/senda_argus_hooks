@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import threading
 from typing import Any
 
 from .context import (
@@ -28,10 +30,26 @@ _bus = EventBus(exporters=[])
 _runtime_metadata = runtime_metadata()
 
 # 受動計装は span を張らないため get_run_id() も _config.run_id も None になりうる。
-# その場合の最終フォールバックとして、プロセス寿命で安定な run_id を 1 つ持つ。
-# これにより run_id 空のイベントが取り込み側で無音ドロップされるのを防ぎ、run スコープの
-# 検知ルールが受動計装のイベントでも成立する。span / 明示 config はこれより優先される。
-_process_run_id = new_run_id()
+# その場合の最終フォールバックとして、プロセス寿命で安定な run_id を返す。これにより
+# run_id 空のイベントが取り込み側で無音ドロップされるのを防ぎ、run スコープの検知ルールが
+# 受動計装のイベントでも成立する。span / 明示 config はこれより優先される。
+#
+# PID で採番するため、import 後に fork するプリフォーク型サーバやタスクランナーでも、子プロセスは
+# 親と別の run_id を持ち、別ワーカーの run スコープの監査と検知結果が混ざらない。
+_process_run_id_lock = threading.Lock()
+_process_run_ids: dict[int, str] = {}
+
+
+def _process_run_id() -> str:
+    pid = os.getpid()
+    run_id = _process_run_ids.get(pid)
+    if run_id is None:
+        with _process_run_id_lock:
+            run_id = _process_run_ids.get(pid)
+            if run_id is None:
+                run_id = new_run_id()
+                _process_run_ids[pid] = run_id
+    return run_id
 
 
 def configure(config: RuntimeConfig, bus: EventBus) -> None:
@@ -86,7 +104,7 @@ def emit_event(
         tenant_id=_config.tenant_id,
         session_id=_config.session_id,
         conversation_id=_config.conversation_id,
-        run_id=get_run_id() or _config.run_id or _process_run_id,
+        run_id=get_run_id() or _config.run_id or _process_run_id(),
         turn_id=get_turn_id() or _config.turn_id,
         agent_id=effective_agent_id(source, agent_id),
         purpose_id=purpose_id or get_purpose_id(),
