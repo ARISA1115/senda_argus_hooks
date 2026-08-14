@@ -42,28 +42,6 @@ def register_mcp_tool_source(
         }
 
 
-def offered_alternatives(names: Any) -> list[dict[str, str]]:
-    """提示ツール名の列を、登録済み MCP ソースから mcp_server を引いた候補 dict へ変換する。
-
-    全 LLM instrumentor が agent.decision の alternatives をこの共通処理で組み、候補ごとに
-    mcp_server を載せる。素の関数名だけだと誘導検知が別 server の同一 logical 名の衝突を
-    判別できず取りこぼすため、register_mcp_tool_source で記録済みのツールは由来 server を付ける。
-    MCP ソース未登録のツール (純粋な関数呼び出し等) は mcp_server 空で載せる。
-    """
-    if not isinstance(names, (list, tuple)):
-        return []
-    result: list[dict[str, str]] = []
-    with _LOCK:
-        for name in names:
-            if not name:
-                continue
-            source = _MCP_TOOL_SOURCES.get(str(name), {})
-            result.append(
-                {"name": str(name), "mcp_server": str(source.get("mcp_server_name") or "")}
-            )
-    return result
-
-
 def selected_tool_purpose(
     tool_name: str | None,
     *,

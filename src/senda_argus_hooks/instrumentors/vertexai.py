@@ -7,7 +7,6 @@ from typing import Any, Callable
 from senda_argus_hooks.core.hashing import sha256_value
 from senda_argus_hooks.core.model_identity import models_correspond
 from senda_argus_hooks.core.runtime import emit_event, get_config
-from senda_argus_hooks.core.purpose_registry import offered_alternatives
 
 from .base import BaseInstrumentor, audit_guard
 
@@ -254,7 +253,7 @@ def _emit_request(model: Any, args: tuple, kwargs: dict[str, Any], response: Any
     offered = _offered_tool_names(model, kwargs)
     selected = _selected_tool_names(response)
     if offered and selected:
-        alternatives = offered_alternatives(offered)
+        alternatives = [{"name": name} for name in offered]
         latency_ms = int((time.perf_counter() - start) * 1000)
         for selected_tool in selected:
             emit_event(
