@@ -8,11 +8,30 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from senda_argus_hooks.instrumentors.argus_sdk import _extract_senda_argus_report
+from senda_argus_hooks.instrumentors.argus_sdk import (
+    _extract_senda_argus_report,
+    _offered_tool_names,
+)
 
 
 def _tool_call(name: str, arguments: Any) -> dict:
     return {"function": {"name": name, "arguments": arguments}}
+
+
+class TestOfferedToolNames:
+    """誘導検知の offered は自己申告でなくリクエスト提示ツールから独立観測する。"""
+
+    def test_extracts_openai_style_tools(self):
+        kwargs = {"tools": [{"type": "function", "function": {"name": "trusted__search"}}]}
+        assert _offered_tool_names(kwargs) == ["trusted__search"]
+
+    def test_extracts_bare_name_tools(self):
+        assert _offered_tool_names({"tools": [{"name": "a"}, {"name": "b"}]}) == ["a", "b"]
+
+    def test_missing_or_malformed_tools_returns_empty(self):
+        assert _offered_tool_names({}) == []
+        assert _offered_tool_names({"tools": "x"}) == []
+        assert _offered_tool_names({"tools": [{"function": {}}, {}]}) == []
 
 
 class TestExtractSendaArgusReport:
