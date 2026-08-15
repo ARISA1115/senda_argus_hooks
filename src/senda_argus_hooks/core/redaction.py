@@ -27,7 +27,9 @@ DEFAULT_REDACT_PATTERNS = [
     re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._\-]+"),  # HTTP Authorization: Bearer
     re.compile(r"gh[pousr]_[A-Za-z0-9]{36}"),        # GitHub PAT / OAuth / server / refresh
     re.compile(r"github_pat_[A-Za-z0-9_]{22,}"),     # GitHub fine-grained PAT
-    re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"),     # Slack bot / user / app / refresh
+    # Slack: bot(xoxb)/user(xoxp)/legacy(xoxa,xoxr,xoxs)/rotating refresh(xoxe)/app-level(xapp)。
+    # xox[baprs]- だけだと現行の app-level(xapp-)と refresh(xoxe-)を取りこぼす。
+    re.compile(r"(?:xox[baprse]|xapp)-[A-Za-z0-9-]{10,}"),
     re.compile(r"AIza[0-9A-Za-z_\-]{35}"),           # Google API key
     re.compile(r"ya29\.[0-9A-Za-z_\-]{20,}"),        # Google OAuth access token
     re.compile(r"eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+"),  # JWT
