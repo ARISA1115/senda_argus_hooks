@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from senda_argus_hooks.core.instruction_files import (
     MAX_LINE_DIGESTS,
+    collect_instruction_sources,
     MIN_LINE_LENGTH,
     classify_instruction_write,
     instruction_file_name,
@@ -116,26 +117,103 @@ def test_malformed_input_does_not_raise() -> None:
     assert system_prompt_line_digests() == []
 
 
-def test_every_llm_instrumentor_emits_system_prompt_digests() -> None:
-    """推論要求を出す全ての計装が、指示の行ダイジェストを載せる。
+def test_every_llm_emitter_attaches_system_prompt_digests() -> None:
+    """推論要求を出す全てのモジュールが、指示の行ダイジェストを載せる。
 
-    片方の系統だけ対応すると、その系統を使うエージェントだけ伝播が見えなくなる。系統ごとに
-    引数の渡り方が違うため、取り出し元を取り違えても静かに空になる。呼び出し規約の違いを
-    吸収していることを、系統の網羅として固定する。
+    計装の層だけでなく統合の層も対象にする。片方の層だけ対応すると、その層を通るエージェント
+    だけ伝播が見えなくなる。
     """
     import pathlib
 
-    root = pathlib.Path(__file__).resolve().parents[1] / "src/senda_argus_hooks/instrumentors"
-    emitting = [
-        p for p in sorted(root.glob("*.py"))
-        if "llm.request" in p.read_text(encoding="utf-8")
-    ]
-    assert emitting, "推論要求を出す計装が見つからない"
+    root = pathlib.Path(__file__).resolve().parents[1] / "src/senda_argus_hooks"
+    def emits_llm_request(path) -> bool:
+        """推論要求を実際に送出しているモジュールかどうかを、送出の呼び出しから判定する。
+
+        説明文や分岐で名前に触れているだけのモジュールを対象にすると、載せる先が無いのに
+        検査が失敗する。構文木で送出の呼び出しを辿り、その引数に名前が現れるものだけを採る。
+        """
+        import ast
+
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for call in ast.walk(tree):
+            if not isinstance(call, ast.Call):
+                continue
+            name = call.func.id if isinstance(call.func, ast.Name) else getattr(call.func, "attr", "")
+            if name != "emit_event":
+                continue
+            for node in ast.walk(call):
+                if isinstance(node, ast.Constant) and node.value == "llm.request":
+                    return True
+        return False
+
+    emitting = [p for p in sorted(root.rglob("*.py")) if emits_llm_request(p)]
+    assert emitting, "推論要求を出すモジュールが見つからない"
     missing = [
-        p.name for p in emitting
+        str(p.relative_to(root))
+        for p in emitting
         if "system_prompt_line_hashes" not in p.read_text(encoding="utf-8")
     ]
-    assert not missing, f"指示の行ダイジェストを載せていない計装がある: {missing}"
+    assert not missing, f"指示の行ダイジェストを載せていないモジュールがある: {missing}"
+
+
+def test_extraction_yields_values_for_each_provider_call_shape() -> None:
+    """提供元ごとの実際の呼び出し形で、値が空にならないことを固定する。
+
+    「載せていること」だけを見るテストは、取り出し元を取り違えても緑のまま通る。実際に 4 系統で
+    常に空を返す状態が機械レビューまで残った。ここでは各系統が実際に使う渡し方を再現し、
+    結果が空でないことを確かめる。
+    """
+
+    class _ModelHolder:
+        _system_instruction = _LONG
+
+    shapes = {
+        "役割つきの列": collect_instruction_sources({"messages": [{"role": "system", "content": _LONG}]}),
+        "独立した引数": collect_instruction_sources({"system": _LONG}),
+        "応答系の指示": collect_instruction_sources({"instructions": _LONG}),
+        "応答系の入力": collect_instruction_sources(
+            {"input": [{"role": "system", "content": [{"type": "input_text", "text": _LONG}]}]}
+        ),
+        "位置引数": collect_instruction_sources(None, ([{"role": "system", "content": _LONG}],)),
+        "保持元の属性": collect_instruction_sources(None, None, _ModelHolder()),
+        "種別つきの塊": collect_instruction_sources({"system": [{"type": "text", "text": _LONG}]}),
+    }
+    empty = [name for name, sources in shapes.items() if not system_prompt_line_digests(*sources)]
+    assert not empty, f"値が空になる渡し方がある: {empty}"
+
+
+def test_non_instruction_roles_do_not_produce_digests() -> None:
+    """指示でない役割は取り出さない。利用者の入力を指示として扱わない。"""
+    sources = collect_instruction_sources({"messages": [{"role": "user", "content": _LONG}]})
+    assert system_prompt_line_digests(*sources) == []
+
+
+def test_patch_body_matches_the_resulting_instruction_line() -> None:
+    """差分で書かれた場合も、適用後に指示へ現れる行と突合できる。
+
+    行の先頭に付く記号を落とさないと、指示側に載る記号の無い行と一致しない。
+    """
+    patch = "\n".join([
+        "--- a/AGENTS.md",
+        "+++ b/AGENTS.md",
+        "@@ -1,2 +1,3 @@",
+        " 既存の行はそのまま残ります十分な長さです",
+        f"+{_LONG}",
+        "-削除される行はここに書かれています十分長い",
+    ])
+    written = classify_instruction_write({"path": "/r/AGENTS.md", "patch": patch})
+    assert written is not None
+    prompt = system_prompt_line_digests(
+        *collect_instruction_sources({"messages": [{"role": "system", "content": f"前置き\n{_LONG}"}]})
+    )
+    assert set(written["written_line_hashes"]) & set(prompt)
+
+
+def test_removed_patch_lines_are_not_recorded() -> None:
+    """削除された行は適用後に残らないため、書き込みとして控えない。"""
+    patch = "\n".join(["@@ -1 +1 @@", f"-{_LONG}"])
+    written = classify_instruction_write({"path": "/r/AGENTS.md", "patch": patch})
+    assert written is None or not written["written_line_hashes"]
 
 
 def test_instrumentors_do_not_read_arguments_from_a_missing_name() -> None:

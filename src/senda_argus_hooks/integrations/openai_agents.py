@@ -4,6 +4,10 @@ import inspect
 import time
 from typing import Any, Callable
 
+from senda_argus_hooks.core.instruction_files import (
+    collect_instruction_sources,
+    system_prompt_line_digests,
+)
 from senda_argus_hooks.core.hashing import sha256_value
 from senda_argus_hooks.core.runtime import emit_event, get_config
 from senda_argus_hooks.instrumentors.base import BaseInstrumentor
@@ -51,10 +55,16 @@ class SendaArgusOpenAIAgentsProcessor:
         )
 
     def on_span_end(self, span: Any) -> None:
+        payload: dict[str, Any] = {"framework": "openai_agents", "span": _safe_value(span)}
+        # 推論にあたる区間だけ、指示の行ダイジェストを載せる。指示は区間の内容として渡るため、
+        # 呼び出しの引数ではなく区間そのものから取り出す。
+        line_hashes = _span_instruction_digests(span)
+        if line_hashes:
+            payload["system_prompt_line_hashes"] = line_hashes
         emit_event(
             _span_event_type(span, suffix="completed"),
             source={"component": "integration", "sdk": "openai_agents", "operation": "span.end"},
-            data={"agent": {"framework": "openai_agents", "span": _safe_value(span)}},
+            data={"agent": payload},
             status="success",
         )
 
@@ -210,3 +220,24 @@ def _safe_value(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_safe_value(v) for v in value]
     return str(value)
+
+
+def _span_instruction_digests(span: Any) -> list[str]:
+    """推論区間から、指示にあたる本文の行ダイジェストを取り出す。
+
+    指示は区間の内容として渡り、呼び出しの引数には現れない。取り出せない形なら空を返す。
+    観測の後処理が本来の実行を壊さないよう、例外にしない。
+    """
+    try:
+        if "llm.request" not in _span_event_type(span, suffix="completed"):
+            return []
+        value = _safe_value(span)
+        holder = getattr(span, "span_data", None)
+        sources = collect_instruction_sources(value if isinstance(value, dict) else None, None, holder)
+        if isinstance(value, dict):
+            inner = value.get("span_data")
+            if isinstance(inner, dict):
+                sources.extend(collect_instruction_sources(inner))
+        return system_prompt_line_digests(*sources)
+    except Exception:  # noqa: BLE001
+        return []

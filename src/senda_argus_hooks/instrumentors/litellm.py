@@ -3,7 +3,10 @@ from __future__ import annotations
 import time
 from typing import Any, Callable
 
-from senda_argus_hooks.core.instruction_files import system_prompt_line_digests
+from senda_argus_hooks.core.instruction_files import (
+    collect_instruction_sources,
+    system_prompt_line_digests,
+)
 from senda_argus_hooks.core.hashing import sha256_value
 from senda_argus_hooks.core.response_meta import extract_response_model as _extract_response_model
 from senda_argus_hooks.core.runtime import emit_event, get_config

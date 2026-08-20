@@ -6,7 +6,10 @@ import re
 import time
 from typing import Any, Callable
 
-from senda_argus_hooks.core.instruction_files import system_prompt_line_digests
+from senda_argus_hooks.core.instruction_files import (
+    collect_instruction_sources,
+    system_prompt_line_digests,
+)
 from senda_argus_hooks.core.hashing import sha256_value
 from senda_argus_hooks.core.model_identity import models_correspond
 from senda_argus_hooks.core.response_meta import extract_response_model as _extract_response_model
@@ -71,12 +74,13 @@ class BedrockInstrumentor(BaseInstrumentor):
             # 観測の後処理は本来の呼び出しから隔離する。ここで失敗しても応答は返す。
             with audit_guard(operation_name):
                 latency_ms = int((time.perf_counter() - start) * 1000)
-                # この経路の引数は api_params に入る。呼び出し規約が他の系統と異なるため、
-                # 取り出し元を合わせる。
+                # この経路の引数は api_params に入る。さらに InvokeModel では、提供元ごとの
+                # 要求項目が body へ直列化されて入るため、上位の名前には現れない。Converse は
+                # 上位に載る。両方を見ないと片方の操作で常に空になる。
                 _params = api_params if isinstance(api_params, dict) else {}
-                system_prompt_line_hashes = system_prompt_line_digests(
-                    messages=_params.get("messages"), system=_params.get("system")
-                )
+                _sources = collect_instruction_sources(_params)
+                _sources.extend(collect_instruction_sources(_decoded_body(_params)))
+                system_prompt_line_hashes = system_prompt_line_digests(*_sources)
                 llm_data: dict[str, Any] = {"provider": "bedrock", "operation": operation_name, "model": model, "input": input_payload}
                 if operation_name == "InvokeModel" and isinstance(response, dict):
                     raw = _read_and_rewrap_body(response)
@@ -247,3 +251,23 @@ def _invoke_model_usage(response: dict[str, Any], parsed: dict[str, Any]) -> dic
         if output_tokens is None:
             output_tokens = parsed.get("generation_token_count")
     return _int_usage(input_tokens, output_tokens)
+
+
+def _decoded_body(api_params: dict[str, Any]) -> dict[str, Any]:
+    """InvokeModel の body を辞書へ戻す。取り出せない形なら空を返す。
+
+    body は提供元ごとの要求そのものが直列化されて入る。観測の後処理が本来の呼び出しを
+    壊さないよう、解けない場合も例外にしない。
+    """
+    body = api_params.get("body")
+    if isinstance(body, (bytes, bytearray)):
+        try:
+            body = body.decode("utf-8")
+        except Exception:  # noqa: BLE001
+            return {}
+    if isinstance(body, str):
+        try:
+            body = json.loads(body)
+        except Exception:  # noqa: BLE001
+            return {}
+    return body if isinstance(body, dict) else {}

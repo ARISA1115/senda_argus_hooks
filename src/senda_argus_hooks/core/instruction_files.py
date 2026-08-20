@@ -55,6 +55,9 @@ _PATH_KEYS: Final[tuple[str, ...]] = (
 
 # 1 件あたりに出す行ダイジェストの上限。指示ファイルは大きくなりうるため、送出量と受け取り側の
 # 保持量に上限を置く。上限を超えた分は落とす。落ちた行が突合から漏れるだけで、誤検知にはならない。
+# 指示にあたる役割の名前。この役割の本文が変わることは、指示が変わることを意味する。
+SYSTEM_ROLE: Final[str] = "system"
+
 MAX_LINE_DIGESTS: Final[int] = 64
 
 # 突合の対象にする行の最小の長さ。短い行は無関係な文書どうしでも一致するため、集合の重なりが
@@ -86,12 +89,52 @@ def instruction_file_name(path: Any) -> Optional[str]:
     return None
 
 
+_DIFF_MARKERS: Final[tuple[str, ...]] = ("@@ ", "--- ", "+++ ")
+
+
+def _looks_like_patch(body: str) -> bool:
+    """本文が差分形式かどうかを、位置情報の行の有無で判定する。"""
+    for raw in body.splitlines():
+        if raw.startswith(_DIFF_MARKERS):
+            return True
+    return False
+
+
+def normalize_patch_body(body: Any) -> Any:
+    """差分形式の本文を、適用後に残る文言へ均す。
+
+    書き込みが差分で渡された場合、行の先頭に付く記号を落とさずにダイジェストへ通すと、後から
+    指示に現れる同じ行と一致しない。指示側には記号の付かない行が載るためである。差分でない
+    本文はそのまま返す。
+
+    削除の行は適用後に残らないため落とす。位置情報の行も本文ではないため落とす。
+    """
+    if not isinstance(body, str) or not body or not _looks_like_patch(body):
+        return body
+    kept: list[str] = []
+    for raw in body.splitlines():
+        if raw.startswith(("+++", "---", "@@", "diff ", "index ")):
+            continue
+        if raw.startswith("-"):
+            continue
+        if raw.startswith("+"):
+            kept.append(raw[1:])
+            continue
+        if raw.startswith(" "):
+            kept.append(raw[1:])
+            continue
+        kept.append(raw)
+    return "\n".join(kept)
+
+
 def line_digests(body: Any) -> list[str]:
     """本文を正規化した行ごとのダイジェストにする。
 
     前後の空白を落として空行を除く。短い行は無関係な文書どうしでも一致するため除く。同じ行が
-    繰り返されても 1 つに畳む。出現順は保たず、集合として扱う。
+    繰り返されても 1 つに畳む。出現順は保たず、集合として扱う。差分形式の本文は、適用後に残る
+    文言へ均してから通す。
     """
+    body = normalize_patch_body(body)
     if not isinstance(body, str) or not body:
         return []
     seen: set[str] = set()
@@ -138,41 +181,127 @@ def classify_instruction_write(arguments: Any) -> Optional[dict[str, Any]]:
     }
 
 
-def _system_texts(messages: Any, system: Any) -> list[str]:
-    """指示に当たる本文を、提供元ごとの形の違いを吸収して取り出す。
+# 指示にあたる本文が載る引数の名前。提供元ごとに異なる。役割つきの列に載る場合と、独立した
+# 引数で渡る場合と、オブジェクトの属性として保持される場合がある。
+_INSTRUCTION_KEYS: Final[tuple[str, ...]] = (
+    "system", "system_instruction", "instructions", "systemInstruction",
+)
 
-    役割つきのメッセージ列に載る場合と、独立した引数で渡される場合がある。後者はさらに、文字列
-    そのものの場合と、種別つきの塊の並びの場合がある。
+# 役割つきの要素が載る引数の名前。応答系の要求では input に載る。
+_ROLE_LIST_KEYS: Final[tuple[str, ...]] = ("messages", "input", "contents")
+
+
+def _block_text(block: Any) -> str:
+    """種別つきの塊から本文を取り出す。形は提供元ごとに異なる。"""
+    if isinstance(block, str):
+        return block
+    if isinstance(block, dict):
+        for key in ("text", "content", "input_text"):
+            value = block.get(key)
+            if isinstance(value, str):
+                return value
+        return ""
+    text = getattr(block, "text", None)
+    return text if isinstance(text, str) else ""
+
+
+def _role_of(item: Any) -> str:
+    if isinstance(item, dict):
+        return str(item.get("role") or "").strip().lower()
+    return str(getattr(item, "role", "") or "").strip().lower()
+
+
+def _content_of(item: Any) -> Any:
+    if isinstance(item, dict):
+        for key in ("content", "parts", "text"):
+            if key in item:
+                return item[key]
+        return None
+    for key in ("content", "parts", "text"):
+        value = getattr(item, key, None)
+        if value is not None:
+            return value
+    return None
+
+
+def _texts_from(source: Any) -> list[str]:
+    """1 つの入力から、指示にあたる本文を取り出す。
+
+    受け取る形は 3 通りある。役割つきの要素の列、種別つきの塊の列、文字列そのものである。
+    列の場合は役割が指示にあたる要素だけを採る。役割を持たない塊の列は、その全体が指示として
+    渡されたものとして扱う。
     """
     texts: list[str] = []
-    if isinstance(messages, (list, tuple)):
-        for message in messages:
-            if isinstance(message, dict):
-                role = str(message.get("role") or "").strip().lower()
-                content = message.get("content")
+    if source is None:
+        return texts
+    if isinstance(source, str):
+        return [source] if source else []
+    if isinstance(source, dict):
+        return [t for t in [_block_text(source)] if t]
+    if isinstance(source, (list, tuple)):
+        has_role = any(_role_of(item) for item in source)
+        for item in source:
+            if has_role:
+                if _role_of(item) != SYSTEM_ROLE:
+                    continue
+                content = _content_of(item)
             else:
-                role = str(getattr(message, "role", "") or "").strip().lower()
-                content = getattr(message, "content", None)
-            if role != "system":
-                continue
+                content = item
             if isinstance(content, str):
-                texts.append(content)
+                if content:
+                    texts.append(content)
             elif isinstance(content, (list, tuple)):
-                texts.extend(b.get("text", "") for b in content if isinstance(b, dict))
-    if isinstance(system, str):
-        texts.append(system)
-    elif isinstance(system, (list, tuple)):
-        texts.extend(b.get("text", "") for b in system if isinstance(b, dict))
-    return [t for t in texts if isinstance(t, str) and t]
+                texts.extend(t for t in (_block_text(b) for b in content) if t)
+            else:
+                t = _block_text(content)
+                if t:
+                    texts.append(t)
+        return texts
+    t = _block_text(source)
+    return [t] if t else []
 
 
-def system_prompt_line_digests(messages: Any = None, system: Any = None) -> list[str]:
+def collect_instruction_sources(
+    call_kwargs: Any = None, positional: Any = None, holder: Any = None
+) -> list[Any]:
+    """呼び出しと保持元から、指示が載りうる箇所を集める。
+
+    指示は 3 つの場所のいずれかにある。キーワード引数、位置引数、そして呼び出し対象の
+    オブジェクトが保持する属性である。どこに載るかは提供元と操作ごとに違うため、名前の候補を
+    網羅して集め、取り出し側では場所を意識しない。
+    """
+    sources: list[Any] = []
+    if isinstance(call_kwargs, dict):
+        for key in _INSTRUCTION_KEYS + _ROLE_LIST_KEYS:
+            if call_kwargs.get(key) is not None:
+                sources.append(call_kwargs[key])
+    if isinstance(positional, (list, tuple)):
+        for item in positional:
+            if isinstance(item, (list, tuple)):
+                sources.append(item)
+    if holder is not None:
+        for key in _INSTRUCTION_KEYS:
+            for name in (key, f"_{key}"):
+                value = getattr(holder, name, None)
+                if value is not None:
+                    sources.append(value)
+                    break
+    return sources
+
+
+def system_prompt_line_digests(*sources: Any, **named: Any) -> list[str]:
     """指示の本文を、突合可能な行ごとのダイジェストにする。
 
-    書き込み側と同じ正規化と同じ下限を通す。両側で規則が違うと、同じ行が違うダイジェストになり
-    突合が成立しない。規則をこの層に集約するのはそのためである。
+    書き込み側と同じ正規化と同じ下限を通す。両側で規則が違うと、同じ行が違うダイジェストに
+    なり突合が成立しない。規則をこの層に集約するのはそのためである。
+
+    入力は形を問わない。役割つきの列、種別つきの塊、文字列、いずれも受ける。提供元ごとに
+    指示の渡り方が違うため、呼び出し側は持っているものをそのまま渡せばよい。
     """
-    texts = _system_texts(messages, system)
+    texts: list[str] = []
+    for source in list(sources) + list(named.values()):
+        texts.extend(_texts_from(source))
+    texts = [t for t in texts if t]
     if not texts:
         return []
     return line_digests("\n".join(texts))

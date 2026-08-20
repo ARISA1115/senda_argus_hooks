@@ -4,7 +4,11 @@ import json
 import time
 from typing import Any, Callable
 
-from senda_argus_hooks.core.instruction_files import system_prompt_line_digests
+from senda_argus_hooks.core.instruction_files import (
+    classify_instruction_write,
+    collect_instruction_sources,
+    system_prompt_line_digests,
+)
 from senda_argus_hooks.core.hashing import sha256_value
 from senda_argus_hooks.core.identity import data_source_hash, derive_mcp_profile_id, derive_purpose_id, mcp_data_source_profile, normalize_url
 from senda_argus_hooks.core.runtime import emit_event, get_config
@@ -159,6 +163,11 @@ class ArgusSDKInstrumentor(BaseInstrumentor):
                 "mcp_profile_id": mcp_profile_id,
                 "arguments_hash": sha256_value(raw_args_payload),
             }
+            # 組み込みの MCP 経路からも指示ファイルへの書き込みが起こる。別経路の計装だけに
+            # 分類を置くと、こちらを通る書き込みが観測されず伝播の起点が欠ける。
+            _written = classify_instruction_write(arguments)
+            if _written:
+                base_mcp.update(_written)
             if cfg.capture_arguments:
                 base_mcp["arguments"] = args_payload
             emit_event(
