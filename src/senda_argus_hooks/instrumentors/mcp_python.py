@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from typing import Any, Callable
 
+from senda_argus_hooks.core.instruction_files import classify_instruction_write
 from senda_argus_hooks.core.hashing import sha256_value
 from senda_argus_hooks.core.identity import data_source_hash, derive_mcp_profile_id, derive_purpose_id, mcp_data_source_profile, normalize_url
 from senda_argus_hooks.core.runtime import emit_event, get_config
@@ -131,6 +132,12 @@ def _mcp_metadata(obj, operation: str, args, kwargs) -> dict[str, Any]:
         "data_source_hash": source_hash,
         "arguments_hash": args_hash,
     }
+    # 指示ファイルへの書き込みは、次のエージェントへ払い出しが渡る経路になる。突合に使う
+    # ダイジェストだけを載せる。本文は載せない。分類の可否は受け取り側が名前から判定し直すため、
+    # ここでの分類は候補の提示にとどまる。
+    written = classify_instruction_write(arguments.get("arguments"))
+    if written:
+        meta.update(written)
     if cfg.capture_arguments:
         meta["arguments"] = {**arguments, "purpose_id": purpose_id, "data_source_hash": source_hash}
     return meta

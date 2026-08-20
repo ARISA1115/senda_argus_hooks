@@ -4,6 +4,7 @@ import json
 import time
 from typing import Any, Callable
 
+from senda_argus_hooks.core.instruction_files import system_prompt_line_digests
 from senda_argus_hooks.core.hashing import sha256_value
 from senda_argus_hooks.core.identity import data_source_hash, derive_mcp_profile_id, derive_purpose_id, mcp_data_source_profile, normalize_url
 from senda_argus_hooks.core.runtime import emit_event, get_config
@@ -102,6 +103,9 @@ class ArgusSDKInstrumentor(BaseInstrumentor):
                             data=proposed_data,
                             status="success",
                         )
+                system_prompt_line_hashes = system_prompt_line_digests(
+                    messages=kwargs.get("messages"), system=kwargs.get("system")
+                )
                 llm_data = {"provider": provider, "operation": operation, "purpose": purpose, "model": model, "input": input_payload, "output": output_payload}
                 if messages_hash:
                     llm_data["messages_hash"] = messages_hash
@@ -110,6 +114,8 @@ class ArgusSDKInstrumentor(BaseInstrumentor):
                     llm_data["usage"] = usage
                 if isinstance(response_model, str) and response_model.strip():
                     llm_data["response_model"] = response_model
+                if system_prompt_line_hashes:
+                    llm_data["system_prompt_line_hashes"] = system_prompt_line_hashes
                 emit_event(
                     "llm.request",
                     source={"component": "instrumentor", "sdk": "senda_argus_hooks.sdk", "provider": provider, "operation": operation},

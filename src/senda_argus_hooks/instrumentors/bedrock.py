@@ -6,6 +6,7 @@ import re
 import time
 from typing import Any, Callable
 
+from senda_argus_hooks.core.instruction_files import system_prompt_line_digests
 from senda_argus_hooks.core.hashing import sha256_value
 from senda_argus_hooks.core.model_identity import models_correspond
 from senda_argus_hooks.core.response_meta import extract_response_model as _extract_response_model
@@ -70,6 +71,12 @@ class BedrockInstrumentor(BaseInstrumentor):
             # 観測の後処理は本来の呼び出しから隔離する。ここで失敗しても応答は返す。
             with audit_guard(operation_name):
                 latency_ms = int((time.perf_counter() - start) * 1000)
+                # この経路の引数は api_params に入る。呼び出し規約が他の系統と異なるため、
+                # 取り出し元を合わせる。
+                _params = api_params if isinstance(api_params, dict) else {}
+                system_prompt_line_hashes = system_prompt_line_digests(
+                    messages=_params.get("messages"), system=_params.get("system")
+                )
                 llm_data: dict[str, Any] = {"provider": "bedrock", "operation": operation_name, "model": model, "input": input_payload}
                 if operation_name == "InvokeModel" and isinstance(response, dict):
                     raw = _read_and_rewrap_body(response)
@@ -89,6 +96,8 @@ class BedrockInstrumentor(BaseInstrumentor):
                     if usage:
                         llm_data["usage"] = usage
                     llm_data["output"] = {"response_hash": sha256_value(response.get("output"))} if not cfg.capture_response else {"response": response.get("output")}
+                if system_prompt_line_hashes:
+                    llm_data["system_prompt_line_hashes"] = system_prompt_line_hashes
                 emit_event(
                     "llm.request",
                     source={"component": "instrumentor", "sdk": "bedrock", "provider": "bedrock", "operation": operation_name},
