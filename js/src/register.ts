@@ -4,6 +4,9 @@ import { instrumentOpenAI } from "./instrumentors/openai.js";
 import { instrumentAnthropic } from "./instrumentors/anthropic.js";
 import { instrumentOllama } from "./instrumentors/ollama.js";
 import { instrumentMCP } from "./instrumentors/mcp.js";
+import { instrumentLangGraph } from "./integrations/langgraph.js";
+import { instrumentLlamaIndex } from "./integrations/llamaindex.js";
+import { instrumentOpenAIAgents } from "./integrations/openai_agents.js";
 
 export interface Targets {
   openai?: any;
@@ -11,6 +14,9 @@ export interface Targets {
   ollama?: any;
   mcp?: any;
   mcpMetadata?: { serverName?: string; serverUrl?: string; capability?: string };
+  langgraph?: any;
+  llamaindex?: { retriever?: any; embedModel?: any; queryEngine?: any };
+  openaiAgents?: any;
 }
 
 export function register(options: RegisterOptions = {}, targets: Targets = {}) {
@@ -23,6 +29,9 @@ export function instrument(targets: Targets = {}) {
     openai: targets.openai ? instrumentOpenAI(targets.openai) : false,
     anthropic: targets.anthropic ? instrumentAnthropic(targets.anthropic) : false,
     ollama: targets.ollama ? instrumentOllama(targets.ollama) : false,
-    mcp: targets.mcp ? instrumentMCP(targets.mcp, targets.mcpMetadata) : false
+    mcp: targets.mcp ? instrumentMCP(targets.mcp, targets.mcpMetadata) : false,
+    langgraph: targets.langgraph ? instrumentLangGraph(targets.langgraph) : false,
+    llamaindex: targets.llamaindex ? instrumentLlamaIndex(targets.llamaindex) : false,
+    openaiAgents: targets.openaiAgents ? instrumentOpenAIAgents(targets.openaiAgents) : false
   };
 }

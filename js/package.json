@@ -1,6 +1,6 @@
 {
   "name": "@senda/argus-hooks",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Senda-Argus Hooks JS - hook-only observability SDK for Node.js LLM and MCP runtimes",
   "type": "module",
   "main": "./dist/index.js",
@@ -11,24 +11,60 @@
       "import": "./dist/index.js"
     }
   },
-  "files": ["dist", "README.md"],
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "npm run build && node --test dist/tests/*.test.js"
   },
-  "engines": {"node": ">=18"},
-  "devDependencies": {"@types/node": "^22.0.0", "typescript": "^5.5.0"},
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.5.0"
+  },
   "peerDependencies": {
     "openai": ">=4",
     "@anthropic-ai/sdk": ">=0.30",
     "ollama": ">=0.5",
-    "@modelcontextprotocol/client": ">=1"
+    "@modelcontextprotocol/client": ">=1",
+    "@langchain/core": ">=0.3",
+    "@langchain/langgraph": ">=0.2",
+    "llamaindex": ">=0.10",
+    "ai": ">=6",
+    "@openai/agents": ">=0.1"
   },
   "peerDependenciesMeta": {
-    "openai": {"optional": true},
-    "@anthropic-ai/sdk": {"optional": true},
-    "ollama": {"optional": true},
-    "@modelcontextprotocol/client": {"optional": true}
+    "openai": {
+      "optional": true
+    },
+    "@anthropic-ai/sdk": {
+      "optional": true
+    },
+    "ollama": {
+      "optional": true
+    },
+    "@modelcontextprotocol/client": {
+      "optional": true
+    },
+    "@langchain/core": {
+      "optional": true
+    },
+    "@langchain/langgraph": {
+      "optional": true
+    },
+    "llamaindex": {
+      "optional": true
+    },
+    "ai": {
+      "optional": true
+    },
+    "@openai/agents": {
+      "optional": true
+    }
   },
   "license": "Apache-2.0"
 }

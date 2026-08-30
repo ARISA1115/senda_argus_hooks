@@ -57,6 +57,13 @@ npm test
 ```
 
 
+
+## v0.7.0 - Node / TypeScript framework integrations
+
+v0.7.0 adds Node/TypeScript integrations for LangChain JS, LangGraph JS, LlamaIndex TS, Vercel AI SDK, and OpenAI Agents SDK JS/TS. The integrations preserve the shared `schema_version = 0.2` event model and normalize framework activity into existing `llm.*`, `tool_call.*`, `agent.*`, `retrieval.*`, `embedding.*`, and `rag.query.*` event families.
+
+See `js/README.md` and `RELEASE_NOTES_v0.7.0.md` for integration examples and verification status.
+
 ## v0.6.0 - Node.js / JavaScript SDK hooks
 
 v0.6.0 adds **Senda-Argus Hooks JS v0.1** under `js/`. The Node.js implementation emits the same normalized event schema (`schema_version = "0.2"`) as the Python package so downstream Argus analysis can correlate Python and Node.js agent activity consistently.

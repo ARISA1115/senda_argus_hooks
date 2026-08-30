@@ -7,3 +7,9 @@ export { instrumentMCP } from "./instrumentors/mcp.js";
 export { JsonlExporter } from "./exporters/jsonl.js";
 export { StdoutExporter } from "./exporters/stdout.js";
 export type { EventRecord, Exporter, RegisterOptions, RuntimeConfig, TraceContext } from "./core/types.js";
+
+export { SendaArgusLangChainCallbackHandler, langChainCallbackHandler } from "./integrations/langchain.js";
+export { instrumentLangGraph, invokeWithArgus, streamWithArgus } from "./integrations/langgraph.js";
+export { instrumentLlamaIndex } from "./integrations/llamaindex.js";
+export { sendaArgusLanguageModelMiddleware } from "./integrations/vercel_ai.js";
+export { SendaArgusOpenAIAgentsProcessor, instrumentOpenAIAgents } from "./integrations/openai_agents.js";
