@@ -4,6 +4,11 @@ import json
 import time
 from typing import Any, Callable
 
+from senda_argus_hooks.core.instruction_files import (
+    classify_instruction_write,
+    collect_instruction_sources,
+    system_prompt_line_digests,
+)
 from senda_argus_hooks.core.hashing import sha256_value
 from senda_argus_hooks.core.identity import data_source_hash, derive_mcp_profile_id, derive_purpose_id, mcp_data_source_profile, normalize_url
 from senda_argus_hooks.core.runtime import emit_event, get_config
@@ -78,15 +83,33 @@ class ArgusSDKInstrumentor(BaseInstrumentor):
                     purpose = response.get("purpose") or purpose
                     report, actual_tools = _extract_senda_argus_report(response)
                     if report is not None:
-                        steering_detected = bool(actual_tools) and report.get("tool_name") not in {
-                            (tc.get("function") or {}).get("name") for tc in actual_tools if isinstance(tc, dict)
+                        actual_names = [
+                            (tc.get("function") or {}).get("name")
+                            for tc in actual_tools if isinstance(tc, dict)
+                        ]
+                        actual_names = [n for n in actual_names if n]
+                        steering_detected = bool(actual_tools) and report.get("tool_name") not in set(actual_names)
+                        proposed_data: dict[str, Any] = {
+                            "senda_argus_report": report,
+                            "steering_detected": steering_detected,
                         }
+                        # 誘導検知が読む offered/chosen は自己申告でなく独立観測から埋める。offered は
+                        # リクエストが LLM に提示したツール集合、chosen は応答の実 tool 呼び出し。自己申告
+                        # (report) は上の consistency 判定にのみ使い、観測でない値を誘導判定へ流さない。
+                        observed_offered = _offered_tool_names(kwargs)
+                        if observed_offered:
+                            proposed_data["alternatives"] = [{"name": n} for n in observed_offered]
+                        if actual_names:
+                            proposed_data["selected_tool"] = actual_names[0]
                         emit_event(
                             "llm.tool_selection.proposed",
                             source={"component": "instrumentor", "sdk": "senda_argus_hooks.sdk", "provider": provider, "operation": operation},
-                            data={"senda_argus_report": report, "steering_detected": steering_detected},
+                            data=proposed_data,
                             status="success",
                         )
+                system_prompt_line_hashes = system_prompt_line_digests(
+                    messages=kwargs.get("messages"), system=kwargs.get("system")
+                )
                 llm_data = {"provider": provider, "operation": operation, "purpose": purpose, "model": model, "input": input_payload, "output": output_payload}
                 if messages_hash:
                     llm_data["messages_hash"] = messages_hash
@@ -95,6 +118,8 @@ class ArgusSDKInstrumentor(BaseInstrumentor):
                     llm_data["usage"] = usage
                 if isinstance(response_model, str) and response_model.strip():
                     llm_data["response_model"] = response_model
+                if system_prompt_line_hashes:
+                    llm_data["system_prompt_line_hashes"] = system_prompt_line_hashes
                 emit_event(
                     "llm.request",
                     source={"component": "instrumentor", "sdk": "senda_argus_hooks.sdk", "provider": provider, "operation": operation},
@@ -138,6 +163,11 @@ class ArgusSDKInstrumentor(BaseInstrumentor):
                 "mcp_profile_id": mcp_profile_id,
                 "arguments_hash": sha256_value(raw_args_payload),
             }
+            # 組み込みの MCP 経路からも指示ファイルへの書き込みが起こる。別経路の計装だけに
+            # 分類を置くと、こちらを通る書き込みが観測されず伝播の起点が欠ける。
+            _written = classify_instruction_write(arguments)
+            if _written:
+                base_mcp.update(_written)
             if cfg.capture_arguments:
                 base_mcp["arguments"] = args_payload
             emit_event(
@@ -354,6 +384,29 @@ def _purpose_from_args(args) -> str | None:
     if args and isinstance(args[0], dict):
         return args[0].get("purpose")
     return None
+
+
+def _offered_tool_names(kwargs) -> list[str]:
+    """リクエストが LLM に提示したツール集合の名前を取り出す。
+
+    誘導検知の offered は収集側が独立観測する値であり、モデルの自己申告からは導かない。
+    OpenAI / ollama 互換の tools=[{"type":"function","function":{"name":...}}] と、素の
+    {"name":...} の双方から関数名を拾う。
+    """
+    tools = kwargs.get("tools")
+    names: list[str] = []
+    if isinstance(tools, (list, tuple)):
+        for tool in tools:
+            name = ""
+            if isinstance(tool, dict):
+                fn = tool.get("function")
+                if isinstance(fn, dict):
+                    name = str(fn.get("name") or "")
+                if not name:
+                    name = str(tool.get("name") or "")
+            if name:
+                names.append(name)
+    return names
 
 
 def _extract_senda_argus_report(response: dict) -> tuple[dict | None, list]:

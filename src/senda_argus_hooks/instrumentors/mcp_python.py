@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from typing import Any, Callable
 
+from senda_argus_hooks.core.instruction_files import classify_instruction_write
 from senda_argus_hooks.core.hashing import sha256_value
 from senda_argus_hooks.core.resource_access import classify_read_resource, classify_resource_access
 from senda_argus_hooks.core.identity import data_source_hash, derive_mcp_profile_id, derive_purpose_id, mcp_data_source_profile, normalize_url
@@ -132,14 +133,21 @@ def _mcp_metadata(obj, operation: str, args, kwargs) -> dict[str, Any]:
         "data_source_hash": source_hash,
         "arguments_hash": args_hash,
     }
-    # 同じ資源への読み取りと書き込みを 1 つの鍵で結び付ける。data_source_hash はツール名を
-    # 含むため、同じ資源でも読み取りと書き込みで別の値になり、往復を追う鍵にならない。
-    # 名前そのものは載せない。判定に要るのは同一性だけで、名前を運ぶと受け取り側の権威記録に残る。
     if operation == "call_tool":
+        # 同じ資源への読み取りと書き込みを 1 つの鍵で結び付ける。data_source_hash はツール名を
+        # 含むため、同じ資源でも読み取りと書き込みで別の値になり、往復を追う鍵にならない。
+        # 名前そのものは載せない。判定に要るのは同一性だけで、名前を運ぶと受け取り側の権威記録に残る。
         meta.update(classify_resource_access(arguments.get("arguments"), server=server_name))
+        # 指示ファイルへの書き込みは、次のエージェントへ払い出しが渡る経路になる。突合に使う
+        # ダイジェストだけを載せる。本文は載せない。分類の可否は受け取り側が名前から判定し直すため、
+        # ここでの分類は候補の提示にとどまる。
+        written = classify_instruction_write(arguments.get("arguments"))
+        if written:
+            meta.update(written)
     else:
         # 資源の直接読み取りは引数の形が違い、位置引数か uri に資源が直接入る。ここを通さないと
         # 同じ資源への読み取りがツール呼び出しの書き込みと結び付かず、往復として現れない。
+        # 指示ファイルの分類は本文にあたる引数を要するため、この経路では該当しない。
         meta.update(
             classify_read_resource(arguments.get("args"), arguments.get("kwargs"), server=server_name)
         )
