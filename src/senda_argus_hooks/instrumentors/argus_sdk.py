@@ -4,6 +4,11 @@ import json
 import time
 from typing import Any, Callable
 
+from senda_argus_hooks.core.instruction_files import (
+    classify_instruction_write,
+    collect_instruction_sources,
+    system_prompt_line_digests,
+)
 from senda_argus_hooks.core.hashing import sha256_value
 from senda_argus_hooks.core.identity import data_source_hash, derive_mcp_profile_id, derive_purpose_id, mcp_data_source_profile, normalize_url
 from senda_argus_hooks.core.runtime import emit_event, get_config
@@ -102,6 +107,9 @@ class ArgusSDKInstrumentor(BaseInstrumentor):
                             data=proposed_data,
                             status="success",
                         )
+                system_prompt_line_hashes = system_prompt_line_digests(
+                    messages=kwargs.get("messages"), system=kwargs.get("system")
+                )
                 llm_data = {"provider": provider, "operation": operation, "purpose": purpose, "model": model, "input": input_payload, "output": output_payload}
                 if messages_hash:
                     llm_data["messages_hash"] = messages_hash
@@ -110,6 +118,8 @@ class ArgusSDKInstrumentor(BaseInstrumentor):
                     llm_data["usage"] = usage
                 if isinstance(response_model, str) and response_model.strip():
                     llm_data["response_model"] = response_model
+                if system_prompt_line_hashes:
+                    llm_data["system_prompt_line_hashes"] = system_prompt_line_hashes
                 emit_event(
                     "llm.request",
                     source={"component": "instrumentor", "sdk": "senda_argus_hooks.sdk", "provider": provider, "operation": operation},
@@ -153,6 +163,11 @@ class ArgusSDKInstrumentor(BaseInstrumentor):
                 "mcp_profile_id": mcp_profile_id,
                 "arguments_hash": sha256_value(raw_args_payload),
             }
+            # 組み込みの MCP 経路からも指示ファイルへの書き込みが起こる。別経路の計装だけに
+            # 分類を置くと、こちらを通る書き込みが観測されず伝播の起点が欠ける。
+            _written = classify_instruction_write(arguments)
+            if _written:
+                base_mcp.update(_written)
             if cfg.capture_arguments:
                 base_mcp["arguments"] = args_payload
             emit_event(

@@ -4,6 +4,10 @@ import re
 import time
 from typing import Any, Callable
 
+from senda_argus_hooks.core.instruction_files import (
+    collect_instruction_sources,
+    system_prompt_line_digests,
+)
 from senda_argus_hooks.core.hashing import sha256_value
 from senda_argus_hooks.core.model_identity import models_correspond
 from senda_argus_hooks.core.runtime import emit_event, get_config
@@ -171,6 +175,11 @@ def _emit_llm_request(
 ) -> None:
     """非 stream と stream の両経路で共有する llm.request イベントの組み立てと送出。"""
     name = _model_name(model)
+    # この系統は指示をモデルの構築時に受け取り、モデル側が保持する。要求には contents しか
+    # 載らないため、呼び出しの引数だけを見ると常に空になる。保持元も併せて見る。
+    system_prompt_line_hashes = system_prompt_line_digests(
+        *collect_instruction_sources(kwargs, args, model)
+    )
     llm_data: dict[str, Any] = {
         "provider": "vertex_ai",
         "operation": "generate_content",
@@ -186,6 +195,8 @@ def _emit_llm_request(
     llm_data["output"] = output
     if extra:
         llm_data.update(extra)
+    if system_prompt_line_hashes:
+        llm_data["system_prompt_line_hashes"] = system_prompt_line_hashes
     emit_event(
         "llm.request",
         source={"component": "instrumentor", "sdk": "vertexai", "provider": "vertex_ai", "operation": "generate_content"},
