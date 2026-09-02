@@ -4,6 +4,7 @@ import time
 from typing import Any, Callable
 
 from senda_argus_hooks.core.hashing import sha256_value
+from senda_argus_hooks.core.resource_access import classify_resource_access
 from senda_argus_hooks.core.identity import data_source_hash, derive_mcp_profile_id, derive_purpose_id, mcp_data_source_profile, normalize_url
 from senda_argus_hooks.core.runtime import emit_event, get_config
 from .base import BaseInstrumentor, audit_guard
@@ -131,6 +132,10 @@ def _mcp_metadata(obj, operation: str, args, kwargs) -> dict[str, Any]:
         "data_source_hash": source_hash,
         "arguments_hash": args_hash,
     }
+    # 同じ資源への読み取りと書き込みを 1 つの鍵で結び付ける。data_source_hash はツール名を
+    # 含むため、同じ資源でも読み取りと書き込みで別の値になり、往復を追う鍵にならない。
+    # 名前そのものは載せない。判定に要るのは同一性だけで、名前を運ぶと受け取り側の権威記録に残る。
+    meta.update(classify_resource_access(arguments.get("arguments")))
     if cfg.capture_arguments:
         meta["arguments"] = {**arguments, "purpose_id": purpose_id, "data_source_hash": source_hash}
     return meta
