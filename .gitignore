@@ -223,3 +223,6 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
+
+# PR 本文の下書き。コミットへ含めない
+/.pr-body-*.md
