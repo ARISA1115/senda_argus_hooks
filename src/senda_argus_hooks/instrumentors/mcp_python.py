@@ -131,25 +131,34 @@ def _mcp_metadata(obj, operation: str, args, kwargs) -> dict[str, Any]:
         "purpose_source": "mcp_data_source_hash",
         "purpose_profile": purpose_profile,
         "data_source_hash": source_hash,
+        # 呼び出しを包んだ外側の辞書のダイジェスト。相関の追跡に使う既存の項目であり、
+        # 判定が読む書き込みの内容のダイジェストは分類器が資源の引数から作って上書きする。
         "arguments_hash": args_hash,
     }
+    # 提供元の識別には、表示名だけでなく正規化した URL も含める。表示名は重複しうるし、
+    # 取得できないときは同じ既定値へ落ちる。名前だけで括ると、別の提供元の同名の資源が
+    # 同じ鍵に集まり、無関係な読み書きが往復に見える。
+    resource_scope = mcp_profile_id
     if operation == "call_tool":
         # 同じ資源への読み取りと書き込みを 1 つの鍵で結び付ける。data_source_hash はツール名を
         # 含むため、同じ資源でも読み取りと書き込みで別の値になり、往復を追う鍵にならない。
         # 名前そのものは載せない。判定に要るのは同一性だけで、名前を運ぶと受け取り側の権威記録に残る。
-        meta.update(classify_resource_access(arguments.get("arguments"), server=server_name))
+        meta.update(classify_resource_access(arguments.get("arguments"), server=resource_scope))
         # 指示ファイルへの書き込みは、次のエージェントへ払い出しが渡る経路になる。突合に使う
         # ダイジェストだけを載せる。本文は載せない。分類の可否は受け取り側が名前から判定し直すため、
         # ここでの分類は候補の提示にとどまる。
         written = classify_instruction_write(arguments.get("arguments"))
         if written:
             meta.update(written)
-    else:
+    elif operation == "read_resource":
         # 資源の直接読み取りは引数の形が違い、位置引数か uri に資源が直接入る。ここを通さないと
         # 同じ資源への読み取りがツール呼び出しの書き込みと結び付かず、往復として現れない。
         # 指示ファイルの分類は本文にあたる引数を要するため、この経路では該当しない。
+        #
+        # 分岐は当該の操作に限る。一覧を取る操作も引数を位置で受けるため、まとめて通すと
+        # 継続位置の値を資源と取り違え、存在しない鍵を読み取りとして作ってしまう。
         meta.update(
-            classify_read_resource(arguments.get("args"), arguments.get("kwargs"), server=server_name)
+            classify_read_resource(arguments.get("args"), arguments.get("kwargs"), server=resource_scope)
         )
     if cfg.capture_arguments:
         meta["arguments"] = {**arguments, "purpose_id": purpose_id, "data_source_hash": source_hash}

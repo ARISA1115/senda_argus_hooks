@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from typing import Any, Final, Optional
 
+from senda_argus_hooks.core.hashing import sha256_value
 from senda_argus_hooks.core.identity import stable_hash
 
 # 資源を指す引数の名前。提供元ごとに異なる。
@@ -33,11 +34,24 @@ _BODY_KEYS: Final[tuple[str, ...]] = (
     "value", "file_text", "source", "patch", "diff", "payload",
 )
 
+# 区切りの表記ゆれを揃える項目。ファイルの位置を指すものに限る。
+_PATH_LIKE_KEYS: Final[frozenset[str]] = frozenset({
+    "path", "file_path", "filename", "file", "target_path", "filepath",
+})
+
 READ: Final[str] = "read"
 WRITE: Final[str] = "write"
 
 
 _MISSING: Final[object] = object()
+
+
+def _first_present_with_key(arguments: dict[str, Any], keys: tuple[str, ...]) -> tuple[Any, str]:
+    """最初に見つかった値と、その鍵の名前を返す。"""
+    for key in keys:
+        if key in arguments and arguments[key] is not None:
+            return arguments[key], key
+    return _MISSING, ""
 
 
 def _first_present(arguments: dict[str, Any], keys: tuple[str, ...]) -> Any:
@@ -60,10 +74,14 @@ def resource_identity(arguments: Any, *, server: str | None = None) -> Optional[
     """
     if not isinstance(arguments, dict):
         return None
-    raw = _first_present(arguments, _RESOURCE_KEYS)
+    raw, key = _first_present_with_key(arguments, _RESOURCE_KEYS)
     if raw is _MISSING:
         return None
-    text = str(raw).strip().replace("\\", "/")
+    text = str(raw)
+    if key in _PATH_LIKE_KEYS:
+        # 区切りの表記ゆれを揃えるのはパスを指す項目だけにする。不透明な識別子に当てると、
+        # 区切りを含む別々の鍵が同じ値へ潰れる。前後の空白も、識別子では意味を持ちうる。
+        text = text.strip().replace("\\", "/")
     # 資源は空文字を許さない。指す先が定まらないため同一性の鍵にならない
     if not text:
         return None
@@ -76,16 +94,26 @@ def resource_identity(arguments: Any, *, server: str | None = None) -> Optional[
 
 
 def access_direction(arguments: Any) -> Optional[str]:
-    """呼び出しの向きを返す。資源を特定できない場合は None。
+    """呼び出しの向きを返す。判別できない場合は None。
 
-    本文にあたる引数が在れば書き込み、無ければ読み取りとする。ツール名は見ない。
+    本文にあたる引数が在れば書き込みとする。値が空でも書き込みとする。空の本文は資源を空に
+    する操作である。
+
+    **本文が無いことは読み取りを意味しない。** 資源を消す、入れ物を作る、権限を変えるといった
+    操作は、資源を指す引数だけを取り本文を持たない。本文の不在をもって読み取りと断じると、
+    破壊的な操作が読み取りとして記録され、監査の向きが逆になる。
+
+    読み取りと言い切れるのは、読み取りしかできない経路から来た場合だけである。その判断は
+    呼び出し側が持つため、ここでは判別できないものを None にする。判別できない呼び出しは
+    鍵も向きも載せない。載せないことで、後段の判定が誤った向きの上で成立するのを防ぐ。
     """
     if not isinstance(arguments, dict):
         return None
     if _first_present(arguments, _RESOURCE_KEYS) is _MISSING:
         return None
-    # 本文の鍵が在れば、値が空でも書き込みとする。空の本文は資源を空にする操作である
-    return WRITE if _first_present(arguments, _BODY_KEYS) is not _MISSING else READ
+    if _first_present(arguments, _BODY_KEYS) is not _MISSING:
+        return WRITE
+    return None
 
 
 def classify_resource_access(arguments: Any, *, server: str | None = None) -> dict[str, str]:
@@ -100,7 +128,15 @@ def classify_resource_access(arguments: Any, *, server: str | None = None) -> di
     direction = access_direction(arguments)
     if direction is None:
         return {}
-    return {"resource_id": identity, "access_direction": direction}
+    out = {"resource_id": identity, "access_direction": direction}
+    if direction == WRITE:
+        # 書き込みの内容が毎回変わるかどうかは、判定側がこのダイジェストの相違で見る。
+        #
+        # **資源を指す引数と同じ入力から作る。** 呼び出しを包んだ外側の辞書から作ると、ツール名が
+        # 混ざる。同じ資源へ同じ内容を別のツールで書いたときに別の値になり、内容が変わったと
+        # 誤って判定する。収集器側も同じ入力から作るため、経路が混ざる配備でも値が揃う。
+        out["arguments_hash"] = sha256_value(arguments)
+    return out
 
 
 def classify_read_resource(args: Any, kwargs: Any, *, server: str | None = None) -> dict[str, str]:
@@ -123,5 +159,6 @@ def classify_read_resource(args: Any, kwargs: Any, *, server: str | None = None)
     identity = resource_identity({"uri": raw}, server=server)
     if identity is None:
         return {}
-    # 資源の直接読み取りは本文を持たない。常に読み取りである
+    # この経路は資源の読み取りしかできない。向きを引数から導かず、経路から確定させる。
+    # 引数の形から導く経路では、本文の不在をもって読み取りと断じない。
     return {"resource_id": identity, "access_direction": READ}

@@ -19,7 +19,11 @@ from senda_argus_hooks.core.resource_access import (
 
 class TestIdentity:
     def test_same_resource_gives_the_same_key_for_read_and_write(self) -> None:
-        r = classify_resource_access({"path": "/data/notes.md"})
+        """同じ資源への直接読み取りと書き込みが同じ鍵になること。
+
+        読み取りは、読み取りしかできない経路から取る。引数の形からは導かない。
+        """
+        r = classify_read_resource((), {"uri": "/data/notes.md"})
         w = classify_resource_access({"path": "/data/notes.md", "content": "x"})
         assert r["resource_id"] == w["resource_id"]
         assert r["access_direction"] == READ
@@ -46,7 +50,7 @@ class TestIdentity:
 
     def test_the_name_itself_is_not_carried(self) -> None:
         """名前そのものを載せないこと。判定に要るのは同一性だけである。"""
-        out = classify_resource_access({"path": "/secret/customer-list.csv"})
+        out = classify_resource_access({"path": "/secret/customer-list.csv", "content": "x"})
         assert "customer-list" not in str(out)
         assert out["resource_id"].startswith("resource_")
 
@@ -55,8 +59,14 @@ class TestDirection:
     def test_a_body_argument_marks_a_write(self) -> None:
         assert access_direction({"path": "/a", "content": "x"}) == WRITE
 
-    def test_absence_of_a_body_marks_a_read(self) -> None:
-        assert access_direction({"path": "/a"}) == READ
+    def test_absence_of_a_body_does_not_mark_a_read(self) -> None:
+        """本文が無いだけで読み取りと断じないこと。
+
+        資源を消す、入れ物を作る、権限を変える操作は資源を指す引数だけを取り本文を持たない。
+        読み取りとして記録すると、破壊的な操作の向きが逆になる。
+        """
+        assert access_direction({"path": "/a"}) is None
+        assert access_direction({"path": "/a", "recursive": True}) is None
 
     def test_direction_does_not_depend_on_the_tool_name(self) -> None:
         """ツール名で判定しないこと。
@@ -82,8 +92,16 @@ class TestNotApplicable:
 
         向きだけでは判定に使えず、資源だけでは交互性を判定できない。
         """
-        out = classify_resource_access({"path": "/a"})
-        assert set(out) == {"resource_id", "access_direction"}
+        out = classify_resource_access({"path": "/a", "content": "x"})
+        # 書き込みには内容のダイジェストも載る。判定側が内容の相違をこれで見る
+        assert set(out) == {"resource_id", "access_direction", "arguments_hash"}
+
+    def test_an_undeterminable_direction_yields_nothing(self) -> None:
+        """向きを判別できない呼び出しは、鍵も向きも載せないこと。
+
+        載せると、後段の判定が誤った向きの上で成立する。
+        """
+        assert classify_resource_access({"path": "/a"}) == {}
 
 
 class TestEmptyBody:
@@ -95,8 +113,12 @@ class TestEmptyBody:
         """
         assert access_direction({"path": "/a", "content": ""}) == WRITE
 
-    def test_absence_of_the_body_key_is_a_read(self) -> None:
-        assert access_direction({"path": "/a"}) == READ
+    def test_absence_of_the_body_key_is_not_a_read(self) -> None:
+        """本文の鍵が無いことは読み取りを意味しないこと。
+
+        本文を持たない破壊的な操作があるため、不在をもって読み取りと断じない。
+        """
+        assert access_direction({"path": "/a"}) is None
 
 
 class TestServerScope:
@@ -106,12 +128,12 @@ class TestServerScope:
         よくある名前や短い識別子が別の提供元の資源と同じ鍵になると、無関係な読み書きが往復に
         見える。
         """
-        a = classify_resource_access({"path": "/data/config.json"}, server="s1")
-        b = classify_resource_access({"path": "/data/config.json"}, server="s2")
+        a = classify_resource_access({"path": "/data/config.json", "content": "x"}, server="s1")
+        b = classify_resource_access({"path": "/data/config.json", "content": "x"}, server="s2")
         assert a["resource_id"] != b["resource_id"]
 
     def test_the_same_resource_on_one_server_matches(self) -> None:
-        r = classify_resource_access({"path": "/a"}, server="s1")
+        r = classify_read_resource((), {"uri": "/a"}, server="s1")
         w = classify_resource_access({"path": "/a", "content": "x"}, server="s1")
         assert r["resource_id"] == w["resource_id"]
 
@@ -152,3 +174,38 @@ class TestInstrumentation:
         src = inspect.getsource(mcp_python)
         assert "classify_read_resource" in src
         assert "classify_resource_access" in src
+
+
+class TestWriteDigestSource:
+    """判定が読む書き込みのダイジェストを、資源の引数と同じ入力から作る。
+
+    呼び出しを包んだ外側の辞書から作ると、ツール名が混ざる。同じ資源へ同じ内容を別のツールで
+    書いたときに別の値になり、内容が変わったと誤って判定する。
+    """
+
+    def test_the_digest_comes_from_the_resource_arguments(self) -> None:
+        from senda_argus_hooks.core.hashing import sha256_value
+
+        args = {"path": "/a", "content": "x"}
+        assert classify_resource_access(args)["arguments_hash"] == sha256_value(args)
+
+    def test_the_same_content_via_different_tools_matches(self) -> None:
+        """同じ内容を別のツールで書いても同じ値になること。
+
+        揃わないと、定期的な同期を指令の受け渡しと取り違える。
+        """
+        from senda_argus_hooks.instrumentors.mcp_python import _mcp_metadata
+
+        class _Server:
+            server = "s"
+            url = "https://s.test"
+
+        inner = {"path": "/a", "content": "x"}
+        a = _mcp_metadata(_Server(), "call_tool", ("write_file", inner), {})
+        b = _mcp_metadata(_Server(), "call_tool", ("edit_file", inner), {})
+        assert a["arguments_hash"] == b["arguments_hash"]
+
+    def test_different_content_still_differs(self) -> None:
+        a = classify_resource_access({"path": "/a", "content": "x"})["arguments_hash"]
+        b = classify_resource_access({"path": "/a", "content": "y"})["arguments_hash"]
+        assert a != b
