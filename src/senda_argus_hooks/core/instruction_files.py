@@ -81,8 +81,27 @@ TOKEN_PAIR_WINDOW: Final[int] = 3
 MAX_PAIR_DIGESTS: Final[int] = 64
 
 # 語とみなす文字の並び。区切りに使う記号を語の内側へ残す。残さないと、経路や住所や識別子が
-# 細切れになり、要約を経ても保たれるという性質が失われる。
-_TOKEN_RE: Final[Any] = re.compile(r"[A-Za-z0-9_./:@~-]+")
+# 細切れになり、要約を経ても保たれるという性質が失われる。逆向きの区切りも語の内側に残す。
+# 残さないと、その区切りを使う環境の経路が 1 文字ごとに切れ、組が 1 つも作れない。
+_TOKEN_RE: Final[Any] = re.compile(r"[A-Za-z0-9_.\\/:@~-]+")
+
+# 大小を無視してよい部分。**経路の大小は意味を持つ。** 語をまるごと小文字へ倒すと、
+# /srv/TenantA と /srv/tenanta が同じダイジェストになり、別の対象を指す組が一致する。
+# 住所の綴りと種別、および駆動名から始まる経路だけ倒す。前者は綴りが大小を区別せず、
+# 後者はその環境の経路そのものが大小を区別しない。
+_SCHEME_SEP: Final[str] = "://"
+_DRIVE_RE: Final[Any] = re.compile(r"\A[A-Za-z]:")
+
+
+def _fold_case(token: str) -> str:
+    """大小を無視してよい部分だけ倒す。"""
+    if _DRIVE_RE.match(token):
+        return token.lower()
+    head, sep, rest = token.partition(_SCHEME_SEP)
+    if not sep:
+        return token
+    host, slash, tail = rest.partition("/")
+    return head.lower() + _SCHEME_SEP + host.lower() + slash + tail
 
 # 組に使う語に含まれていることを求める区切り。**長さと文字種だけでは足りない。** 同じ計画の
 # 文書は識別子の語彙を共有し、規則名や事象名のような下線や点を含む長い語が、無関係な文書どうしで
@@ -199,7 +218,9 @@ def _distinctive_tokens(text: str) -> list[str]:
     """
     out: list[str] = []
     for raw in _TOKEN_RE.findall(text or ""):
-        token = raw.strip("./:-~@").lower()
+        # 逆向きの区切りは順向きへ均す。同じ対象を指す経路が、環境の書き方の違いだけで
+        # 別のダイジェストになると突合が成立しない。
+        token = _fold_case(raw.replace("\\", "/").strip("./:-~@"))
         if len(token) < MIN_TOKEN_LENGTH:
             continue
         if _TOKEN_LOCATOR not in token:
