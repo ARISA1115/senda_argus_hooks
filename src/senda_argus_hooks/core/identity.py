@@ -48,18 +48,21 @@ def data_source_hash(profile: dict[str, Any]) -> str:
     return stable_hash(_clean(profile), prefix="data_source")
 
 
-def derive_agent_id(*, project: str, environment: str, sdk: str | None = None, agent_hint: str | None = None) -> str:
+def derive_agent_id(*, project: str, environment: str, agent_hint: str | None = None) -> str:
     """Derive an execution-origin identifier.
 
     This intentionally avoids using MCP server/tool alone. MCP-derived grouping is
     represented by purpose_id / mcp_profile_id so that different agent codebases
     using the same capabilities can be grouped without conflating the executor.
+
+    どの取り込みが出したかは identifier に混ぜない。混ぜると、1 つの実行主体が取り込みごとに
+    別の identifier を名乗る。受け取り側は主体の同一性で否定条件を判断するため、自分が書いた
+    指示ファイルを自分が読むだけの記憶の更新が、別の主体からの伝播として発火する。
     """
     return stable_hash(
         {
             "project": project,
             "environment": environment,
-            "sdk": sdk or "unknown",
             "agent_hint": agent_hint or "default",
         },
         prefix="agent",

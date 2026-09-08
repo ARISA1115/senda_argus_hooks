@@ -94,8 +94,7 @@ def effective_agent_id(source: dict[str, Any] | None = None, explicit: str | Non
         return get_agent_id() or ""
     if _config.agent_id:
         return _config.agent_id
-    sdk = (source or {}).get("sdk")
-    return derive_agent_id(project=_config.project, environment=_config.environment, sdk=sdk, agent_hint=_config.agent_hint)
+    return derive_agent_id(project=_config.project, environment=_config.environment, agent_hint=_config.agent_hint)
 
 
 def emit_event(
