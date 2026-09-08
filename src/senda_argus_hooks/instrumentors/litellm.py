@@ -4,6 +4,7 @@ import time
 from typing import Any, Callable
 
 from senda_argus_hooks.core.instruction_files import (
+    collect_instruction_sources,
     system_prompt_line_digests,
     system_prompt_pair_digests,
 )
@@ -52,12 +53,12 @@ class LiteLLMInstrumentor(BaseInstrumentor):
             with audit_guard(operation):
                 latency_ms = int((time.perf_counter() - start) * 1000)
                 output_payload = _safe_response(response) if cfg.capture_response else {"response_hash": sha256_value(_safe_response(response))}
-                system_prompt_line_hashes = system_prompt_line_digests(
-                    messages=kwargs.get("messages"), system=kwargs.get("system")
-                )
-                system_prompt_pair_hashes = system_prompt_pair_digests(
-                    messages=kwargs.get("messages"), system=kwargs.get("system")
-                )
+                # 指示の載る場所は提供元と操作ごとに違う。応答系の要求では instructions と input に
+                # 載り、位置引数で渡る形もある。名前を 2 つ決め打ちすると、その形の呼び出しでは
+                # 行も組も空になり、判定が静かに止まる。場所の網羅は共通の収集へ任せる。
+                _sources = collect_instruction_sources(kwargs, args)
+                system_prompt_line_hashes = system_prompt_line_digests(*_sources)
+                system_prompt_pair_hashes = system_prompt_pair_digests(*_sources)
                 llm_data: dict[str, Any] = {"provider": "litellm", "operation": operation, "model": kwargs.get("model"), "input": input_payload, "output": output_payload}
                 if "messages" in kwargs:
                     llm_data["messages_hash"] = sha256_value(kwargs.get("messages") or [])

@@ -5,6 +5,7 @@ import time
 from typing import Any, Callable
 
 from senda_argus_hooks.core.instruction_files import (
+    collect_instruction_sources,
     classify_instruction_write,
     system_prompt_line_digests,
     system_prompt_pair_digests,
@@ -107,12 +108,12 @@ class ArgusSDKInstrumentor(BaseInstrumentor):
                             data=proposed_data,
                             status="success",
                         )
-                system_prompt_line_hashes = system_prompt_line_digests(
-                    messages=kwargs.get("messages"), system=kwargs.get("system")
-                )
-                system_prompt_pair_hashes = system_prompt_pair_digests(
-                    messages=kwargs.get("messages"), system=kwargs.get("system")
-                )
+                # 指示の載る場所は提供元と操作ごとに違う。応答系の要求では instructions と input に
+                # 載り、位置引数で渡る形もある。名前を 2 つ決め打ちすると、その形の呼び出しでは
+                # 行も組も空になり、判定が静かに止まる。場所の網羅は共通の収集へ任せる。
+                _sources = collect_instruction_sources(kwargs, args)
+                system_prompt_line_hashes = system_prompt_line_digests(*_sources)
+                system_prompt_pair_hashes = system_prompt_pair_digests(*_sources)
                 llm_data = {"provider": provider, "operation": operation, "purpose": purpose, "model": model, "input": input_payload, "output": output_payload}
                 if messages_hash:
                     llm_data["messages_hash"] = messages_hash
