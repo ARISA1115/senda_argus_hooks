@@ -5,8 +5,8 @@ from typing import Any, Callable
 
 from senda_argus_hooks.core.runtime import emit_event, get_config
 from senda_argus_hooks.core.instruction_files import (
-    collect_instruction_sources,
     system_prompt_line_digests,
+    system_prompt_pair_digests,
 )
 from senda_argus_hooks.core.hashing import sha256_value
 from senda_argus_hooks.core.response_meta import extract_response_model as _extract_response_model
@@ -75,6 +75,9 @@ class OpenAIInstrumentor(BaseInstrumentor):
                 system_prompt_line_hashes = system_prompt_line_digests(
                     messages=kwargs.get("messages"), system=kwargs.get("system")
                 )
+                system_prompt_pair_hashes = system_prompt_pair_digests(
+                    messages=kwargs.get("messages"), system=kwargs.get("system")
+                )
                 llm_data: dict[str, Any] = {
                     "provider": "openai",
                     "operation": operation,
@@ -92,6 +95,10 @@ class OpenAIInstrumentor(BaseInstrumentor):
                     llm_data["response_model"] = response_model
                 if system_prompt_line_hashes:
                     llm_data["system_prompt_line_hashes"] = system_prompt_line_hashes
+                # 組は行と独立に載せる。行の内側へ入れると、行を出す条件を変えたときに組が
+                # 黙って止まる。2 つは別々の導出で、片方が空でももう片方は成立する。
+                if system_prompt_pair_hashes:
+                    llm_data["system_prompt_pair_hashes"] = system_prompt_pair_hashes
                 emit_event(
                     "llm.request",
                     source={"component": "instrumentor", "sdk": "openai", "provider": "openai", "operation": operation},

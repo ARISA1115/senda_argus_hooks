@@ -9,6 +9,7 @@ from typing import Any, Callable
 from senda_argus_hooks.core.instruction_files import (
     collect_instruction_sources,
     system_prompt_line_digests,
+    system_prompt_pair_digests,
 )
 from senda_argus_hooks.core.hashing import sha256_value
 from senda_argus_hooks.core.model_identity import models_correspond
@@ -81,6 +82,7 @@ class BedrockInstrumentor(BaseInstrumentor):
                 _sources = collect_instruction_sources(_params)
                 _sources.extend(collect_instruction_sources(_decoded_body(_params)))
                 system_prompt_line_hashes = system_prompt_line_digests(*_sources)
+                system_prompt_pair_hashes = system_prompt_pair_digests(*_sources)
                 llm_data: dict[str, Any] = {"provider": "bedrock", "operation": operation_name, "model": model, "input": input_payload}
                 if operation_name == "InvokeModel" and isinstance(response, dict):
                     raw = _read_and_rewrap_body(response)
@@ -102,6 +104,10 @@ class BedrockInstrumentor(BaseInstrumentor):
                     llm_data["output"] = {"response_hash": sha256_value(response.get("output"))} if not cfg.capture_response else {"response": response.get("output")}
                 if system_prompt_line_hashes:
                     llm_data["system_prompt_line_hashes"] = system_prompt_line_hashes
+                # 組は行と独立に載せる。行の内側へ入れると、行を出す条件を変えたときに組が
+                # 黙って止まる。2 つは別々の導出で、片方が空でももう片方は成立する。
+                if system_prompt_pair_hashes:
+                    llm_data["system_prompt_pair_hashes"] = system_prompt_pair_hashes
                 emit_event(
                     "llm.request",
                     source={"component": "instrumentor", "sdk": "bedrock", "provider": "bedrock", "operation": operation_name},
