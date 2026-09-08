@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import posixpath
 from typing import Any, Final, Optional
 
@@ -65,6 +66,33 @@ MAX_LINE_DIGESTS: Final[int] = 64
 MIN_LINE_LENGTH: Final[int] = 24
 
 _DIGEST_PREFIX: Final[str] = "sha256:"
+
+# 語の組を作るときに、突合の対象とする語の最小の長さ。**組に使う語は位置を指すものに限る**ため、
+# 普通の語を除くための長さは短くてよい。長さで絞ると etc/shadow や ssh/id_rsa のような短い経路が
+# 落ち、払い出しがそのまま取りこぼしになる。
+MIN_TOKEN_LENGTH: Final[int] = 10
+
+# 同じ行の中で、いくつ先の語まで組にするか。要約は文の順序を変えるが、同じ文に現れた語どうしは
+# 近くに残りやすい。窓を広げても分離は変わらず、組の数だけが増える。
+TOKEN_PAIR_WINDOW: Final[int] = 3
+
+# 1 件あたりに出す組ダイジェストの上限。行ごとのダイジェストと同じ考えで、送出量と受け取り側の
+# 保持量に上限を置く。
+MAX_PAIR_DIGESTS: Final[int] = 64
+
+# 語とみなす文字の並び。区切りに使う記号を語の内側へ残す。残さないと、経路や住所や識別子が
+# 細切れになり、要約を経ても保たれるという性質が失われる。
+_TOKEN_RE: Final[Any] = re.compile(r"[A-Za-z0-9_./:@~-]+")
+
+# 組に使う語に含まれていることを求める区切り。**長さと文字種だけでは足りない。** 同じ計画の
+# 文書は識別子の語彙を共有し、規則名や事象名のような下線や点を含む長い語が、無関係な文書どうしで
+# 並んで現れる。実測で、3 つの計画の文書 195 件を総当たりした 18905 組のうち 54 組が 2 組以上
+# 重なった。位置を指す語に限ると 2 組以上は 13 組、3 組以上は 0 組になる。
+#
+# 位置を指す語だけが、要約を経ても書き換えられずに残るという性質を持つ。要約は文言を作り替えるが、
+# 払い出しが指す先は書き換えられない。
+_TOKEN_LOCATOR: Final[str] = "/"
+
 
 
 def _digest(value: str) -> str:
@@ -127,6 +155,20 @@ def normalize_patch_body(body: Any) -> Any:
     return "\n".join(kept)
 
 
+def _capped(digests: set[str], limit: int) -> list[str]:
+    """上限を超える分を、本文の位置に依らない決まった順で落とす。
+
+    **文頭から詰めて打ち切ると、末尾に書かれたものが必ず落ちる。** 指示ファイルは既存の内容へ
+    追記して育つため、後から書かれた払い出しがちょうど落ちる位置に来る。攻撃側は本文の長さを
+    伸ばすだけで、控えにも指示側にも自分の書いたものを載せずに済む。
+
+    ダイジェストの値の順で選ぶ。値は内容から決まり位置に依らないため、どこに書いたかで残るか
+    どうかを選べない。書き込み側と指示側で同じ選び方を通すので、突合はそのまま成立する。
+    """
+    ordered = sorted(digests)
+    return ordered[:limit] if len(ordered) > limit else ordered
+
+
 def line_digests(body: Any) -> list[str]:
     """本文を正規化した行ごとのダイジェストにする。
 
@@ -138,19 +180,77 @@ def line_digests(body: Any) -> list[str]:
     if not isinstance(body, str) or not body:
         return []
     seen: set[str] = set()
-    out: list[str] = []
     for raw in body.splitlines():
         line = raw.strip()
         if len(line) < MIN_LINE_LENGTH:
             continue
-        d = _digest(line)
-        if d in seen:
+        seen.add(_digest(line))
+    return _capped(seen, MAX_LINE_DIGESTS)
+
+
+def _distinctive_tokens(text: str) -> list[str]:
+    """1 行から、位置を指す語だけを取り出す。
+
+    経路と住所に限る。**語の一覧は持たない。** 一覧は言語ごとに要り、維持できない。区切りを
+    含むことと長さだけなら、どの言語でも同じ手続きで決まる。
+
+    取り出せるのは ASCII で書かれた経路と住所に限られる。日本語だけで書かれた指示ファイルからは
+    組が出ない。その構成では行ごとの突合だけが働く。
+    """
+    out: list[str] = []
+    for raw in _TOKEN_RE.findall(text or ""):
+        token = raw.strip("./:-~@").lower()
+        if len(token) < MIN_TOKEN_LENGTH:
             continue
-        seen.add(d)
-        out.append(d)
-        if len(out) >= MAX_LINE_DIGESTS:
-            break
+        if _TOKEN_LOCATOR not in token:
+            continue
+        out.append(token)
     return out
+
+
+def token_pair_digests(body: Any) -> list[str]:
+    """本文を、同じ行に現れた珍しい語の組ごとのダイジェストにする。
+
+    要約を経ると行はそのまま残らないが、払い出しが指す先、すなわち経路や住所は書き換えられずに
+    残る。**1 語では足りない。** 同じ計画の文書どうしは語彙を共有するため、語 1 つの一致は
+    無関係な文書の間でも起きる。組にすると、組み合わせが一致する確率は大きく下がる。実測で、
+    3 つの計画の文書 195 件を総当たりした 18905 組のうち、3 組以上重なったものは無かった。
+
+    **組は同じ行の中でだけ作る。** 連続する行をまとめると、同じ計画の文書どうしで 3 組以上の
+    重なりが出る。実測で連続 2 行をまとめた場合は 12 組、本文全体では 28 組が 3 組以上重なった。
+
+    組は並べ替えてから作る。要約は語の順序を変えるため、順序を含めると突合が成立しない。
+
+    本文そのものは返さない。内容を運ばずに突合できる形だけを出す。
+    """
+    body = normalize_patch_body(body)
+    if not isinstance(body, str) or not body:
+        return []
+    seen: set[str] = set()
+    for raw in body.splitlines():
+        tokens = _distinctive_tokens(raw)
+        for i in range(len(tokens)):
+            for j in range(i + 1, min(i + 1 + TOKEN_PAIR_WINDOW, len(tokens))):
+                left, right = sorted((tokens[i], tokens[j]))
+                if left == right:
+                    continue
+                seen.add(_digest(f"{left}\x1f{right}"))
+    return _capped(seen, MAX_PAIR_DIGESTS)
+
+
+def system_prompt_pair_digests(*sources: Any, **named: Any) -> list[str]:
+    """指示の本文を、突合可能な語の組ごとのダイジェストにする。
+
+    書き込み側と同じ導出を通す。両側で規則が違うと、同じ組が違うダイジェストになり突合が
+    成立しない。入力の受け方は行ごとの導出と揃える。
+    """
+    texts: list[str] = []
+    for source in list(sources) + list(named.values()):
+        texts.extend(_texts_from(source))
+    texts = [t for t in texts if t]
+    if not texts:
+        return []
+    return token_pair_digests("\n".join(texts))
 
 
 def _first_present(source: dict[str, Any], keys: tuple[str, ...]) -> Any:
@@ -163,7 +263,8 @@ def _first_present(source: dict[str, Any], keys: tuple[str, ...]) -> Any:
 def classify_instruction_write(arguments: Any) -> Optional[dict[str, Any]]:
     """指示ファイルへの書き込みなら、突合に使う情報を返す。該当しなければ None。
 
-    返すのは、一覧に載っている名前と、本文全体のダイジェストと、行ごとのダイジェストである。
+    返すのは、一覧に載っている名前と、本文全体のダイジェストと、行ごとのダイジェストと、
+    語の組ごとのダイジェストである。行は要約を経ると残らないため、組も併せて出す。
     本文そのものは返さない。内容を運ばずに突合できる形だけを出す。
     """
     if not isinstance(arguments, dict):
@@ -178,6 +279,7 @@ def classify_instruction_write(arguments: Any) -> Optional[dict[str, Any]]:
         "instruction_file_name": name,
         "written_content_hash": _digest(body),
         "written_line_hashes": line_digests(body),
+        "written_pair_hashes": token_pair_digests(body),
     }
 
 
