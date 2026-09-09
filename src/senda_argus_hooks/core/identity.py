@@ -5,6 +5,7 @@ import json
 import os
 import platform
 import socket
+import sys
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
@@ -48,22 +49,51 @@ def data_source_hash(profile: dict[str, Any]) -> str:
     return stable_hash(_clean(profile), prefix="data_source")
 
 
-def derive_agent_id(*, project: str, environment: str, agent_hint: str | None = None) -> str:
+def runtime_discriminator() -> str:
+    """1 つの実行主体を、別々に配備された実行主体から区別する値を返す。
+
+    **取り込みの名前で区別してはいけない。** 1 つの実行主体が取り込みごとに別の identifier を
+    名乗ると、受け取り側は主体の同一性で否定条件を判断するため、自分が書いた指示ファイルを
+    自分が読むだけの記憶の更新が、別の主体からの伝播として発火する。
+
+    **区別を無くしてもいけない。** 同じ計画と同じ環境で別々に配備された実行主体が 1 つの
+    identifier に潰れると、一方が書いて他方が読む本物の伝播が、自分で読んだものとして
+    握り潰される。
+
+    要るのは、1 つの実行主体の中では取り込みをまたいで同じで、別々に配備された実行主体の
+    間では違う値である。実行の入口と動かしている機械がその条件を満たす。再起動をまたいでも
+    変わらないため、run をまたぐ相関も保たれる。
+    """
+    entry = ""
+    try:
+        entry = os.path.realpath(sys.argv[0]) if sys.argv and sys.argv[0] else ""
+    except Exception:  # noqa: BLE001 - 観測が本来の実行を壊さない
+        entry = ""
+    return f"{socket.gethostname()}\x1f{entry}"
+
+
+def derive_agent_id(
+    *,
+    project: str,
+    environment: str,
+    agent_hint: str | None = None,
+    runtime: str | None = None,
+) -> str:
     """Derive an execution-origin identifier.
 
     This intentionally avoids using MCP server/tool alone. MCP-derived grouping is
     represented by purpose_id / mcp_profile_id so that different agent codebases
     using the same capabilities can be grouped without conflating the executor.
 
-    どの取り込みが出したかは identifier に混ぜない。混ぜると、1 つの実行主体が取り込みごとに
-    別の identifier を名乗る。受け取り側は主体の同一性で否定条件を判断するため、自分が書いた
-    指示ファイルを自分が読むだけの記憶の更新が、別の主体からの伝播として発火する。
+    どの取り込みが出したかは identifier に混ぜない。代わりに実行時の区別を混ぜる。理由は
+    runtime_discriminator に書いた。
     """
     return stable_hash(
         {
             "project": project,
             "environment": environment,
             "agent_hint": agent_hint or "default",
+            "runtime": runtime or "default",
         },
         prefix="agent",
     )

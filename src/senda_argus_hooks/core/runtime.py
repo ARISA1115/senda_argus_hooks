@@ -22,7 +22,7 @@ from .context import (
     set_trace_id,
 )
 from .event import new_event
-from .identity import derive_agent_id, runtime_metadata
+from .identity import derive_agent_id, runtime_discriminator, runtime_metadata
 from .queue import EventBus
 from .redaction import redact_event
 
@@ -94,7 +94,12 @@ def effective_agent_id(source: dict[str, Any] | None = None, explicit: str | Non
         return get_agent_id() or ""
     if _config.agent_id:
         return _config.agent_id
-    return derive_agent_id(project=_config.project, environment=_config.environment, agent_hint=_config.agent_hint)
+    return derive_agent_id(
+        project=_config.project,
+        environment=_config.environment,
+        agent_hint=_config.agent_hint,
+        runtime=runtime_discriminator(),
+    )
 
 
 def emit_event(
