@@ -48,10 +48,29 @@ class SendaArgusOpenAIAgentsProcessor:
         )
 
     def on_span_start(self, span: Any) -> None:
+        event_type = _span_event_type(span, suffix="started")
+        data: dict[str, Any] = {
+            "agent": {"framework": "openai_agents", "span": _safe_value(span)}
+        }
+        # **推論として出す事象は、判定側が読む入れ物も持たせる。** 種別だけ推論になって
+        # 中身が別の入れ物にあると、推論の記録として扱われるのに模型も指示も読めない。
+        # 完了側と同じ形に揃える。
+        if event_type.startswith("llm.request"):
+            llm: dict[str, Any] = {}
+            model = _span_model(span)
+            if model:
+                llm["model"] = model
+            line_hashes, pair_hashes = _span_instruction_digests(span)
+            if line_hashes:
+                llm["system_prompt_line_hashes"] = line_hashes
+            if pair_hashes:
+                llm["system_prompt_pair_hashes"] = pair_hashes
+            if llm:
+                data["llm"] = llm
         emit_event(
-            _span_event_type(span, suffix="started"),
+            event_type,
             source={"component": "integration", "sdk": "openai_agents", "operation": "span.start"},
-            data={"agent": {"framework": "openai_agents", "span": _safe_value(span)}},
+            data=data,
             status="start",
         )
 
@@ -220,6 +239,18 @@ def _holder_kwargs(holder: Any) -> dict[str, Any]:
         if value is not None:
             out[key] = value
     return out
+
+
+def _span_model(span: Any) -> str:
+    """区間が申告する模型の名前を返す。取れなければ空を返す。"""
+    holder = _span_data_of(span)
+    for source in (holder, span):
+        if source is None:
+            continue
+        value = source.get("model") if isinstance(source, dict) else getattr(source, "model", None)
+        if isinstance(value, str) and value:
+            return value
+    return ""
 
 
 def _span_data_of(span: Any) -> Any:

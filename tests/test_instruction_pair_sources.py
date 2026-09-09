@@ -298,3 +298,33 @@ def test_the_runtime_discriminator_survives_a_directory_change():
         os.chdir(here)
         _sys.argv[0] = argv0
         identity._ENTRY_POINT = identity._resolve_entry_point()
+
+
+def test_the_generation_span_start_carries_the_llm_payload(tmp_path, monkeypatch):
+    """推論として出す開始の事象も、判定側が読む入れ物を持つこと。
+
+    **種別だけ推論になって中身が別の入れ物にあると、推論の記録として扱われるのに模型も
+    指示も読めない。** 完了側と同じ形に揃える。
+    """
+    import types
+
+    from senda_argus_hooks.integrations.openai_agents import SendaArgusOpenAIAgentsProcessor
+
+    path = tmp_path / "events.jsonl"
+    register(project="test-span-start", exporters=[{"type": "jsonl", "path": str(path)}])
+    processor = SendaArgusOpenAIAgentsProcessor()
+    span = types.SimpleNamespace(
+        span_data=types.SimpleNamespace(
+            type="generation",
+            model="gpt-fake",
+            input=[{"role": "system", "content": _PAYLOAD}],
+        )
+    )
+    try:
+        processor.on_span_start(span)
+    finally:
+        shutdown()
+    event = _read_events(path)[0]
+    assert event["event_type"] == "llm.request.started"
+    assert event["data"]["llm"]["model"] == "gpt-fake"
+    assert event["data"]["llm"]["system_prompt_pair_hashes"] == token_pair_digests(_PAYLOAD)
