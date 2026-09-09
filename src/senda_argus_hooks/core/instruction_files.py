@@ -119,8 +119,19 @@ def _fold_case(token: str) -> str:
 # 払い出しが指す先は書き換えられない。
 _TOKEN_LOCATOR: Final[str] = "/"
 
-# 自分の居場所を起点にした表記。指す先が文書ごとに違うため、組の材料にしない。
-_RELATIVE_PREFIX: Final[str] = ".."
+# 起点の定まった表記かどうかの判定。**起点の無い表記は指す先を定めない。** 文書の中の
+# 相互参照は ../x や ./x や docs/x の形を取り、同じ計画の文書どうしが同じ綴りを共有する。
+# 綴りが同じでも指す先は文書ごとに違うため、証拠にならない。
+_ROOTED_PREFIXES: Final[tuple[str, ...]] = ("/", "~/")
+
+
+def _is_rooted(token: str) -> bool:
+    """起点が定まった経路か住所かを返す。"""
+    if _SCHEME_SEP in token:
+        return True
+    if _DRIVE_RE.match(token):
+        return True
+    return token.startswith(_ROOTED_PREFIXES)
 
 
 
@@ -184,7 +195,7 @@ def normalize_patch_body(body: Any) -> Any:
     return "\n".join(kept)
 
 
-def _capped(digests: set[str], limit: int) -> list[str]:
+def capped_digests(digests: set[str], limit: int) -> list[str]:
     """上限を超える分を、本文の位置に依らない決まった順で落とす。
 
     **文頭から詰めて打ち切ると、末尾に書かれたものが必ず落ちる。** 指示ファイルは既存の内容へ
@@ -214,7 +225,7 @@ def line_digests(body: Any) -> list[str]:
         if len(line) < MIN_LINE_LENGTH:
             continue
         seen.add(_digest(line))
-    return _capped(seen, MAX_LINE_DIGESTS)
+    return capped_digests(seen, MAX_LINE_DIGESTS)
 
 
 def _distinctive_tokens(text: str) -> list[str]:
@@ -238,9 +249,9 @@ def _distinctive_tokens(text: str) -> list[str]:
             continue
         if _TOKEN_LOCATOR not in token:
             continue
-        # **自分の居場所からの相対は、指す先を定めない。** 文書の中の相互参照はこの形を取り、
+        # **起点の無い表記は、指す先を定めない。** 文書の中の相互参照はこの形を取り、
         # 同じ計画の文書どうしが同じ綴りを共有する。指す先が同じとは限らないため証拠にならない。
-        if token.startswith(_RELATIVE_PREFIX):
+        if not _is_rooted(token):
             continue
         out.append(token)
     return out
@@ -273,7 +284,7 @@ def token_pair_digests(body: Any) -> list[str]:
                 if left == right:
                     continue
                 seen.add(_digest(f"{left}\x1f{right}"))
-    return _capped(seen, MAX_PAIR_DIGESTS)
+    return capped_digests(seen, MAX_PAIR_DIGESTS)
 
 
 def system_prompt_pair_digests(*sources: Any, **named: Any) -> list[str]:
@@ -361,7 +372,12 @@ def _declares_role(value: Any) -> bool:
 
 
 def _block_text(block: Any) -> str:
-    """種別つきの塊から本文を取り出す。形は提供元ごとに異なる。"""
+    """種別つきの塊から本文を取り出す。形は提供元ごとに異なる。
+
+    **本文が部品の列に入る形もある。** 提供元によっては、指示を 1 つの塊として持ち、その
+    中の部品に文字列を分けて置く。直下の文字列だけを見ると、その形の指示から本文が 1 文字も
+    取れない。部品の列があれば、そこまで辿って連結する。
+    """
     if isinstance(block, str):
         return block
     if isinstance(block, dict):
@@ -369,9 +385,26 @@ def _block_text(block: Any) -> str:
             value = block.get(key)
             if isinstance(value, str):
                 return value
-        return ""
+        return _parts_text(block.get("parts"))
     text = getattr(block, "text", None)
-    return text if isinstance(text, str) else ""
+    if isinstance(text, str) and text:
+        return text
+    return _parts_text(getattr(block, "parts", None))
+
+
+def _parts_text(parts: Any) -> str:
+    """部品の列から本文を連結する。列でなければ空を返す。"""
+    if not isinstance(parts, (list, tuple)):
+        return ""
+    texts = []
+    for part in parts:
+        if isinstance(part, str):
+            texts.append(part)
+            continue
+        value = part.get("text") if isinstance(part, dict) else getattr(part, "text", None)
+        if isinstance(value, str) and value:
+            texts.append(value)
+    return "\n".join(texts)
 
 
 def _role_of(item: Any) -> str:
