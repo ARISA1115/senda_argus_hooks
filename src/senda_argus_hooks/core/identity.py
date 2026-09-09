@@ -61,15 +61,16 @@ def runtime_discriminator() -> str:
     握り潰される。
 
     要るのは、1 つの実行主体の中では取り込みをまたいで同じで、別々に配備された実行主体の
-    間では違う値である。実行の入口と動かしている機械がその条件を満たす。再起動をまたいでも
-    変わらないため、run をまたぐ相関も保たれる。
+    間では違う値である。実行の入口がその条件を満たす。
+
+    **動かしている機械の名前は使わない。** 配置し直しで名前が変わる環境では、同じ実行主体が
+    再起動しただけで別の識別子になる。その主体が自分の指示ファイルを更新して読み直すだけの
+    振る舞いが、主体をまたぐ伝播として報告される。
     """
-    entry = ""
     try:
-        entry = os.path.realpath(sys.argv[0]) if sys.argv and sys.argv[0] else ""
+        return os.path.realpath(sys.argv[0]) if sys.argv and sys.argv[0] else ""
     except Exception:  # noqa: BLE001 - 観測が本来の実行を壊さない
-        entry = ""
-    return f"{socket.gethostname()}\x1f{entry}"
+        return ""
 
 
 def derive_agent_id(
