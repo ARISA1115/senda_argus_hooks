@@ -328,3 +328,67 @@ def test_the_generation_span_start_carries_the_llm_payload(tmp_path, monkeypatch
     assert event["event_type"] == "llm.request.started"
     assert event["data"]["llm"]["model"] == "gpt-fake"
     assert event["data"]["llm"]["system_prompt_pair_hashes"] == token_pair_digests(_PAYLOAD)
+
+
+def test_the_generation_span_without_instructions_still_carries_the_envelope(tmp_path, monkeypatch):
+    """指示を持たない推論の完了も、判定側が読む入れ物と模型を持つこと。
+
+    **指示を持たない推論は珍しくない。** 中身があるときだけ入れ物を作る形にすると、その多数派が
+    空の記録として届き、読み手は模型すら取り出せない。
+    """
+    import types
+
+    from senda_argus_hooks.integrations.openai_agents import SendaArgusOpenAIAgentsProcessor
+
+    path = tmp_path / "events.jsonl"
+    register(project="test-span-plain", exporters=[{"type": "jsonl", "path": str(path)}])
+    processor = SendaArgusOpenAIAgentsProcessor()
+    span = types.SimpleNamespace(
+        span_data=types.SimpleNamespace(
+            type="generation",
+            model="gpt-fake",
+            input=[{"role": "user", "content": "こんにちは"}],
+        )
+    )
+    try:
+        processor.on_span_end(span)
+    finally:
+        shutdown()
+    event = _read_events(path)[0]
+    assert event["event_type"].startswith("llm.request")
+    assert event["data"]["llm"]["model"] == "gpt-fake"
+    assert "system_prompt_pair_hashes" not in event["data"]["llm"]
+
+
+def test_locators_written_as_assignments_still_form_pairs():
+    """代入や選択肢の形で書かれた経路と URL からも組を作ること。"""
+    from senda_argus_hooks.core.instruction_files import token_pair_digests as _pairs
+
+    assigned = "KEY=/srv/agent/config --log=/var/log/audit.log URL=https://host.test/ingest"
+    bare = "/srv/agent/config /var/log/audit.log https://host.test/ingest"
+    assert _pairs(assigned) == _pairs(bare)
+    assert len(_pairs(bare)) == 3
+
+
+def test_a_write_beyond_the_cap_is_marked_as_truncated():
+    """証拠が上限に収まらなかった書き込みへ、落ちた印を付けること。"""
+    from senda_argus_hooks.core.instruction_files import (
+        MAX_WRITE_DIGESTS,
+        classify_instruction_write,
+    )
+
+    body = "\n".join(
+        f"/srv/tenant/{i:06d}/a /srv/tenant/{i:06d}/b /srv/tenant/{i:06d}/c"
+        for i in range(MAX_WRITE_DIGESTS + 100)
+    )
+    written = classify_instruction_write({"path": "/repo/SOUL.md", "content": body})
+    assert written is not None
+    assert written["written_digests_truncated"] is True
+    assert len(written["written_pair_hashes"]) == MAX_WRITE_DIGESTS
+
+    small = classify_instruction_write({
+        "path": "/repo/SOUL.md",
+        "content": "/srv/tenant/aaa/a /srv/tenant/aaa/b この行は十分な長さを持っている行です",
+    })
+    assert small is not None
+    assert "written_digests_truncated" not in small
