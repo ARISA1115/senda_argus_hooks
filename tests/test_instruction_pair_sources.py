@@ -122,7 +122,7 @@ def test_the_roleless_input_is_not_treated_as_an_instruction(tmp_path, monkeypat
     """役割の宣言が無い入力を指示として扱わないこと。
 
     **応答系の要求は指示と質問を同じ引数で受ける。** 役割の無い値をまとめて指示にすると、
-    経路や住所を含む普通の質問が指示のダイジェストになり、記録済みの書き込みと偶然重なった
+    経路やURLを含む普通の質問が指示のダイジェストになり、記録済みの書き込みと偶然重なった
     ときに伝播として報告される。
     """
     Responses = _install_fake_openai(monkeypatch)
@@ -270,3 +270,31 @@ def test_the_runtime_discriminator_survives_rescheduling():
     value = runtime_discriminator()
     assert socket.gethostname() not in value
     assert value == runtime_discriminator()
+
+
+def test_the_runtime_discriminator_survives_a_directory_change():
+    """実行時の区別が、作業場所を変えても変わらないこと。
+
+    **入口が相対で渡されると、解決し直した値が変わる。** 同じ処理が書き込みと推論の要求で
+    別の識別子を名乗り、自分の更新を自分で読むだけの振る舞いが伝播として報告される。
+    """
+    import os
+    import sys as _sys
+
+    from senda_argus_hooks.core import identity
+
+    here = os.getcwd()
+    argv0 = _sys.argv[0]
+    try:
+        # 入口が相対で渡された状態を作る。絶対で渡ると解決し直しても値が変わらず、
+        # 主張した条件を試験できない。
+        _sys.argv[0] = "agent.py"
+        identity._ENTRY_POINT = identity._resolve_entry_point()
+        before = identity.runtime_discriminator()
+        assert before.endswith("/agent.py")
+        os.chdir(os.path.dirname(here) or "/")
+        assert identity.runtime_discriminator() == before
+    finally:
+        os.chdir(here)
+        _sys.argv[0] = argv0
+        identity._ENTRY_POINT = identity._resolve_entry_point()

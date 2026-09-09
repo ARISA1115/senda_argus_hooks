@@ -66,11 +66,22 @@ def runtime_discriminator() -> str:
     **動かしている機械の名前は使わない。** 配置し直しで名前が変わる環境では、同じ実行主体が
     再起動しただけで別の識別子になる。その主体が自分の指示ファイルを更新して読み直すだけの
     振る舞いが、主体をまたぐ伝播として報告される。
+
+    **値は読み込みの時点で確定して持ち回る。** 入口が相対で渡されると、作業場所を変えた後に
+    解決し直した値が変わる。同じ処理が書き込みと推論の要求で別の識別子を名乗り、自分の更新を
+    自分で読むだけの振る舞いが伝播として報告される。
     """
+    return _ENTRY_POINT
+
+
+def _resolve_entry_point() -> str:
     try:
         return os.path.realpath(sys.argv[0]) if sys.argv and sys.argv[0] else ""
     except Exception:  # noqa: BLE001 - 観測が本来の実行を壊さない
         return ""
+
+
+_ENTRY_POINT: str = _resolve_entry_point()
 
 
 def derive_agent_id(
