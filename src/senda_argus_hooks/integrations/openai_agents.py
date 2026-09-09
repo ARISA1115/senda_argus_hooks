@@ -204,8 +204,40 @@ def _response_payload(response: Any) -> dict[str, Any]:
     return payload
 
 
+# 区間の中身から、指示の載りうる名前を辞書として取り出す。属性で持つ実装と辞書で持つ実装が
+# あるため、収集へ渡す前に形を揃える。
+_SPAN_SOURCE_KEYS: tuple[str, ...] = ("input", "instructions", "system_instruction", "messages")
+
+
+def _holder_kwargs(holder: Any) -> dict[str, Any]:
+    if holder is None:
+        return {}
+    if isinstance(holder, dict):
+        return {k: holder[k] for k in _SPAN_SOURCE_KEYS if holder.get(k) is not None}
+    out: dict[str, Any] = {}
+    for key in _SPAN_SOURCE_KEYS:
+        value = getattr(holder, key, None)
+        if value is not None:
+            out[key] = value
+    return out
+
+
+def _span_data_of(span: Any) -> Any:
+    """区間の中身を返す。実際の枠組みは種別も入力もここへ入れる。"""
+    return getattr(span, "span_data", None)
+
+
 def _span_event_type(span: Any, *, suffix: str) -> str:
-    span_type = str(getattr(span, "type", None) or getattr(span, "span_type", None) or "step").lower()
+    # **種別は区間の中身に載る。** 直下の属性だけを見ると、実際の枠組みが出す推論の区間が
+    # 普通の段として扱われ、指示のダイジェストを作る経路へ入らない。
+    data = _span_data_of(span)
+    span_type = str(
+        getattr(span, "type", None)
+        or getattr(span, "span_type", None)
+        or getattr(data, "type", None)
+        or (data.get("type") if isinstance(data, dict) else None)
+        or "step"
+    ).lower()
     if "tool" in span_type:
         return "tool_call.requested" if suffix == "started" else "tool_call.completed"
     if "handoff" in span_type:
@@ -244,8 +276,11 @@ def _span_instruction_digests(span: Any) -> tuple[list[str], list[str]]:
         if "llm.request" not in _span_event_type(span, suffix="completed"):
             return [], []
         value = _safe_value(span)
-        holder = getattr(span, "span_data", None)
+        holder = _span_data_of(span)
         sources = collect_instruction_sources(value if isinstance(value, dict) else None, None, holder)
+        # **役割つきの入力も区間の中身に載る。** 属性としての指示だけを見ると、役割で指示を
+        # 渡す形の要求から 1 件も拾えない。中身を辞書として見て同じ収集へ通す。
+        sources.extend(collect_instruction_sources(_holder_kwargs(holder)))
         if isinstance(value, dict):
             inner = value.get("span_data")
             if isinstance(inner, dict):

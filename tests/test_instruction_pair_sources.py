@@ -184,9 +184,12 @@ def test_the_agent_span_puts_the_digests_where_the_matcher_reads(tmp_path, monke
     path = tmp_path / "events.jsonl"
     register(project="test-agent-span", exporters=[{"type": "jsonl", "path": str(path)}])
     processor = SendaArgusOpenAIAgentsProcessor()
+    # 実際の枠組みは、種別も入力も区間の中身へ入れる。直下の属性ではない。
     span = types.SimpleNamespace(
-        type="generation",
-        span_data=types.SimpleNamespace(instructions=_PAYLOAD),
+        span_data=types.SimpleNamespace(
+            type="generation",
+            input=[{"role": "system", "content": _PAYLOAD}, {"role": "user", "content": "頼む"}],
+        )
     )
     try:
         processor.on_span_end(span)
@@ -251,3 +254,19 @@ def test_the_user_message_in_a_batch_is_not_an_instruction():
     user = "質問 /srv/data/report.csv と https://example.test/docs/a と /var/tmp/out.json"
     sources = collect_instruction_sources({"messages": [[_Message("human", user)]]}, None, None)
     assert system_prompt_pair_digests(*sources) == []
+
+
+def test_the_runtime_discriminator_survives_rescheduling():
+    """実行時の区別が、配置し直しで変わらないこと。
+
+    **動かしている機械の名前を混ぜると、同じ実行主体が再起動しただけで別の識別子になる。**
+    その主体が自分の指示ファイルを更新して読み直すだけの振る舞いが、主体をまたぐ伝播として
+    報告される。
+    """
+    import socket
+
+    from senda_argus_hooks.core.identity import runtime_discriminator
+
+    value = runtime_discriminator()
+    assert socket.gethostname() not in value
+    assert value == runtime_discriminator()
