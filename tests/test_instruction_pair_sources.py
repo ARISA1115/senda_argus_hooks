@@ -392,3 +392,48 @@ def test_a_write_beyond_the_cap_is_marked_as_truncated():
     })
     assert small is not None
     assert "written_digests_truncated" not in small
+
+
+def test_semicolon_bearing_locators_stay_distinct():
+    """区切りに分号を使う宛先が、値の違いを保ったまま語になること。
+
+    経路の引数やクエリを分号で区切る形は妥当な URL である。分号で語を切ると、共有する前置きだけ
+    が残り、テナントごとに分けた無関係な宛先が同じ組に潰れる。
+    """
+    from senda_argus_hooks.core.instruction_files import token_pair_digests as _pairs
+
+    a = _pairs("https://host.test/read;tenant=A https://host.test/write;tenant=A")
+    b = _pairs("https://host.test/read;tenant=B https://host.test/write;tenant=B")
+    assert a and b and a != b
+
+
+def test_patch_context_lines_are_not_counted_as_written():
+    """差分の文脈の行を、この書き込みが加えたものとして扱わないこと。
+
+    文脈は元から在った文言である。残すと、位置を指す語が並ぶ行の隣を書き換えただけで、その行を
+    この主体が書いたことになり、後から別の主体がその行を読んだときに無関係な書き換えを根拠に
+    伝播として報告される。
+    """
+    from senda_argus_hooks.core.instruction_files import classify_instruction_write
+
+    context = "/srv/tenant/aaa/one /srv/tenant/aaa/two /srv/tenant/aaa/three"
+    body = "\n".join([
+        "--- a/SOUL.md",
+        "+++ b/SOUL.md",
+        "@@ -1,2 +1,3 @@",
+        f" {context}",
+        "+この行だけが今回加えられた行であり十分な長さを持つ",
+    ])
+    written = classify_instruction_write({"path": "/repo/SOUL.md", "content": body})
+    assert written is not None
+    assert written["written_pair_hashes"] == []
+
+    from senda_argus_hooks.core.instruction_files import token_pair_digests as _pairs
+
+    added = "\n".join([
+        "--- a/SOUL.md",
+        "+++ b/SOUL.md",
+        "@@ -1,2 +1,3 @@",
+        f"+{context}",
+    ])
+    assert _pairs(added) == _pairs(context)

@@ -103,7 +103,7 @@ MAX_WRITE_DIGESTS: Final[int] = 4096
 # 下限に届く。
 # 角括弧も語の内側に残す。囲まれた形で書く宛先があり、外すとホストの部分が丸ごと落ちて、
 # 経路だけが同じ別のホストが同じダイジェストになる。
-_TOKEN_RE: Final[Any] = re.compile(r"[A-Za-z0-9_.\\/:@~?#%&=+\[\]-]+")
+_TOKEN_RE: Final[Any] = re.compile(r"[A-Za-z0-9_.\\/:@~?#%&=+;\[\]-]+")
 
 # 大小を無視してよい部分。**経路の大小は意味を持つ。** 語をまるごと小文字へ倒すと、
 # /srv/TenantA と /srv/tenanta が同じダイジェストになり、別の対象を指す組が一致する。
@@ -199,6 +199,11 @@ def normalize_patch_body(body: Any) -> Any:
     本文はそのまま返す。
 
     削除の行は適用後に残らないため落とす。位置情報の行も本文ではないため落とす。
+
+    **文脈の行も落とす。** 差分の文脈は、この書き込みが加えたものではなく元から在った文言である。
+    残すと、位置を指す語が 3 つ並ぶ行の隣を書き換えただけで、その行をこの主体が書いたことに
+    なる。後から別の主体がその行を含む指示を読むと、無関係な書き換えを根拠に伝播として報告
+    される。差分で渡された書き込みの証拠は、加えた行だけから作る。
     """
     if not isinstance(body, str) or not body or not _looks_like_patch(body):
         return body
@@ -212,7 +217,6 @@ def normalize_patch_body(body: Any) -> Any:
             kept.append(raw[1:])
             continue
         if raw.startswith(" "):
-            kept.append(raw[1:])
             continue
         kept.append(raw)
     return "\n".join(kept)
