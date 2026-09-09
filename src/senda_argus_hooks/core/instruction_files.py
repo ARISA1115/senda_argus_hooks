@@ -87,6 +87,13 @@ TOKEN_PAIR_WINDOW: Final[int] = 3
 # 保持量に上限を置く。
 MAX_PAIR_DIGESTS: Final[int] = 64
 
+# 書き込み側の上限。**指示側と同じ上限を書き込み側へ課すと、埋め草で押し出せる。** 書き手は
+# 本文を自由に決められるため、値の順で先に来る組を必要なだけ足して、払い出しの組を上限の外へ
+# 追い出せる。指示側は要約された短い本文なので払い出しの組が残り、突合だけが成立しなくなる。
+# 書き込みは指示ファイルへの書き込みに限られ、頻度も低い。落とさずに全部載せる。上限は
+# 際限なく積み上げないための歯止めとしてだけ置く。
+MAX_WRITE_DIGESTS: Final[int] = 4096
+
 # 語とみなす文字の並び。区切りに使う記号を語の内側へ残す。残さないと、経路や住所や識別子が
 # 細切れになり、要約を経ても保たれるという性質が失われる。逆向きの区切りも語の内側に残す。
 # 残さないと、その区切りを使う環境の経路が 1 文字ごとに切れ、組が 1 つも作れない。
@@ -209,7 +216,7 @@ def capped_digests(digests: set[str], limit: int) -> list[str]:
     return ordered[:limit] if len(ordered) > limit else ordered
 
 
-def line_digests(body: Any) -> list[str]:
+def line_digests(body: Any, *, limit: int = MAX_LINE_DIGESTS) -> list[str]:
     """本文を正規化した行ごとのダイジェストにする。
 
     前後の空白を落として空行を除く。短い行は無関係な文書どうしでも一致するため除く。同じ行が
@@ -225,7 +232,7 @@ def line_digests(body: Any) -> list[str]:
         if len(line) < MIN_LINE_LENGTH:
             continue
         seen.add(_digest(line))
-    return capped_digests(seen, MAX_LINE_DIGESTS)
+    return capped_digests(seen, limit)
 
 
 def _distinctive_tokens(text: str) -> list[str]:
@@ -244,7 +251,10 @@ def _distinctive_tokens(text: str) -> list[str]:
         #
         # **先頭の区切りは落とさない。** 落とすと /srv/a と srv/a が同じダイジェストになり、
         # 起点の違う別の対象を指す組が一致する。落とすのは文の側の記号だけにする。
-        token = _fold_case(raw.replace("\\", "/").rstrip("./:-~@").lstrip("-:@"))
+        # **末尾の点は落とさない。** 経路の一部でありうるため、落とすと /srv/a. と /srv/a が
+        # 同じダイジェストになり、別の対象を指す組が一致する。落とすのは経路の末尾に来ない
+        # 記号だけにする。
+        token = _fold_case(raw.replace("\\", "/").rstrip(",;:~@/").lstrip("-:@"))
         if len(token) < MIN_TOKEN_LENGTH:
             continue
         if _TOKEN_LOCATOR not in token:
@@ -257,7 +267,7 @@ def _distinctive_tokens(text: str) -> list[str]:
     return out
 
 
-def token_pair_digests(body: Any) -> list[str]:
+def token_pair_digests(body: Any, *, limit: int = MAX_PAIR_DIGESTS) -> list[str]:
     """本文を、同じ行に現れた珍しい語の組ごとのダイジェストにする。
 
     要約を経ると行はそのまま残らないが、払い出しが指す先、すなわち経路や住所は書き換えられずに
@@ -284,7 +294,7 @@ def token_pair_digests(body: Any) -> list[str]:
                 if left == right:
                     continue
                 seen.add(_digest(f"{left}\x1f{right}"))
-    return capped_digests(seen, MAX_PAIR_DIGESTS)
+    return capped_digests(seen, limit)
 
 
 def system_prompt_pair_digests(*sources: Any, **named: Any) -> list[str]:
@@ -327,8 +337,9 @@ def classify_instruction_write(arguments: Any) -> Optional[dict[str, Any]]:
     return {
         "instruction_file_name": name,
         "written_content_hash": _digest(body),
-        "written_line_hashes": line_digests(body),
-        "written_pair_hashes": token_pair_digests(body),
+        # 書き込み側は落とさない。落とすと、書き手が埋め草で払い出しを押し出せる。
+        "written_line_hashes": line_digests(body, limit=MAX_WRITE_DIGESTS),
+        "written_pair_hashes": token_pair_digests(body, limit=MAX_WRITE_DIGESTS),
     }
 
 
