@@ -227,25 +227,35 @@ class BoundedDigestSet:
     なので、結果は最後にまとめて選ぶ場合と同じになる。
     """
 
-    __slots__ = ("_limit", "_slack", "_seen", "_ceiling")
+    __slots__ = ("_limit", "_slack", "_seen", "_ceiling", "_overflowed")
 
     def __init__(self, limit: int) -> None:
         self._limit = limit
         self._slack = max(limit * 4, limit + 1)
         self._seen: set[str] = set()
         self._ceiling: Optional[str] = None
+        # **落としたことを黙って忘れない。** 落とした事実まで消すと、上限を超える本文を書けば
+        # 証拠が静かに欠けたまま完全な記録に見える。落としたかどうかは読み手が知る必要がある。
+        self._overflowed = False
 
     def add(self, digest: str) -> None:
         if self._ceiling is not None and digest > self._ceiling:
+            self._overflowed = True
             return
         self._seen.add(digest)
         if len(self._seen) > self._slack:
             self._prune()
 
     def _prune(self) -> None:
+        if len(self._seen) > self._limit:
+            self._overflowed = True
         kept = sorted(self._seen)[: self._limit]
         self._seen = set(kept)
         self._ceiling = kept[-1] if kept else None
+
+    def overflowed(self) -> bool:
+        """上限に収まらず落とした分があるかを返す。"""
+        return self._overflowed or len(self._seen) > self._limit
 
     def result(self) -> list[str]:
         return capped_digests(self._seen, self._limit)
@@ -272,16 +282,23 @@ def line_digests(body: Any, *, limit: int = MAX_LINE_DIGESTS) -> list[str]:
     繰り返されても 1 つに畳む。出現順は保たず、集合として扱う。差分形式の本文は、適用後に残る
     文言へ均してから通す。
     """
+    return line_digests_with_overflow(body, limit=limit)[0]
+
+
+def line_digests_with_overflow(
+    body: Any, *, limit: int = MAX_LINE_DIGESTS
+) -> tuple[list[str], bool]:
+    """行ごとのダイジェストと、上限に収まらず落とした分があるかを返す。"""
     body = normalize_patch_body(body)
     if not isinstance(body, str) or not body:
-        return []
+        return [], False
     seen = BoundedDigestSet(limit)
     for raw in body.splitlines():
         line = raw.strip()
         if len(line) < MIN_LINE_LENGTH:
             continue
         seen.add(_digest(line))
-    return seen.result()
+    return seen.result(), seen.overflowed()
 
 
 def _strip_prose_brackets(token: str) -> str:
@@ -300,6 +317,24 @@ def _strip_prose_brackets(token: str) -> str:
     # 先頭を落として対にならなくなった閉じ括弧と、もともと余っている閉じ括弧を落とす。
     while token.endswith("]") and token.count("]") > token.count("["):
         token = token[:-1]
+    return token
+
+
+def _strip_assignment_prefix(token: str) -> str:
+    """語の前に付いた代入や選択肢の名前を落とす。
+
+    指示ファイルは経路や URL を `KEY=/srv/agent/config` や `--log=/var/log/audit.log` の形でも
+    書く。前置きを残すと、経路は起点を持たない語として捨てられ、URL は前置きごとダイジェストに
+    なる。要約が裸の経路だけを残すと、書き込み側と指示側で別の値になり突合が落ちる。
+
+    落とすのは、等号の手前に区切りも種別の印も無いときだけにする。`https://host/a?tenant=A` の
+    ように手前が既に位置を指している場合は、クエリの値を切り離してしまうため触らない。
+    """
+    while "=" in token:
+        head, _, rest = token.partition("=")
+        if not rest or _TOKEN_LOCATOR in head or ":" in head:
+            break
+        token = rest
     return token
 
 
@@ -324,6 +359,7 @@ def _distinctive_tokens(text: str) -> list[str]:
         # 記号だけにする。
         token = raw.replace("\\", "/").rstrip(",;:~@/?#&").lstrip("-:@")
         token = _strip_prose_brackets(token)
+        token = _strip_assignment_prefix(token)
         token = _fold_case(token)
         if len(token) < MIN_TOKEN_LENGTH:
             continue
@@ -352,9 +388,16 @@ def token_pair_digests(body: Any, *, limit: int = MAX_PAIR_DIGESTS) -> list[str]
 
     本文そのものは返さない。内容を運ばずに突合できる形だけを出す。
     """
+    return token_pair_digests_with_overflow(body, limit=limit)[0]
+
+
+def token_pair_digests_with_overflow(
+    body: Any, *, limit: int = MAX_PAIR_DIGESTS
+) -> tuple[list[str], bool]:
+    """語の組のダイジェストと、上限に収まらず落とした分があるかを返す。"""
     body = normalize_patch_body(body)
     if not isinstance(body, str) or not body:
-        return []
+        return [], False
     seen = BoundedDigestSet(limit)
     for raw in body.splitlines():
         tokens = _distinctive_tokens(raw)
@@ -364,7 +407,7 @@ def token_pair_digests(body: Any, *, limit: int = MAX_PAIR_DIGESTS) -> list[str]
                 if left == right:
                     continue
                 seen.add(_digest(f"{left}\x1f{right}"))
-    return seen.result()
+    return seen.result(), seen.overflowed()
 
 
 def system_prompt_pair_digests(*sources: Any, **named: Any) -> list[str]:
@@ -404,13 +447,23 @@ def classify_instruction_write(arguments: Any) -> Optional[dict[str, Any]]:
     body = _first_present(arguments, _BODY_KEYS)
     if not isinstance(body, str) or not body:
         return None
-    return {
+    lines, lines_over = line_digests_with_overflow(body, limit=MAX_WRITE_DIGESTS)
+    pairs, pairs_over = token_pair_digests_with_overflow(body, limit=MAX_WRITE_DIGESTS)
+    written: dict[str, Any] = {
         "instruction_file_name": name,
         "written_content_hash": _digest(body),
         # 書き込み側は落とさない。落とすと、書き手が埋め草で払い出しを押し出せる。
-        "written_line_hashes": line_digests(body, limit=MAX_WRITE_DIGESTS),
-        "written_pair_hashes": token_pair_digests(body, limit=MAX_WRITE_DIGESTS),
+        "written_line_hashes": lines,
+        "written_pair_hashes": pairs,
     }
+    # **上限に収まらなかったことを記録する。** 有限の控えは無限の本文を保てないため、上限は
+    # どこかに要る。落とした事実まで消すと、上限を超える本文を書くだけで証拠が静かに欠け、
+    # 欠けた記録が完全な記録と見分けられなくなる。実測で正規の指示ファイルは最大 48 組で、
+    # 上限はその 85 倍である。超える書き込みは指示ファイルの体を成しておらず、超過そのものが
+    # 判定の材料になる。
+    if lines_over or pairs_over:
+        written["written_digests_truncated"] = True
+    return written
 
 
 # 指示にあたる本文が載る引数の名前。提供元ごとに異なる。役割つきの列に載る場合と、独立した
