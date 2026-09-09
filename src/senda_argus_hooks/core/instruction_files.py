@@ -118,12 +118,18 @@ def _fold_case(token: str) -> str:
     head, sep, rest = token.partition(_SCHEME_SEP)
     if not sep:
         return token
-    authority, slash, tail = rest.partition("/")
+    # **権限の終わりはスラッシュだけではない。** クエリやフラグメントが直後に来る形もある。
+    # 区切りを 1 つしか見ないと、クエリの値まで倒れて大小の違う別の宛先が同じになる。
+    cut = len(rest)
+    for mark in ("/", "?", "#"):
+        found = rest.find(mark)
+        if found != -1 and found < cut:
+            cut = found
+    authority, tail = rest[:cut], rest[cut:]
     # **利用者情報は大小を区別する。** 権限の部分をまるごと倒すと、@ の手前が違うだけの
     # 別の宛先が同じダイジェストになる。倒すのはホスト名だけにする。
     userinfo, at, hostname = authority.rpartition("@")
-    folded = userinfo + at + hostname.lower()
-    return head.lower() + _SCHEME_SEP + folded + slash + tail
+    return head.lower() + _SCHEME_SEP + userinfo + at + hostname.lower() + tail
 
 # 組に使う語に含まれていることを求める区切り。**長さと文字種だけでは足りない。** 同じ計画の
 # 文書は識別子の語彙を共有し、規則名や事象名のような下線や点を含む長い語が、無関係な文書どうしで
@@ -210,6 +216,39 @@ def normalize_patch_body(body: Any) -> Any:
     return "\n".join(kept)
 
 
+class BoundedDigestSet:
+    """走査しながら、値の小さい順に上限までを保つ。
+
+    **上限を超える分を最後にまとめて落とす形では、走査中の確保が上限に縛られない。** 大きな
+    本文では、出すのが数百件でも数十万件を抱えて並べ替えることになる。上限の数倍まで溜めたら
+    その場で切り、以後は切った境目より大きい値を持たない。落とすのは最終的に残らない値だけ
+    なので、結果は最後にまとめて選ぶ場合と同じになる。
+    """
+
+    __slots__ = ("_limit", "_slack", "_seen", "_ceiling")
+
+    def __init__(self, limit: int) -> None:
+        self._limit = limit
+        self._slack = max(limit * 4, limit + 1)
+        self._seen: set[str] = set()
+        self._ceiling: Optional[str] = None
+
+    def add(self, digest: str) -> None:
+        if self._ceiling is not None and digest > self._ceiling:
+            return
+        self._seen.add(digest)
+        if len(self._seen) > self._slack:
+            self._prune()
+
+    def _prune(self) -> None:
+        kept = sorted(self._seen)[: self._limit]
+        self._seen = set(kept)
+        self._ceiling = kept[-1] if kept else None
+
+    def result(self) -> list[str]:
+        return capped_digests(self._seen, self._limit)
+
+
 def capped_digests(digests: set[str], limit: int) -> list[str]:
     """上限を超える分を、本文の位置に依らない決まった順で落とす。
 
@@ -234,13 +273,13 @@ def line_digests(body: Any, *, limit: int = MAX_LINE_DIGESTS) -> list[str]:
     body = normalize_patch_body(body)
     if not isinstance(body, str) or not body:
         return []
-    seen: set[str] = set()
+    seen = BoundedDigestSet(limit)
     for raw in body.splitlines():
         line = raw.strip()
         if len(line) < MIN_LINE_LENGTH:
             continue
         seen.add(_digest(line))
-    return capped_digests(seen, limit)
+    return seen.result()
 
 
 def _distinctive_tokens(text: str) -> list[str]:
@@ -293,7 +332,7 @@ def token_pair_digests(body: Any, *, limit: int = MAX_PAIR_DIGESTS) -> list[str]
     body = normalize_patch_body(body)
     if not isinstance(body, str) or not body:
         return []
-    seen: set[str] = set()
+    seen = BoundedDigestSet(limit)
     for raw in body.splitlines():
         tokens = _distinctive_tokens(raw)
         for i in range(len(tokens)):
@@ -302,7 +341,7 @@ def token_pair_digests(body: Any, *, limit: int = MAX_PAIR_DIGESTS) -> list[str]
                 if left == right:
                     continue
                 seen.add(_digest(f"{left}\x1f{right}"))
-    return capped_digests(seen, limit)
+    return seen.result()
 
 
 def system_prompt_pair_digests(*sources: Any, **named: Any) -> list[str]:
