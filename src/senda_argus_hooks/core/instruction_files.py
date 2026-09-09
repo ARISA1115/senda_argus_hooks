@@ -101,7 +101,9 @@ MAX_WRITE_DIGESTS: Final[int] = 4096
 # **クエリとフラグメントとパーセント符号化も語の内側に残す。** 切ると、指す先が問い合わせで分かれるURLが
 # 同じ語に潰れる。テナントごとに宛先を分けた URL がすべて 1 つになり、無関係な指示ファイルどうしが
 # 下限に届く。
-_TOKEN_RE: Final[Any] = re.compile(r"[A-Za-z0-9_.\\/:@~?#%&=+-]+")
+# 角括弧も語の内側に残す。囲まれた形で書く宛先があり、外すとホストの部分が丸ごと落ちて、
+# 経路だけが同じ別のホストが同じダイジェストになる。
+_TOKEN_RE: Final[Any] = re.compile(r"[A-Za-z0-9_.\\/:@~?#%&=+\[\]-]+")
 
 # 大小を無視してよい部分。**経路の大小は意味を持つ。** 語をまるごと小文字へ倒すと、
 # /srv/TenantA と /srv/tenanta が同じダイジェストになり、別の対象を指す組が一致する。
@@ -301,7 +303,12 @@ def _distinctive_tokens(text: str) -> list[str]:
         # **末尾の点は落とさない。** 経路の一部でありうるため、落とすと /srv/a. と /srv/a が
         # 同じダイジェストになり、別の対象を指す組が一致する。落とすのは経路の末尾に来ない
         # 記号だけにする。
-        token = _fold_case(raw.replace("\\", "/").rstrip(",;:~@/?#&").lstrip("-:@"))
+        token = raw.replace("\\", "/").rstrip(",;:~@/?#&").lstrip("-:@")
+        # 角括弧が意味を持つのは、種別の直後に来る宛先の中だけである。文の側の括弧を語へ
+        # 取り込むと、同じ経路が囲まれているかどうかで別のダイジェストになる。
+        if _SCHEME_SEP not in token:
+            token = token.strip("[]")
+        token = _fold_case(token)
         if len(token) < MIN_TOKEN_LENGTH:
             continue
         if _TOKEN_LOCATOR not in token:
