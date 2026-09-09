@@ -195,3 +195,59 @@ def test_the_agent_span_puts_the_digests_where_the_matcher_reads(tmp_path, monke
     event = _read_events(path)[0]
     assert event["event_type"] == "llm.request"
     assert event["data"]["llm"]["system_prompt_pair_hashes"] == token_pair_digests(_PAYLOAD)
+
+
+def test_the_roleless_generate_input_is_not_an_instruction():
+    """生成の要求で役割の宣言が無い入力を指示として扱わないこと。
+
+    **役割の載る名前は 1 つではない。** 1 つだけ条件を付けても、同じ性質の残りの名前から
+    同じことが起きる。
+    """
+    from senda_argus_hooks.core.instruction_files import (
+        collect_instruction_sources,
+        system_prompt_pair_digests,
+    )
+
+    user = "利用者の質問 /srv/data/report.csv と https://example.test/docs/a と /var/tmp/out.json"
+    for key in ("input", "contents", "messages"):
+        sources = collect_instruction_sources({key: [user]}, None, None)
+        assert system_prompt_pair_digests(*sources) == [], key
+
+
+def test_the_batched_messages_are_unwrapped():
+    """束ねられた会話をほどいて指示を取り出すこと。
+
+    枠組みによっては 1 回の要求に複数の会話を束ねて渡す。外側の列は役割を持たないため、
+    ほどかずに渡すと指示が 1 件も拾えない。役割を要素の種別で持つ形も同じ。
+    """
+    from senda_argus_hooks.core.instruction_files import (
+        collect_instruction_sources,
+        system_prompt_pair_digests,
+        token_pair_digests,
+    )
+
+    class _Message:
+        def __init__(self, kind: str, content: str) -> None:
+            self.type = kind
+            self.content = content
+
+    batched = [[_Message("system", _PAYLOAD), _Message("human", "頼む")]]
+    sources = collect_instruction_sources({"messages": batched}, None, None)
+    assert system_prompt_pair_digests(*sources) == token_pair_digests(_PAYLOAD)
+
+
+def test_the_user_message_in_a_batch_is_not_an_instruction():
+    """束ねられた会話の中でも、利用者の役割の本文は指示として扱わないこと。"""
+    from senda_argus_hooks.core.instruction_files import (
+        collect_instruction_sources,
+        system_prompt_pair_digests,
+    )
+
+    class _Message:
+        def __init__(self, kind: str, content: str) -> None:
+            self.type = kind
+            self.content = content
+
+    user = "質問 /srv/data/report.csv と https://example.test/docs/a と /var/tmp/out.json"
+    sources = collect_instruction_sources({"messages": [[_Message("human", user)]]}, None, None)
+    assert system_prompt_pair_digests(*sources) == []

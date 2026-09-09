@@ -330,11 +330,27 @@ _INSTRUCTION_KEYS: Final[tuple[str, ...]] = (
 # 役割つきの要素が載る引数の名前。応答系の要求では input に載る。
 _ROLE_LIST_KEYS: Final[tuple[str, ...]] = ("messages", "input", "contents")
 
-# 役割の宣言がある要素だけを採る引数の名前。**この名前には利用者の入力も載る。** 応答系の
-# 要求は指示と質問を同じ引数で受け、埋め込みの要求は文書そのものをここへ渡す。役割の無い
-# 値をまとめて指示として扱うと、経路や住所を含む普通の質問や文書が指示のダイジェストになり、
-# 記録済みの書き込みと偶然重なったときに伝播として報告される。
-_ROLE_REQUIRED_KEYS: Final[tuple[str, ...]] = ("input",)
+# 役割の宣言がある要素だけを採る引数の名前。**これらの名前には利用者の入力も載る。** 応答系の
+# 要求は指示と質問を同じ引数で受け、埋め込みの要求は文書そのものを、生成の要求は利用者の
+# 問いかけをここへ渡す。役割の無い値をまとめて指示として扱うと、経路や住所を含む普通の質問や
+# 文書が指示のダイジェストになり、記録済みの書き込みと偶然重なったときに伝播として報告される。
+#
+# **役割の載る名前は全部この扱いにする。** 1 つだけ条件を付けても、同じ性質の残りの名前から
+# 同じことが起きる。
+_ROLE_REQUIRED_KEYS: Final[tuple[str, ...]] = _ROLE_LIST_KEYS
+
+
+def _flatten_batch(value: Any) -> Any:
+    """束ねられた列を 1 段ほどく。
+
+    枠組みによっては、1 回の要求に複数の会話を束ねて渡す。外側の列は役割を持たないため、
+    ほどかずに渡すと役割の判定も本文の取り出しも成立せず、指示が 1 件も拾えない。
+    """
+    if not isinstance(value, (list, tuple)) or not value:
+        return value
+    if all(isinstance(item, (list, tuple)) for item in value):
+        return [inner for item in value for inner in item]
+    return value
 
 
 def _declares_role(value: Any) -> bool:
@@ -359,9 +375,16 @@ def _block_text(block: Any) -> str:
 
 
 def _role_of(item: Any) -> str:
+    """要素が宣言した役割を返す。宣言が無ければ空を返す。
+
+    役割を載せる名前は提供元ごとに違う。枠組みによっては要素の種別として持つ。片方だけを
+    見ると、その枠組みの指示が 1 件も拾えない。**種別を見るのは要素が辞書でないときに限る。**
+    辞書の種別は本文の塊の種類を表しており、役割ではない。
+    """
     if isinstance(item, dict):
         return str(item.get("role") or "").strip().lower()
-    return str(getattr(item, "role", "") or "").strip().lower()
+    role = getattr(item, "role", "") or getattr(item, "type", "")
+    return str(role or "").strip().lower()
 
 
 def _content_of(item: Any) -> Any:
@@ -428,13 +451,18 @@ def collect_instruction_sources(
         for key in _INSTRUCTION_KEYS + _ROLE_LIST_KEYS:
             if call_kwargs.get(key) is None:
                 continue
-            if key in _ROLE_REQUIRED_KEYS and not _declares_role(call_kwargs[key]):
-                continue
-            sources.append(call_kwargs[key])
+            value = call_kwargs[key]
+            if key in _ROLE_REQUIRED_KEYS:
+                value = _flatten_batch(value)
+                if not _declares_role(value):
+                    continue
+            sources.append(value)
     if isinstance(positional, (list, tuple)):
         for item in positional:
             if isinstance(item, (list, tuple)):
-                sources.append(item)
+                flat = _flatten_batch(item)
+                if _declares_role(flat):
+                    sources.append(flat)
     if holder is not None:
         for key in _INSTRUCTION_KEYS:
             for name in (key, f"_{key}"):
