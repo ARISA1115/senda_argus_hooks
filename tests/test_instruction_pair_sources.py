@@ -116,3 +116,82 @@ def test_the_positional_messages_carry_the_digests(tmp_path, monkeypatch):
     llm = _read_events(path)[0]["data"]["llm"]
     assert llm["system_prompt_pair_hashes"] == token_pair_digests(_PAYLOAD)
     assert llm["system_prompt_line_hashes"] == system_prompt_line_digests(_PAYLOAD)
+
+
+def test_the_roleless_input_is_not_treated_as_an_instruction(tmp_path, monkeypatch):
+    """役割の宣言が無い入力を指示として扱わないこと。
+
+    **応答系の要求は指示と質問を同じ引数で受ける。** 役割の無い値をまとめて指示にすると、
+    経路や住所を含む普通の質問が指示のダイジェストになり、記録済みの書き込みと偶然重なった
+    ときに伝播として報告される。
+    """
+    Responses = _install_fake_openai(monkeypatch)
+    path = tmp_path / "events.jsonl"
+    _register(path)
+    try:
+        Responses().create(model="gpt-fake", input=["この経路 /srv/data/report.csv と https://example.test/docs/a と /var/tmp/out.json を見て"])
+    finally:
+        shutdown()
+    llm = _read_events(path)[0]["data"]["llm"]
+    assert "system_prompt_pair_hashes" not in llm
+    assert "system_prompt_line_hashes" not in llm
+
+
+def test_the_role_bearing_input_still_carries_the_digests(tmp_path, monkeypatch):
+    """役割を宣言した入力からは、これまでどおり指示を採ること。"""
+    Responses = _install_fake_openai(monkeypatch)
+    path = tmp_path / "events.jsonl"
+    _register(path)
+    try:
+        Responses().create(
+            model="gpt-fake",
+            input=[{"role": "system", "content": _PAYLOAD}, {"role": "user", "content": "頼む"}],
+        )
+    finally:
+        shutdown()
+    llm = _read_events(path)[0]["data"]["llm"]
+    assert llm["system_prompt_pair_hashes"] == token_pair_digests(_PAYLOAD)
+
+
+def test_the_embedding_request_carries_no_instruction(tmp_path, monkeypatch):
+    """埋め込みの要求から指示を採らないこと。文書そのものを渡す引数である。"""
+    _install_fake_openai(monkeypatch)
+    import sys as _sys
+
+    Embeddings = _sys.modules["openai"].resources.embeddings.Embeddings
+    path = tmp_path / "events.jsonl"
+    _register(path)
+    try:
+        Embeddings().create(model="emb-fake", input=[{"role": "system", "content": _PAYLOAD}])
+    finally:
+        shutdown()
+    events = _read_events(path)
+    llm = events[0]["data"]["llm"]
+    assert "system_prompt_pair_hashes" not in llm
+    assert "system_prompt_line_hashes" not in llm
+
+
+def test_the_agent_span_puts_the_digests_where_the_matcher_reads(tmp_path, monkeypatch):
+    """推論の区間の指示を、判定側が読む入れ物へ載せること。
+
+    **送出はされるのに突合へ一度も届かない形になりうる。** 判定側は推論の記録を llm の
+    入れ物から読む。ここだけ別の入れ物へ載せると、記録の上では欠落が見えない。
+    """
+    import types
+
+    from senda_argus_hooks.integrations.openai_agents import SendaArgusOpenAIAgentsProcessor
+
+    path = tmp_path / "events.jsonl"
+    register(project="test-agent-span", exporters=[{"type": "jsonl", "path": str(path)}])
+    processor = SendaArgusOpenAIAgentsProcessor()
+    span = types.SimpleNamespace(
+        type="generation",
+        span_data=types.SimpleNamespace(instructions=_PAYLOAD),
+    )
+    try:
+        processor.on_span_end(span)
+    finally:
+        shutdown()
+    event = _read_events(path)[0]
+    assert event["event_type"] == "llm.request"
+    assert event["data"]["llm"]["system_prompt_pair_hashes"] == token_pair_digests(_PAYLOAD)

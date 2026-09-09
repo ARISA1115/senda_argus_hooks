@@ -60,14 +60,20 @@ class SendaArgusOpenAIAgentsProcessor:
         # 推論にあたる区間だけ、指示の行ダイジェストを載せる。指示は区間の内容として渡るため、
         # 呼び出しの引数ではなく区間そのものから取り出す。
         line_hashes, pair_hashes = _span_instruction_digests(span)
+        data: dict[str, Any] = {"agent": payload}
+        # 判定側は推論の記録を llm の入れ物から読む。ここだけ別の入れ物へ載せると、
+        # 送出はされるのに突合へ一度も届かない。他の送出元と同じ形に揃える。
+        llm: dict[str, Any] = {}
         if line_hashes:
-            payload["system_prompt_line_hashes"] = line_hashes
+            llm["system_prompt_line_hashes"] = line_hashes
         if pair_hashes:
-            payload["system_prompt_pair_hashes"] = pair_hashes
+            llm["system_prompt_pair_hashes"] = pair_hashes
+        if llm:
+            data["llm"] = llm
         emit_event(
             _span_event_type(span, suffix="completed"),
             source={"component": "integration", "sdk": "openai_agents", "operation": "span.end"},
-            data={"agent": payload},
+            data=data,
             status="success",
         )
 
