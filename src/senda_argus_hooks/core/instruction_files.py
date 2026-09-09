@@ -118,8 +118,12 @@ def _fold_case(token: str) -> str:
     head, sep, rest = token.partition(_SCHEME_SEP)
     if not sep:
         return token
-    host, slash, tail = rest.partition("/")
-    return head.lower() + _SCHEME_SEP + host.lower() + slash + tail
+    authority, slash, tail = rest.partition("/")
+    # **利用者情報は大小を区別する。** 権限の部分をまるごと倒すと、@ の手前が違うだけの
+    # 別の宛先が同じダイジェストになる。倒すのはホスト名だけにする。
+    userinfo, at, hostname = authority.rpartition("@")
+    folded = userinfo + at + hostname.lower()
+    return head.lower() + _SCHEME_SEP + folded + slash + tail
 
 # 組に使う語に含まれていることを求める区切り。**長さと文字種だけでは足りない。** 同じ計画の
 # 文書は識別子の語彙を共有し、規則名や事象名のような下線や点を含む長い語が、無関係な文書どうしで
