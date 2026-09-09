@@ -313,6 +313,19 @@ _INSTRUCTION_KEYS: Final[tuple[str, ...]] = (
 # 役割つきの要素が載る引数の名前。応答系の要求では input に載る。
 _ROLE_LIST_KEYS: Final[tuple[str, ...]] = ("messages", "input", "contents")
 
+# 役割の宣言がある要素だけを採る引数の名前。**この名前には利用者の入力も載る。** 応答系の
+# 要求は指示と質問を同じ引数で受け、埋め込みの要求は文書そのものをここへ渡す。役割の無い
+# 値をまとめて指示として扱うと、経路や住所を含む普通の質問や文書が指示のダイジェストになり、
+# 記録済みの書き込みと偶然重なったときに伝播として報告される。
+_ROLE_REQUIRED_KEYS: Final[tuple[str, ...]] = ("input",)
+
+
+def _declares_role(value: Any) -> bool:
+    """役割を宣言した要素を含む列かどうかを返す。"""
+    if not isinstance(value, (list, tuple)):
+        return False
+    return any(_role_of(item) for item in value)
+
 
 def _block_text(block: Any) -> str:
     """種別つきの塊から本文を取り出す。形は提供元ごとに異なる。"""
@@ -396,8 +409,11 @@ def collect_instruction_sources(
     sources: list[Any] = []
     if isinstance(call_kwargs, dict):
         for key in _INSTRUCTION_KEYS + _ROLE_LIST_KEYS:
-            if call_kwargs.get(key) is not None:
-                sources.append(call_kwargs[key])
+            if call_kwargs.get(key) is None:
+                continue
+            if key in _ROLE_REQUIRED_KEYS and not _declares_role(call_kwargs[key]):
+                continue
+            sources.append(call_kwargs[key])
     if isinstance(positional, (list, tuple)):
         for item in positional:
             if isinstance(item, (list, tuple)):

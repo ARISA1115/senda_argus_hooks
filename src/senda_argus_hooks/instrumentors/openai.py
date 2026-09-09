@@ -76,7 +76,11 @@ class OpenAIInstrumentor(BaseInstrumentor):
                 # 指示の載る場所は提供元と操作ごとに違う。応答系の要求では instructions と input に
                 # 載り、位置引数で渡る形もある。名前を 2 つ決め打ちすると、その形の呼び出しでは
                 # 行も組も空になり、判定が静かに止まる。場所の網羅は共通の収集へ任せる。
-                _sources = collect_instruction_sources(kwargs, args)
+                # 埋め込みの要求に指示は無い。文書そのものを渡す引数を指示として扱うと、
+                # 経路や住所を含む普通の文書が指示のダイジェストになる。
+                _sources = (
+                    [] if "embedding" in operation else collect_instruction_sources(kwargs, args)
+                )
                 system_prompt_line_hashes = system_prompt_line_digests(*_sources)
                 system_prompt_pair_hashes = system_prompt_pair_digests(*_sources)
                 llm_data: dict[str, Any] = {
