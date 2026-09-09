@@ -437,3 +437,91 @@ def test_patch_context_lines_are_not_counted_as_written():
         f"+{context}",
     ])
     assert _pairs(added) == _pairs(context)
+
+
+def test_the_patch_envelope_form_is_normalized_before_hashing():
+    """封筒の形で渡された差分も、加えた行の記号を落としてから語にすること。
+
+    **差分の書き方は 1 つではない。** 道具が使う封筒の形は位置情報の行が裸の分節記号で、統一形式
+    の目印に当たらない。見落とすと加えた行の先頭の記号が残ったまま語を作り、その行の最初の宛先が
+    起点を持たない語として捨てられる。3 つ並んだ宛先から組が 1 つしか出ず、後から適用後の本文を
+    読んだ指示が下限に届かない。
+    """
+    from senda_argus_hooks.core.instruction_files import token_pair_digests as _pairs
+
+    bare = "/srv/tenant/aaa/one /srv/tenant/aaa/two /srv/tenant/aaa/three"
+    enveloped = "\n".join([
+        "*** Begin Patch",
+        "*** Update File: SOUL.md",
+        "@@",
+        f"+{bare}",
+        "*** End Patch",
+    ])
+    assert _pairs(enveloped) == _pairs(bare)
+    assert len(_pairs(bare)) == 3
+
+
+def test_comma_bearing_locators_stay_distinct():
+    """読点を含む宛先が、値の違いを保ったまま語になること。
+
+    読点は経路にもクエリにも現れる妥当な文字である。読点で語を切ると、共有する前置きだけが残り、
+    値の違う無関係な宛先が同じ組に潰れる。
+    """
+    from senda_argus_hooks.core.instruction_files import token_pair_digests as _pairs
+
+    a = _pairs("https://host.test/m?coords=1,A https://host.test/n?coords=1,A")
+    b = _pairs("https://host.test/m?coords=1,B https://host.test/n?coords=1,B")
+    assert a and b and a != b
+
+
+def test_a_bare_hunk_marker_alone_is_recognized_as_a_patch():
+    """封筒の見出しが無く、裸の分節記号だけの差分も差分と判定すること。
+
+    見出しの有無で判定を分けると、見出しを持たない断片が差分と認められず、加えた行の先頭の記号が
+    残ったまま語になる。**手当ては条件ごとに分けて固定する。** 見出しで成立する経路があると、
+    裸の分節記号の手当てが効いているかどうかを試験が確かめられない。
+    """
+    from senda_argus_hooks.core.instruction_files import token_pair_digests as _pairs
+
+    bare = "/srv/tenant/aaa/one /srv/tenant/aaa/two /srv/tenant/aaa/three"
+    fragment = "\n".join(["@@", f"+{bare}"])
+    assert _pairs(fragment) == _pairs(bare)
+    assert len(_pairs(bare)) == 3
+
+
+def test_an_add_file_envelope_without_a_hunk_marker_is_a_patch():
+    """分節記号を持たない追加の封筒も差分と判定すること。
+
+    ファイルを新しく作る封筒には分節記号が現れず、本文の行にだけ記号が付く。裸の分節記号だけを
+    見ていると、この形が差分と認められず、加えた行の最初の宛先が起点を持たない語として捨てられる。
+    """
+    from senda_argus_hooks.core.instruction_files import token_pair_digests as _pairs
+
+    bare = "/srv/tenant/aaa/one /srv/tenant/aaa/two /srv/tenant/aaa/three"
+    enveloped = "\n".join([
+        "*** Begin Patch",
+        "*** Add File: SOUL.md",
+        f"+{bare}",
+        "*** End Patch",
+    ])
+    assert _pairs(enveloped) == _pairs(bare)
+    assert len(_pairs(bare)) == 3
+
+
+def test_envelope_lines_do_not_become_line_digests():
+    """封筒の見出しの行が、行ごとのダイジェストに残らないこと。
+
+    見出しは本文ではなく、道具の書式である。残すと、**同じ道具で書いた無関係な書き込みどうしが
+    同じ行を共有する。** 行の突合は 2 行の重なりで成立するため、見出しが 2 行あるだけで下限に届く。
+    """
+    from senda_argus_hooks.core.instruction_files import line_digests as _lines
+
+    body = "この行は突合の対象になるだけの十分な長さを持っている行です"
+    enveloped = "\n".join([
+        "*** Begin Patch",
+        "*** Update File: /srv/tenant/aaa/SOUL.md",
+        "@@",
+        f"+{body}",
+        "*** End Patch",
+    ])
+    assert _lines(enveloped) == _lines(body)

@@ -103,7 +103,7 @@ MAX_WRITE_DIGESTS: Final[int] = 4096
 # 下限に届く。
 # 角括弧も語の内側に残す。囲まれた形で書く宛先があり、外すとホストの部分が丸ごと落ちて、
 # 経路だけが同じ別のホストが同じダイジェストになる。
-_TOKEN_RE: Final[Any] = re.compile(r"[A-Za-z0-9_.\\/:@~?#%&=+;\[\]-]+")
+_TOKEN_RE: Final[Any] = re.compile(r"[A-Za-z0-9_.\\/:@~?#%&=+;,\[\]-]+")
 
 # 大小を無視してよい部分。**経路の大小は意味を持つ。** 語をまるごと小文字へ倒すと、
 # /srv/TenantA と /srv/tenanta が同じダイジェストになり、別の対象を指す組が一致する。
@@ -180,13 +180,27 @@ def instruction_file_name(path: Any) -> Optional[str]:
     return None
 
 
-_DIFF_MARKERS: Final[tuple[str, ...]] = ("@@ ", "--- ", "+++ ")
+# 差分と判定する目印。**書き方は 1 つではない。** 統一形式の位置情報の行に加えて、道具が使う
+# 封筒の形も見る。封筒の形は位置情報の行が裸の @@ で、統一形式の目印に当たらない。見落とすと
+# 加えた行の先頭の記号が残ったまま語を作り、その行の最初の宛先が起点を持たない語として捨てられる。
+_DIFF_MARKERS: Final[tuple[str, ...]] = (
+    "@@ ", "--- ", "+++ ", "*** Begin Patch", "*** Update File:", "*** Add File:",
+)
+
+# 封筒の形が使う行。本文ではないため落とす。
+_PATCH_ENVELOPE_MARKERS: Final[tuple[str, ...]] = (
+    "*** Begin Patch", "*** End Patch", "*** Update File:", "*** Add File:",
+    "*** Delete File:", "*** Move to:",
+)
 
 
 def _looks_like_patch(body: str) -> bool:
     """本文が差分形式かどうかを、位置情報の行の有無で判定する。"""
     for raw in body.splitlines():
         if raw.startswith(_DIFF_MARKERS):
+            return True
+        # 封筒の形の位置情報は裸の @@ である。統一形式の目印には当たらない。
+        if raw.strip() == "@@":
             return True
     return False
 
@@ -210,6 +224,8 @@ def normalize_patch_body(body: Any) -> Any:
     kept: list[str] = []
     for raw in body.splitlines():
         if raw.startswith(("+++", "---", "@@", "diff ", "index ")):
+            continue
+        if raw.startswith(_PATCH_ENVELOPE_MARKERS):
             continue
         if raw.startswith("-"):
             continue
