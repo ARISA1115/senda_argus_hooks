@@ -284,6 +284,25 @@ def line_digests(body: Any, *, limit: int = MAX_LINE_DIGESTS) -> list[str]:
     return seen.result()
 
 
+def _strip_prose_brackets(token: str) -> str:
+    """語の外側を囲む括弧だけを落とす。
+
+    角括弧が対象の一部になるのは、種別の直後に来る宛先の中だけである。**それ以外の括弧は
+    文の側のものである。** 全体を囲む括弧を語へ取り込むと、要約で付いたり外れたりするだけで
+    その語を含む組が全部変わり、突合が落ちる。
+
+    外側から 1 つずつ落とし、対になっていない括弧が残らなくなるまで続ける。宛先の中の括弧は
+    対になっているため、この操作では落ちない。
+    """
+    # 対象の一部になる括弧は、種別の直後にしか現れない。先頭の括弧はどれも文の側である。
+    while token.startswith("["):
+        token = token[1:]
+    # 先頭を落として対にならなくなった閉じ括弧と、もともと余っている閉じ括弧を落とす。
+    while token.endswith("]") and token.count("]") > token.count("["):
+        token = token[:-1]
+    return token
+
+
 def _distinctive_tokens(text: str) -> list[str]:
     """1 行から、位置を指す語だけを取り出す。
 
@@ -304,10 +323,7 @@ def _distinctive_tokens(text: str) -> list[str]:
         # 同じダイジェストになり、別の対象を指す組が一致する。落とすのは経路の末尾に来ない
         # 記号だけにする。
         token = raw.replace("\\", "/").rstrip(",;:~@/?#&").lstrip("-:@")
-        # 角括弧が意味を持つのは、種別の直後に来る宛先の中だけである。文の側の括弧を語へ
-        # 取り込むと、同じ経路が囲まれているかどうかで別のダイジェストになる。
-        if _SCHEME_SEP not in token:
-            token = token.strip("[]")
+        token = _strip_prose_brackets(token)
         token = _fold_case(token)
         if len(token) < MIN_TOKEN_LENGTH:
             continue
