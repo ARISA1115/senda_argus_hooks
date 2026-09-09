@@ -59,7 +59,14 @@ _PATH_KEYS: Final[tuple[str, ...]] = (
 # 指示にあたる役割の名前。この役割の本文が変わることは、指示が変わることを意味する。
 SYSTEM_ROLE: Final[str] = "system"
 
-MAX_LINE_DIGESTS: Final[int] = 64
+# 指示として扱う役割。**提供元ごとに名前が違う。** 応答系の要求は、優先して従わせる指示を
+# developer の役割で受ける。system だけを見ると、その形の指示が 1 件も拾えない。
+INSTRUCTION_ROLES: Final[frozenset[str]] = frozenset({SYSTEM_ROLE, "developer"})
+
+# 実測で、3 つの計画の文書 195 件のうち、64 では 121 件しか全体を運べない。256 なら 188 件が
+# 収まり、1 件あたりの大きさは 17 キロバイトに収まる。上限を超える本文では、一部だけを見た
+# 書き込みと全体を見た指示とで残る組が食い違い、突合が成立しないことがある。
+MAX_LINE_DIGESTS: Final[int] = 256
 
 # 突合の対象にする行の最小の長さ。短い行は無関係な文書どうしでも一致するため、集合の重なりが
 # 伝播の証拠にならなくなる。
@@ -111,6 +118,9 @@ def _fold_case(token: str) -> str:
 # 位置を指す語だけが、要約を経ても書き換えられずに残るという性質を持つ。要約は文言を作り替えるが、
 # 払い出しが指す先は書き換えられない。
 _TOKEN_LOCATOR: Final[str] = "/"
+
+# 自分の居場所を起点にした表記。指す先が文書ごとに違うため、組の材料にしない。
+_RELATIVE_PREFIX: Final[str] = ".."
 
 
 
@@ -220,10 +230,17 @@ def _distinctive_tokens(text: str) -> list[str]:
     for raw in _TOKEN_RE.findall(text or ""):
         # 逆向きの区切りは順向きへ均す。同じ対象を指す経路が、環境の書き方の違いだけで
         # 別のダイジェストになると突合が成立しない。
-        token = _fold_case(raw.replace("\\", "/").strip("./:-~@"))
+        #
+        # **先頭の区切りは落とさない。** 落とすと /srv/a と srv/a が同じダイジェストになり、
+        # 起点の違う別の対象を指す組が一致する。落とすのは文の側の記号だけにする。
+        token = _fold_case(raw.replace("\\", "/").rstrip("./:-~@").lstrip("-:@"))
         if len(token) < MIN_TOKEN_LENGTH:
             continue
         if _TOKEN_LOCATOR not in token:
+            continue
+        # **自分の居場所からの相対は、指す先を定めない。** 文書の中の相互参照はこの形を取り、
+        # 同じ計画の文書どうしが同じ綴りを共有する。指す先が同じとは限らないため証拠にならない。
+        if token.startswith(_RELATIVE_PREFIX):
             continue
         out.append(token)
     return out
@@ -378,7 +395,7 @@ def _texts_from(source: Any) -> list[str]:
         has_role = any(_role_of(item) for item in source)
         for item in source:
             if has_role:
-                if _role_of(item) != SYSTEM_ROLE:
+                if _role_of(item) not in INSTRUCTION_ROLES:
                     continue
                 content = _content_of(item)
             else:
