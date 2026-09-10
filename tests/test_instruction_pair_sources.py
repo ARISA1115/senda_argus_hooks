@@ -533,3 +533,22 @@ def test_envelope_lines_do_not_become_line_digests():
         "*** End Patch",
     ])
     assert _lines(enveloped) == _lines(body)
+
+
+def test_url_sub_delimiters_stay_inside_locator_tokens():
+    """URL の綴りで区切りとして使える記号を、まとめて語の内側に残すこと。
+
+    **記号を 1 つずつ足さない。** 足りない記号が見つかるたびに追加すると、次の記号でまた同じ
+    取りこぼしが出る。実際にこの形の指摘が区切り文字を変えて何度も繰り返された。規格が定める
+    予約された区切りと下位の区切りをまとめて入れる。
+
+    取りこぼすと、値の違う無関係な宛先が共有する前置きだけに潰れ、無関係な指示ファイルどうしが
+    下限に届く。
+    """
+    from senda_argus_hooks.core.instruction_files import token_pair_digests as _pairs
+
+    for mark in ("!", "$", "'", "(", ")", "*", ",", ";", "&", "=", "+", "?", "#", "%", "@", ":"):
+        a = _pairs(f"https://host.test/m{mark}tenant=A https://host.test/n{mark}tenant=A")
+        b = _pairs(f"https://host.test/m{mark}tenant=B https://host.test/n{mark}tenant=B")
+        assert a, f"{mark} で組が作れない"
+        assert a != b, f"{mark} で値の違う宛先が同じ組に潰れる"
