@@ -49,6 +49,12 @@ _BODY_KEYS: Final[tuple[str, ...]] = (
     "value", "file_text", "source", "patch", "diff",
 )
 
+# 差分として渡される引数の名前。**差分かどうかは引数の名前で決める。** 本文の綴りで判定すると、
+# ファイルの中身に位置情報の行や封筒の見出しが書かれているだけで差分として扱ってしまう。差分と
+# 判定した本文は先頭が削除の記号である行を捨てるため、書き手はその形を本文へ書くだけで、実際には
+# 保存される行を控えから消せる。名前で決めれば、この経路は塞がる。
+_PATCH_BODY_KEYS: Final[frozenset[str]] = frozenset({"patch", "diff"})
+
 # パスとみなす引数の名前。
 _PATH_KEYS: Final[tuple[str, ...]] = (
     "path", "file_path", "filename", "file", "target_path", "uri", "filepath",
@@ -226,8 +232,12 @@ def _looks_like_patch(body: str) -> bool:
     return has_envelope_start and has_envelope_target
 
 
-def normalize_patch_body(body: Any) -> Any:
+def normalize_patch_body(body: Any, *, is_patch: bool = False) -> Any:
     """差分形式の本文を、適用後に残る文言へ均す。
+
+    **差分かどうかは呼び出し側が決める。** 引数の名前が差分を表すときだけ真を渡す。本文の綴りで
+    判定すると、ファイルの中身に位置情報の行が書かれているだけで差分として扱い、実際には保存
+    される行を捨てる。既定は偽で、そのまま返す。
 
     書き込みが差分で渡された場合、行の先頭に付く記号を落とさずにダイジェストへ通すと、後から
     指示に現れる同じ行と一致しない。指示側には記号の付かない行が載るためである。差分でない
@@ -240,7 +250,7 @@ def normalize_patch_body(body: Any) -> Any:
     なる。後から別の主体がその行を含む指示を読むと、無関係な書き換えを根拠に伝播として報告
     される。差分で渡された書き込みの証拠は、加えた行だけから作る。
     """
-    if not isinstance(body, str) or not body or not _looks_like_patch(body):
+    if not isinstance(body, str) or not body or not is_patch or not _looks_like_patch(body):
         return body
     kept: list[str] = []
     for raw in body.splitlines():
@@ -316,21 +326,23 @@ def capped_digests(digests: set[str], limit: int) -> list[str]:
     return ordered[:limit] if len(ordered) > limit else ordered
 
 
-def line_digests(body: Any, *, limit: int = MAX_LINE_DIGESTS) -> list[str]:
+def line_digests(
+    body: Any, *, limit: int = MAX_LINE_DIGESTS, is_patch: bool = False
+) -> list[str]:
     """本文を正規化した行ごとのダイジェストにする。
 
     前後の空白を落として空行を除く。短い行は無関係な文書どうしでも一致するため除く。同じ行が
     繰り返されても 1 つに畳む。出現順は保たず、集合として扱う。差分形式の本文は、適用後に残る
     文言へ均してから通す。
     """
-    return line_digests_with_overflow(body, limit=limit)[0]
+    return line_digests_with_overflow(body, limit=limit, is_patch=is_patch)[0]
 
 
 def line_digests_with_overflow(
-    body: Any, *, limit: int = MAX_LINE_DIGESTS
+    body: Any, *, limit: int = MAX_LINE_DIGESTS, is_patch: bool = False
 ) -> tuple[list[str], bool]:
     """行ごとのダイジェストと、上限に収まらず落とした分があるかを返す。"""
-    body = normalize_patch_body(body)
+    body = normalize_patch_body(body, is_patch=is_patch)
     if not isinstance(body, str) or not body:
         return [], False
     seen = BoundedDigestSet(limit)
@@ -431,7 +443,9 @@ def _distinctive_tokens(text: str) -> list[str]:
     return out
 
 
-def token_pair_digests(body: Any, *, limit: int = MAX_PAIR_DIGESTS) -> list[str]:
+def token_pair_digests(
+    body: Any, *, limit: int = MAX_PAIR_DIGESTS, is_patch: bool = False
+) -> list[str]:
     """本文を、同じ行に現れた珍しい語の組ごとのダイジェストにする。
 
     要約を経ると行はそのまま残らないが、払い出しが指す先、すなわち経路や URL は書き換えられずに
@@ -446,14 +460,14 @@ def token_pair_digests(body: Any, *, limit: int = MAX_PAIR_DIGESTS) -> list[str]
 
     本文そのものは返さない。内容を運ばずに突合できる形だけを出す。
     """
-    return token_pair_digests_with_overflow(body, limit=limit)[0]
+    return token_pair_digests_with_overflow(body, limit=limit, is_patch=is_patch)[0]
 
 
 def token_pair_digests_with_overflow(
-    body: Any, *, limit: int = MAX_PAIR_DIGESTS
+    body: Any, *, limit: int = MAX_PAIR_DIGESTS, is_patch: bool = False
 ) -> tuple[list[str], bool]:
     """語の組のダイジェストと、上限に収まらず落とした分があるかを返す。"""
-    body = normalize_patch_body(body)
+    body = normalize_patch_body(body, is_patch=is_patch)
     if not isinstance(body, str) or not body:
         return [], False
     seen = BoundedDigestSet(limit)
@@ -483,6 +497,14 @@ def system_prompt_pair_digests(*sources: Any, **named: Any) -> list[str]:
     return token_pair_digests("\n".join(texts))
 
 
+def _first_present_key(source: dict[str, Any], keys: tuple[str, ...]) -> Optional[str]:
+    """最初に見つかった名前を返す。値ではなく名前で扱いを分けるために要る。"""
+    for key in keys:
+        if key in source and source[key] is not None:
+            return key
+    return None
+
+
 def _first_present(source: dict[str, Any], keys: tuple[str, ...]) -> Any:
     for key in keys:
         if key in source and source[key] is not None:
@@ -502,11 +524,18 @@ def classify_instruction_write(arguments: Any) -> Optional[dict[str, Any]]:
     name = instruction_file_name(_first_present(arguments, _PATH_KEYS))
     if name is None:
         return None
-    body = _first_present(arguments, _BODY_KEYS)
+    body_key = _first_present_key(arguments, _BODY_KEYS)
+    body = arguments.get(body_key) if body_key else None
     if not isinstance(body, str) or not body:
         return None
-    lines, lines_over = line_digests_with_overflow(body, limit=MAX_WRITE_DIGESTS)
-    pairs, pairs_over = token_pair_digests_with_overflow(body, limit=MAX_WRITE_DIGESTS)
+    # 差分として扱うのは、差分を表す名前で渡ったときだけにする。本文の綴りでは決めない。
+    is_patch = body_key in _PATCH_BODY_KEYS
+    lines, lines_over = line_digests_with_overflow(
+        body, limit=MAX_WRITE_DIGESTS, is_patch=is_patch
+    )
+    pairs, pairs_over = token_pair_digests_with_overflow(
+        body, limit=MAX_WRITE_DIGESTS, is_patch=is_patch
+    )
     written: dict[str, Any] = {
         "instruction_file_name": name,
         "written_content_hash": _digest(body),

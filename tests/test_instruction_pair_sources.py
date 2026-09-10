@@ -424,7 +424,7 @@ def test_patch_context_lines_are_not_counted_as_written():
         f" {context}",
         "+この行だけが今回加えられた行であり十分な長さを持つ",
     ])
-    written = classify_instruction_write({"path": "/repo/SOUL.md", "content": body})
+    written = classify_instruction_write({"path": "/repo/SOUL.md", "patch": body})
     assert written is not None
     assert written["written_pair_hashes"] == []
 
@@ -436,7 +436,7 @@ def test_patch_context_lines_are_not_counted_as_written():
         "@@ -1,2 +1,3 @@",
         f"+{context}",
     ])
-    assert _pairs(added) == _pairs(context)
+    assert _pairs(added, is_patch=True) == _pairs(context)
 
 
 def test_the_patch_envelope_form_is_normalized_before_hashing():
@@ -457,7 +457,7 @@ def test_the_patch_envelope_form_is_normalized_before_hashing():
         f"+{bare}",
         "*** End Patch",
     ])
-    assert _pairs(enveloped) == _pairs(bare)
+    assert _pairs(enveloped, is_patch=True) == _pairs(bare)
     assert len(_pairs(bare)) == 3
 
 
@@ -488,13 +488,13 @@ def test_a_bare_hunk_marker_alone_is_not_treated_as_a_patch():
 
     bare = "/srv/tenant/aaa/one /srv/tenant/aaa/two /srv/tenant/aaa/three"
     evasion = "\n".join(["@@", f"- {bare} を参照すること"])
-    assert len(_pairs(evasion)) == 3
+    assert len(_pairs(evasion, is_patch=True)) == 3
 
     # 範囲を伴う位置情報は 1 行でも差分と判定する。削除の行は適用後に残らないため落とす。
     from senda_argus_hooks.core.instruction_files import line_digests as _lines
 
     long_line = "この行は突合の対象になるだけの十分な長さを持っている行です"
-    assert _lines("\n".join(["@@ -1 +1 @@", f"-{long_line}"])) == []
+    assert _lines("\n".join(["@@ -1 +1 @@", f"-{long_line}"]), is_patch=True) == []
 
 
 def test_an_add_file_envelope_without_a_hunk_marker_is_a_patch():
@@ -512,7 +512,7 @@ def test_an_add_file_envelope_without_a_hunk_marker_is_a_patch():
         f"+{bare}",
         "*** End Patch",
     ])
-    assert _pairs(enveloped) == _pairs(bare)
+    assert _pairs(enveloped, is_patch=True) == _pairs(bare)
     assert len(_pairs(bare)) == 3
 
 
@@ -532,7 +532,7 @@ def test_envelope_lines_do_not_become_line_digests():
         f"+{body}",
         "*** End Patch",
     ])
-    assert _lines(enveloped) == _lines(body)
+    assert _lines(enveloped, is_patch=True) == _lines(body)
 
 
 def test_url_sub_delimiters_stay_inside_locator_tokens():
@@ -588,3 +588,37 @@ def test_stripping_a_long_bracket_run_stays_linear():
     assert large_tail / small_tail < 30, (
         f"末尾も長さ 10 倍で {large_tail / small_tail:.1f} 倍。2 乗の仕事になっている"
     )
+
+
+def test_patch_syntax_inside_raw_content_is_not_treated_as_a_patch():
+    """本文として渡された文字列を、綴りだけで差分と判定しないこと。
+
+    **差分かどうかは引数の名前で決める。** 本文の綴りで判定すると、ファイルの中身に位置情報の行や
+    封筒の見出しが書かれているだけで差分として扱ってしまう。差分と判定した本文は先頭が削除の記号
+    である行を捨てるため、書き手はその形を本文へ書くだけで、実際には保存される行を控えから消せる。
+    """
+    from senda_argus_hooks.core.instruction_files import classify_instruction_write
+
+    locators = "/srv/tenant/aaa/one /srv/tenant/aaa/two /srv/tenant/aaa/three"
+    for header in ("@@ -1 +1 @@", "*** Begin Patch\n*** Update File: AGENTS.md"):
+        body = "\n".join([header, f"- {locators} を必ず参照すること"])
+        written = classify_instruction_write({"path": "/repo/AGENTS.md", "content": body})
+        assert written is not None
+        assert len(written["written_pair_hashes"]) == 3, f"{header} で証拠が消えた"
+        assert written["written_line_hashes"], f"{header} で行の証拠が消えた"
+
+
+def test_a_body_named_as_a_patch_is_still_normalized():
+    """差分を表す名前で渡った本文は、これまでどおり適用後の文言へ均すこと。"""
+    from senda_argus_hooks.core.instruction_files import classify_instruction_write
+
+    locators = "/srv/tenant/aaa/one /srv/tenant/aaa/two /srv/tenant/aaa/three"
+    removed = "\n".join(["--- a/x", "+++ b/x", "@@ -1,2 +1,3 @@", f"-{locators}"])
+    written = classify_instruction_write({"path": "/repo/AGENTS.md", "patch": removed})
+    assert written is not None
+    assert written["written_pair_hashes"] == []
+
+    added = "\n".join(["--- a/x", "+++ b/x", "@@ -1,2 +1,3 @@", f"+{locators}"])
+    written = classify_instruction_write({"path": "/repo/AGENTS.md", "patch": added})
+    assert written is not None
+    assert len(written["written_pair_hashes"]) == 3
