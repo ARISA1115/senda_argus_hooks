@@ -394,6 +394,19 @@ def test_a_write_beyond_the_cap_is_marked_as_truncated():
     assert "written_digests_truncated" not in small
 
 
+def test_a_query_value_is_not_cut_off_as_an_assignment():
+    """既に位置を指している語のクエリの値は切り離さないこと。
+
+    等号の前置きを落とす手当ては、代入の形で紛れ込んだ前置きを外すためのものである。既に位置を
+    指している語へ当てると、テナントごとに分けたクエリの値が落ち、無関係な宛先が同じ組に潰れる。
+    """
+    from senda_argus_hooks.core.instruction_files import token_pair_digests
+
+    a = token_pair_digests("https://host.test/read?tenant=A https://host.test/write?tenant=A")
+    b = token_pair_digests("https://host.test/read?tenant=B https://host.test/write?tenant=B")
+    assert a and b and a != b
+
+
 def test_semicolon_bearing_locators_stay_distinct():
     """区切りに分号を使う宛先が、値の違いを保ったまま語になること。
 
@@ -553,6 +566,31 @@ def test_url_sub_delimiters_stay_inside_locator_tokens():
         assert a, f"{mark} で組が作れない"
         assert a != b, f"{mark} で値の違う宛先が同じ組に潰れる"
 
+def _per_char(fn, build, n: int) -> float:
+    """1 文字あたりの所要を返す。**比ではなく単価で見る。**
+
+    小さい側の所要が短いと、そこへ乗った外乱がそのまま比を跳ね上げ、実装を変えていないのに落ちる。
+    単価なら外乱は大きい側にも小さい側にも同じ向きに出るため、仕事の桁が変わらない限り判定は動かない。
+    **最小値を採る。** 平均や 1 回の測定では、同時に走る他の処理でぶれる。
+    """
+    import time
+
+    token = build(n)
+    best = min(
+        (lambda st: (fn(token), time.perf_counter() - st)[1])(time.perf_counter())
+        for _ in range(7)
+    )
+    return best / n
+
+
+# **長さの開きと閾値は実測の両側から決める。** 直す前の実装でも通る緩さだと、手当てが効いて
+# いるかを固定できない。この開きで、直した形は単価が 1.04 倍から 1.16 倍、直す前の形は
+# 8.9 倍から 22.8 倍。開きが 10 倍だと直す前の形が 4.7 倍まで下がり、判定をすり抜ける回があった。
+_SMALL = 20_000
+_LARGE = 400_000
+_LINEAR_MARGIN = 3
+
+
 def test_stripping_a_long_bracket_run_stays_linear():
     """括弧が続く本文で、落とす量に比例した仕事に収まること。
 
@@ -560,35 +598,20 @@ def test_stripping_a_long_bracket_run_stays_linear():
     書き手は括弧を並べた本文を書くだけで導出に時間を使わせられる。導出は提供元の呼び出しの後で
     同期に走るため、そのまま応答の遅れになる。
 
-    **絶対の時間では測らない。** 走らせる環境で揺れるうえ、閾値を緩く置くと 2 乗のままでも通る。
-    長さを 10 倍にして所要が何倍になるかを見る。一次なら 10 倍前後、2 乗なら 100 倍近くになる。
+    **末尾を落とす側はここでは測らない。** 末尾は元から位置で数えており、直したのは丸括弧を
+    数え分ける正しさのほうで、速さではない。実測でも、直す前の形に戻して単価は 1.01 倍しか
+    動かない。末尾の手当ては丸括弧を含む突合の試験が押さえる。
     """
-    import time
-
     from senda_argus_hooks.core.instruction_files import _strip_prose_brackets
 
-    def elapsed(n: int) -> float:
-        token = "[" * n + "/srv/a/config.yaml"
-        start = time.perf_counter()
-        assert _strip_prose_brackets(token) == "/srv/a/config.yaml"
-        return time.perf_counter() - start
+    def build(n: int) -> str:
+        return "[" * n + "/srv/a/config.yaml"
 
-    small = min(elapsed(20_000) for _ in range(3))
-    large = min(elapsed(200_000) for _ in range(3))
-    assert large / small < 30, f"長さ 10 倍で {large / small:.1f} 倍。2 乗の仕事になっている"
-
-    def elapsed_tail(n: int) -> float:
-        token = "/srv/a/config.yaml" + "]" * n
-        start = time.perf_counter()
-        assert _strip_prose_brackets(token) == "/srv/a/config.yaml"
-        return time.perf_counter() - start
-
-    small_tail = min(elapsed_tail(20_000) for _ in range(3))
-    large_tail = min(elapsed_tail(200_000) for _ in range(3))
-    assert large_tail / small_tail < 30, (
-        f"末尾も長さ 10 倍で {large_tail / small_tail:.1f} 倍。2 乗の仕事になっている"
+    small = _per_char(_strip_prose_brackets, build, _SMALL)
+    large = _per_char(_strip_prose_brackets, build, _LARGE)
+    assert large < small * _LINEAR_MARGIN, (
+        f"先頭の単価が {large / small:.1f} 倍。2 乗の仕事になっている"
     )
-
 
 def test_patch_syntax_inside_raw_content_is_not_treated_as_a_patch():
     """本文として渡された文字列を、綴りだけで差分と判定しないこと。
@@ -667,3 +690,60 @@ def test_the_delimiters_inside_a_single_locator_are_kept():
     a = token_pair_digests("https://h.test/m?coords=1,A https://h.test/n?coords=1,A")
     b = token_pair_digests("https://h.test/m?coords=1,B https://h.test/n?coords=1,B")
     assert a and a != b
+
+
+def test_the_split_looks_only_at_what_follows_the_separator():
+    """区切りの直後から起点が始まるかだけを見ること。
+
+    **後方のどこかに種別の区切りがあることを起点の証拠にしない。** 同じ語の後方に別の宛先が
+    あるだけで切ると、区切りの直後にある値がそのまま捨てられる。値の違う宛先が同じ組に潰れ、
+    無関係な指示ファイルどうしが下限に届く。
+    """
+    from senda_argus_hooks.core.instruction_files import _distinctive_tokens
+
+    assert _distinctive_tokens("https://h/m?coords=1,A,https://b/x") == [
+        "https://h/m?coords=1,A",
+        "https://b/x",
+    ]
+
+
+def test_a_trailing_slash_is_part_of_the_locator():
+    """経路の末尾の斜線を落とさないこと。
+
+    宛先の同一性が末尾の斜線で変わることがある。落とすと別の資源を指す組が一致する。
+    """
+    from senda_argus_hooks.core.instruction_files import (
+        _distinctive_tokens,
+        token_pair_digests,
+    )
+
+    assert _distinctive_tokens("https://host.test/api/") == ["https://host.test/api/"]
+    assert _distinctive_tokens("https://host.test/api") == ["https://host.test/api"]
+
+    a = token_pair_digests("https://host.test/api/ https://host.test/v2/")
+    b = token_pair_digests("https://host.test/api https://host.test/v2")
+    assert a and b and a != b
+
+
+def test_the_derivation_stays_linear_on_repeated_separators():
+    """区切りや等号が続く本文で、落とす量に比例した仕事に収まること。
+
+    **本文は書き手が決められる。** 後方をすべて走査する形や 1 つずつ切り出す形にすると、続く
+    長さの 2 乗の仕事になり、記号を並べるだけで導出に時間を使わせられる。導出は提供元の
+    呼び出しの後で同期に走るため、そのまま応答の遅れになる。
+    """
+    from senda_argus_hooks.core.instruction_files import (
+        _split_at_next_locator,
+        _strip_assignment_prefix,
+    )
+
+    cases = (
+        (_strip_assignment_prefix, lambda n: "A=" * n + "/srv/agent/config", "等号"),
+        (_split_at_next_locator, lambda n: "," * n + "/srv/a", "区切り"),
+    )
+    for fn, build, label in cases:
+        small = _per_char(fn, build, _SMALL)
+        large = _per_char(fn, build, _LARGE)
+        assert large < small * _LINEAR_MARGIN, (
+            f"{label} の単価が {large / small:.1f} 倍。2 乗の仕事になっている"
+        )

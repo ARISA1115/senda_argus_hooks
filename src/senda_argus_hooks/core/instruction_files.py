@@ -128,7 +128,10 @@ _LIST_SEPARATORS: Final[str] = ",;"
 # URL のホスト名とスキームだけを倒し、あわせてドライブ文字から始まる経路も倒す。前者は綴りが大小を区別せず、
 # 後者はその環境の経路そのものが大小を区別しない。
 _SCHEME_SEP: Final[str] = "://"
-_DRIVE_RE: Final[Any] = re.compile(r"\A[A-Za-z]:")
+_DRIVE_RE: Final[Any] = re.compile(r"[A-Za-z]:")
+
+# その位置から種別が始まる形。**後方のどこかに区切りがあることを起点の証拠にしない。**
+_SCHEME_AT_RE: Final[Any] = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*://")
 
 
 def _fold_case(token: str) -> str:
@@ -168,11 +171,27 @@ _ROOTED_PREFIXES: Final[tuple[str, ...]] = ("/", "~/")
 
 def _is_rooted(token: str) -> bool:
     """起点が定まった経路か URL かを返す。"""
-    if _SCHEME_SEP in token:
+    return _starts_rooted(token, 0)
+
+
+def _starts_rooted(text: str, at: int) -> bool:
+    """その位置から起点が始まるかを返す。**位置だけを見る。**
+
+    後ろのどこかに種別の区切りがあることを起点の証拠にしない。区切りの直後に起点が始まるかを
+    問うているので、同じ語の後方に別の宛先があるだけで真を返してはならない。真を返すと、区切りの
+    直後にある値がそのまま捨てられる。
+
+    切り出しはこの判定を語の長さの回数だけ呼ぶ。**後方をすべて走査する形では長さの 2 乗になる。**
+    本文は書き手が決められるため、区切りを並べるだけで導出に時間を使わせられる。位置を渡して
+    その場だけを見る。
+    """
+    if text.startswith(_ROOTED_PREFIXES, at):
         return True
-    if _DRIVE_RE.match(token):
+    if _DRIVE_RE.match(text, at):
         return True
-    return token.startswith(_ROOTED_PREFIXES)
+    # 種別は駆動名の直後に来る。語の後方にある別の宛先の区切りを拾わないよう、位置から
+    # 続く綴りが種別の形をしているかだけを見る。
+    return _SCHEME_AT_RE.match(text, at) is not None
 
 
 
@@ -409,12 +428,20 @@ def _strip_assignment_prefix(token: str) -> str:
     落とすのは、等号の手前に区切りも種別の印も無いときだけにする。`https://host/a?tenant=A` の
     ように手前が既に位置を指している場合は、クエリの値を切り離してしまうため触らない。
     """
-    while "=" in token:
-        head, _, rest = token.partition("=")
-        if not rest or _TOKEN_LOCATOR in head or ":" in head:
+    # **1 度の走査で切る位置を決める。** 等号ごとに切り出して繰り返すと、そのたびに残りを
+    # 複製することになり、等号が続く長さの 2 乗の仕事になる。本文は書き手が決められるため、
+    # 等号を並べるだけで導出に時間を使わせられる。
+    start = 0
+    for i, ch in enumerate(token):
+        if ch != "=":
+            continue
+        head = token[start:i]
+        if _TOKEN_LOCATOR in head or ":" in head:
             break
-        token = rest
-    return token
+        if i + 1 >= len(token):
+            break
+        start = i + 1
+    return token[start:]
 
 
 def _split_at_next_locator(token: str) -> list[str]:
@@ -430,7 +457,7 @@ def _split_at_next_locator(token: str) -> list[str]:
     for i, ch in enumerate(token):
         if ch not in _LIST_SEPARATORS or i + 1 >= len(token):
             continue
-        if not _is_rooted(token[i + 1 :]):
+        if not _starts_rooted(token, i + 1):
             continue
         piece = token[start:i]
         if piece:
@@ -462,7 +489,10 @@ def _distinctive_tokens(text: str) -> list[str]:
             # **末尾の点は落とさない。** 経路の一部でありうるため、落とすと /srv/a. と /srv/a が
             # 同じダイジェストになり、別の対象を指す組が一致する。落とすのは経路の末尾に来ない
             # 記号だけにする。
-            token = raw.replace("\\", "/").rstrip(",;:~@/?#&").lstrip("-:@")
+            # **経路の区切りは落とさない。** 末尾の斜線は宛先の一部でありうる。落とすと
+            # /api と /api/ が同じダイジェストになり、別の資源を指す組が一致する。落とすのは
+            # 文の側にしか現れない記号だけにする。
+            token = raw.replace("\\", "/").rstrip(",;:~@?#&").lstrip("-:@")
             token = _strip_prose_brackets(token)
             token = _strip_assignment_prefix(token)
             token = _fold_case(token)
