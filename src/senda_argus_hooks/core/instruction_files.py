@@ -349,20 +349,33 @@ def _strip_prose_brackets(token: str) -> str:
     宛先の中に置けるが、文の側でも宛先を囲む。**どちらの括弧も、全体を囲む形なら文の側である。**
     語へ取り込むと、要約で付いたり外れたりするだけでその語を含む組が全部変わり、突合が落ちる。
 
-    外側から 1 つずつ落とし、対になっていない括弧が残らなくなるまで続ける。宛先の中の括弧は
-    対になっているため、この操作では落ちない。
+    宛先の中の括弧は対になっているため、この操作では落ちない。
+
+    **落とす量に比例した仕事で済ませる。** 1 つずつ切り出すと、そのたびに残りを複製することに
+    なり、括弧が続く長さの 2 乗の仕事になる。書き手は本文を自由に決められるため、括弧を並べた
+    本文を書くだけで導出に時間を使わせられる。位置を数えてから 1 度で切る。
     """
     # 対象の一部になる括弧は、種別の直後にしか現れない。**先頭の括弧はどれも文の側である。**
     # 起点の定まった語は区切りか種別か駆動名から始まるため、開く括弧も閉じる括弧も先頭には来ない。
-    while token[:1] in ("[", "]", "(", ")"):
-        token = token[1:]
+    head = 0
+    while head < len(token) and token[head] in "[]()":
+        head += 1
+    token = token[head:]
     # 先頭を落として対にならなくなった閉じ括弧と、もともと余っている閉じ括弧を落とす。
-    while (
-        (token.endswith("]") and token.count("]") > token.count("["))
-        or (token.endswith(")") and token.count(")") > token.count("("))
-    ):
-        token = token[:-1]
-    return token
+    # 数え直しも 1 度で済ませ、末尾を削るたびに全体を数えない。
+    tail = len(token)
+    extra_square = token.count("]") - token.count("[")
+    extra_round = token.count(")") - token.count("(")
+    while tail > 0:
+        last = token[tail - 1]
+        if last == "]" and extra_square > 0:
+            extra_square -= 1
+        elif last == ")" and extra_round > 0:
+            extra_round -= 1
+        else:
+            break
+        tail -= 1
+    return token[:tail]
 
 
 def _strip_assignment_prefix(token: str) -> str:

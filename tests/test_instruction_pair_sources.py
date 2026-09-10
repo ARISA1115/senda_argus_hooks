@@ -552,3 +552,39 @@ def test_url_sub_delimiters_stay_inside_locator_tokens():
         b = _pairs(f"https://host.test/m{mark}tenant=B https://host.test/n{mark}tenant=B")
         assert a, f"{mark} で組が作れない"
         assert a != b, f"{mark} で値の違う宛先が同じ組に潰れる"
+
+def test_stripping_a_long_bracket_run_stays_linear():
+    """括弧が続く本文で、落とす量に比例した仕事に収まること。
+
+    **1 つずつ切り出すと、そのたびに残りを複製する。** 括弧が続く長さの 2 乗の仕事になり、
+    書き手は括弧を並べた本文を書くだけで導出に時間を使わせられる。導出は提供元の呼び出しの後で
+    同期に走るため、そのまま応答の遅れになる。
+
+    **絶対の時間では測らない。** 走らせる環境で揺れるうえ、閾値を緩く置くと 2 乗のままでも通る。
+    長さを 10 倍にして所要が何倍になるかを見る。一次なら 10 倍前後、2 乗なら 100 倍近くになる。
+    """
+    import time
+
+    from senda_argus_hooks.core.instruction_files import _strip_prose_brackets
+
+    def elapsed(n: int) -> float:
+        token = "[" * n + "/srv/a/config.yaml"
+        start = time.perf_counter()
+        assert _strip_prose_brackets(token) == "/srv/a/config.yaml"
+        return time.perf_counter() - start
+
+    small = min(elapsed(20_000) for _ in range(3))
+    large = min(elapsed(200_000) for _ in range(3))
+    assert large / small < 30, f"長さ 10 倍で {large / small:.1f} 倍。2 乗の仕事になっている"
+
+    def elapsed_tail(n: int) -> float:
+        token = "/srv/a/config.yaml" + "]" * n
+        start = time.perf_counter()
+        assert _strip_prose_brackets(token) == "/srv/a/config.yaml"
+        return time.perf_counter() - start
+
+    small_tail = min(elapsed_tail(20_000) for _ in range(3))
+    large_tail = min(elapsed_tail(200_000) for _ in range(3))
+    assert large_tail / small_tail < 30, (
+        f"末尾も長さ 10 倍で {large_tail / small_tail:.1f} 倍。2 乗の仕事になっている"
+    )
