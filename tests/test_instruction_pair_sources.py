@@ -622,3 +622,48 @@ def test_a_body_named_as_a_patch_is_still_normalized():
     written = classify_instruction_write({"path": "/repo/AGENTS.md", "patch": added})
     assert written is not None
     assert len(written["written_pair_hashes"]) == 3
+
+
+def test_a_delimited_list_of_locators_becomes_separate_tokens():
+    """区切りで並べた宛先が、1 語に潰れず別々の語になること。
+
+    **同じ記号が 2 つの役割を持つ。** 読点や分号は URL の内側にも現れるし、宛先を並べる区切りにも
+    使われる。文字の集合だけで決めると、内側を保てば並びが 1 語に潰れて組が 1 つも作れず、切れば
+    内側が失われて値の違う宛先が同じ組に潰れる。どちらか一方しか選べない。
+
+    判断の根拠は記号そのものではなく、**その直後に新しい起点が始まるかどうか**である。
+    """
+    from senda_argus_hooks.core.instruction_files import (
+        _distinctive_tokens,
+        token_pair_digests,
+    )
+
+    listed = "/srv/tenant/one,/srv/tenant/two,/srv/tenant/three"
+    assert _distinctive_tokens(listed) == [
+        "/srv/tenant/one",
+        "/srv/tenant/two",
+        "/srv/tenant/three",
+    ]
+    assert len(token_pair_digests(listed)) == 3
+
+    urls = "https://a.test/x;https://b.test/y;https://c.test/z"
+    assert len(_distinctive_tokens(urls)) == 3
+    assert len(token_pair_digests(urls)) == 3
+
+
+def test_the_delimiters_inside_a_single_locator_are_kept():
+    """1 つの宛先の内側にある区切りは、語を分けないこと。
+
+    直後に起点が始まらないため、並びの区切りではない。切ると値の違う宛先が同じ組に潰れる。
+    """
+    from senda_argus_hooks.core.instruction_files import (
+        _distinctive_tokens,
+        token_pair_digests,
+    )
+
+    assert _distinctive_tokens("https://h.test/m?coords=1,A") == ["https://h.test/m?coords=1,A"]
+    assert _distinctive_tokens("https://h.test/a;p=1/b") == ["https://h.test/a;p=1/b"]
+
+    a = token_pair_digests("https://h.test/m?coords=1,A https://h.test/n?coords=1,A")
+    b = token_pair_digests("https://h.test/m?coords=1,B https://h.test/n?coords=1,B")
+    assert a and a != b

@@ -114,6 +114,15 @@ MAX_WRITE_DIGESTS: Final[int] = 4096
 # 予約された区切りと下位の区切り、および符号化されない文字である。
 _TOKEN_RE: Final[Any] = re.compile(r"[A-Za-z0-9\-._~%:/?#\[\]@!$&'()*+,;=\\]+")
 
+# 語を切る役割と、語の内側を保つ役割を分ける。**同じ記号が両方を担う。** 読点や分号は URL の
+# 内側にも現れるし、宛先を並べる区切りにも使われる。文字の集合だけで決めると、内側を保てば
+# 並びが 1 語に潰れ、切れば内側が失われる。どちらか一方しか選べない。
+#
+# 判断の根拠は記号そのものではなく、**その直後に新しい起点が始まるかどうか**である。起点の
+# 定義は突合で使うものと同じで、区切りか駆動名か種別から始まる形を指す。並びを区切る記号の
+# 直後に起点が来たら、そこから次の語を始める。
+_LIST_SEPARATORS: Final[str] = ",;"
+
 # 大小を無視してよい部分。**経路の大小は意味を持つ。** 語をまるごと小文字へ倒すと、
 # /srv/TenantA と /srv/tenanta が同じダイジェストになり、別の対象を指す組が一致する。
 # URL のホスト名とスキームだけを倒し、あわせてドライブ文字から始まる経路も倒す。前者は綴りが大小を区別せず、
@@ -408,6 +417,31 @@ def _strip_assignment_prefix(token: str) -> str:
     return token
 
 
+def _split_at_next_locator(token: str) -> list[str]:
+    """並びを区切る記号の直後に起点が始まるなら、そこで語を分ける。
+
+    **判断の根拠は記号ではなく、その直後に新しい起点が始まるかどうかである。** 記号で一律に
+    切ると URL の内側が失われ、切らないと宛先の並びが 1 語に潰れて組が 1 つも作れない。起点の
+    判定は突合で使うものと同じものを使い回す。定義を 2 つ持つと、片方だけ変えたときに切り方と
+    突合が食い違う。
+    """
+    out: list[str] = []
+    start = 0
+    for i, ch in enumerate(token):
+        if ch not in _LIST_SEPARATORS or i + 1 >= len(token):
+            continue
+        if not _is_rooted(token[i + 1 :]):
+            continue
+        piece = token[start:i]
+        if piece:
+            out.append(piece)
+        start = i + 1
+    tail = token[start:]
+    if tail:
+        out.append(tail)
+    return out or [token]
+
+
 def _distinctive_tokens(text: str) -> list[str]:
     """1 行から、位置を指す語だけを取り出す。
 
@@ -418,28 +452,29 @@ def _distinctive_tokens(text: str) -> list[str]:
     組が出ない。その構成では行ごとの突合だけが働く。
     """
     out: list[str] = []
-    for raw in _TOKEN_RE.findall(text or ""):
-        # バックスラッシュはスラッシュへ均す。同じ対象を指す経路が、環境の書き方の違いだけで
-        # 別のダイジェストになると突合が成立しない。
-        #
-        # **先頭の区切りは落とさない。** 落とすと /srv/a と srv/a が同じダイジェストになり、
-        # 起点の違う別の対象を指す組が一致する。落とすのは文の側の記号だけにする。
-        # **末尾の点は落とさない。** 経路の一部でありうるため、落とすと /srv/a. と /srv/a が
-        # 同じダイジェストになり、別の対象を指す組が一致する。落とすのは経路の末尾に来ない
-        # 記号だけにする。
-        token = raw.replace("\\", "/").rstrip(",;:~@/?#&").lstrip("-:@")
-        token = _strip_prose_brackets(token)
-        token = _strip_assignment_prefix(token)
-        token = _fold_case(token)
-        if len(token) < MIN_TOKEN_LENGTH:
-            continue
-        if _TOKEN_LOCATOR not in token:
-            continue
-        # **起点の無い表記は、指す先を定めない。** 文書の中の相互参照はこの形を取り、
-        # 同じ計画の文書どうしが同じ綴りを共有する。指す先が同じとは限らないため証拠にならない。
-        if not _is_rooted(token):
-            continue
-        out.append(token)
+    for matched in _TOKEN_RE.findall(text or ""):
+        for raw in _split_at_next_locator(matched):
+            # バックスラッシュはスラッシュへ均す。同じ対象を指す経路が、環境の書き方の違いだけで
+            # 別のダイジェストになると突合が成立しない。
+            #
+            # **先頭の区切りは落とさない。** 落とすと /srv/a と srv/a が同じダイジェストになり、
+            # 起点の違う別の対象を指す組が一致する。落とすのは文の側の記号だけにする。
+            # **末尾の点は落とさない。** 経路の一部でありうるため、落とすと /srv/a. と /srv/a が
+            # 同じダイジェストになり、別の対象を指す組が一致する。落とすのは経路の末尾に来ない
+            # 記号だけにする。
+            token = raw.replace("\\", "/").rstrip(",;:~@/?#&").lstrip("-:@")
+            token = _strip_prose_brackets(token)
+            token = _strip_assignment_prefix(token)
+            token = _fold_case(token)
+            if len(token) < MIN_TOKEN_LENGTH:
+                continue
+            if _TOKEN_LOCATOR not in token:
+                continue
+            # **起点の無い表記は、指す先を定めない。** 文書の中の相互参照はこの形を取り、同じ
+            # 計画の文書どうしが同じ綴りを共有する。指す先が同じとは限らないため証拠にならない。
+            if not _is_rooted(token):
+                continue
+            out.append(token)
     return out
 
 
