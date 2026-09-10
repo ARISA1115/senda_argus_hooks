@@ -187,6 +187,10 @@ _DIFF_MARKERS: Final[tuple[str, ...]] = (
     "@@ ", "--- ", "+++ ", "*** Begin Patch", "*** Update File:", "*** Add File:",
 )
 
+# 統一形式の位置情報の行。**範囲を伴うことを求める。** 裸の目印 1 つを差分の証拠として
+# 受け取ると、書き手が目印を置くだけで削除の記号から始まる行を控えから消せる。
+_UNIFIED_HUNK_RE: Final[Any] = re.compile(r"\A@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@")
+
 # 封筒の形が使う行。本文ではないため落とす。
 _PATCH_ENVELOPE_MARKERS: Final[tuple[str, ...]] = (
     "*** Begin Patch", "*** End Patch", "*** Update File:", "*** Add File:",
@@ -195,14 +199,28 @@ _PATCH_ENVELOPE_MARKERS: Final[tuple[str, ...]] = (
 
 
 def _looks_like_patch(body: str) -> bool:
-    """本文が差分形式かどうかを、位置情報の行の有無で判定する。"""
-    for raw in body.splitlines():
-        if raw.startswith(_DIFF_MARKERS):
-            return True
-        # 封筒の形の位置情報は裸の @@ である。統一形式の目印には当たらない。
-        if raw.strip() == "@@":
-            return True
-    return False
+    """本文が差分形式かどうかを、封筒の構造が揃っているかで判定する。
+
+    **目印 1 つで差分と決めない。** 差分と判定した本文は、先頭が削除の記号である行を捨てる。
+    書き手は目印を 1 行置いて、続けて払い出しを削除の記号で始まる箇条書きとして書くだけで、
+    書き込みの控えから証拠を丸ごと消せる。指示側は箇条書きをそのまま読むため、突合だけが
+    成立しなくなる。
+
+    統一形式の位置情報の行は範囲を伴う。この形は普通の文には現れないため、1 行でも構造の証拠に
+    なる。**範囲を持たない裸の目印は証拠にしない。** 箇条書きの中に置くだけで書ける。
+
+    封筒の形は位置情報が裸の目印になるが、始まりの行と対象ファイルの行が並ぶ。この組が揃って
+    初めて差分とみなす。揃わない本文は、記号で始まる行を含んでいてもそのまま扱う。
+    """
+    lines = body.splitlines()
+    if any(_UNIFIED_HUNK_RE.match(raw) for raw in lines):
+        return True
+    has_envelope_start = any(raw.startswith("*** Begin Patch") for raw in lines)
+    has_envelope_target = any(
+        raw.startswith(("*** Update File:", "*** Add File:", "*** Delete File:"))
+        for raw in lines
+    )
+    return has_envelope_start and has_envelope_target
 
 
 def normalize_patch_body(body: Any) -> Any:

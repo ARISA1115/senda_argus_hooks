@@ -474,19 +474,27 @@ def test_comma_bearing_locators_stay_distinct():
     assert a and b and a != b
 
 
-def test_a_bare_hunk_marker_alone_is_recognized_as_a_patch():
-    """封筒の見出しが無く、裸の分節記号だけの差分も差分と判定すること。
+def test_a_bare_hunk_marker_alone_is_not_treated_as_a_patch():
+    """範囲を持たない裸の目印だけでは、差分と判定しないこと。
 
-    見出しの有無で判定を分けると、見出しを持たない断片が差分と認められず、加えた行の先頭の記号が
-    残ったまま語になる。**手当ては条件ごとに分けて固定する。** 見出しで成立する経路があると、
-    裸の分節記号の手当てが効いているかどうかを試験が確かめられない。
+    差分と判定した本文は、先頭が削除の記号である行を捨てる。**目印 1 つで差分と決めると、書き手は
+    目印を 1 行置いて払い出しを削除の記号で始まる箇条書きとして書くだけで、書き込みの控えから
+    証拠を丸ごと消せる。** 指示側は箇条書きをそのまま読むため、突合だけが成立しなくなる。
+
+    範囲を伴う位置情報は普通の文には現れないため、1 行でも構造の証拠になる。裸の目印は箇条書きの
+    中に置くだけで書けるので、証拠にしない。
     """
     from senda_argus_hooks.core.instruction_files import token_pair_digests as _pairs
 
     bare = "/srv/tenant/aaa/one /srv/tenant/aaa/two /srv/tenant/aaa/three"
-    fragment = "\n".join(["@@", f"+{bare}"])
-    assert _pairs(fragment) == _pairs(bare)
-    assert len(_pairs(bare)) == 3
+    evasion = "\n".join(["@@", f"- {bare} を参照すること"])
+    assert len(_pairs(evasion)) == 3
+
+    # 範囲を伴う位置情報は 1 行でも差分と判定する。削除の行は適用後に残らないため落とす。
+    from senda_argus_hooks.core.instruction_files import line_digests as _lines
+
+    long_line = "この行は突合の対象になるだけの十分な長さを持っている行です"
+    assert _lines("\n".join(["@@ -1 +1 @@", f"-{long_line}"])) == []
 
 
 def test_an_add_file_envelope_without_a_hunk_marker_is_a_patch():
