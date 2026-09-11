@@ -602,13 +602,13 @@ def test_stripping_a_long_bracket_run_stays_linear():
     数え分ける正しさのほうで、速さではない。実測でも、直す前の形に戻して単価は 1.01 倍しか
     動かない。末尾の手当ては丸括弧を含む突合の試験が押さえる。
     """
-    from senda_argus_hooks.core.instruction_files import _strip_prose_brackets
+    from senda_argus_hooks.core.instruction_files import _strip_prose_wrappers
 
     def build(n: int) -> str:
         return "[" * n + "/srv/a/config.yaml"
 
-    small = _per_char(_strip_prose_brackets, build, _SMALL)
-    large = _per_char(_strip_prose_brackets, build, _LARGE)
+    small = _per_char(_strip_prose_wrappers, build, _SMALL)
+    large = _per_char(_strip_prose_wrappers, build, _LARGE)
     assert large < small * _LINEAR_MARGIN, (
         f"先頭の単価が {large / small:.1f} 倍。2 乗の仕事になっている"
     )
@@ -692,6 +692,44 @@ def test_the_delimiters_inside_a_single_locator_are_kept():
     assert a and a != b
 
 
+def test_wrapped_locators_form_the_same_pairs_as_bare_ones():
+    """宛先を包む字の有無で、組が変わらないこと。
+
+    **包みは要約で付いたり外れたりする。** 指示ファイルは Markdown で書かれ、シェルの引用符や
+    太字や斜体やリンクで宛先を包む。包みを語へ取り込むと起点の判定に落ちて組が 1 つも作れず、
+    要約を経ても保たれるという性質が失われる。包み方を 1 つずつ手当てせず、同じ字の集合で
+    扱っていることを、包み方を並べて確かめる。
+    """
+    from senda_argus_hooks.core.instruction_files import token_pair_digests
+
+    expected = token_pair_digests("/srv/agent/one /srv/agent/two /srv/agent/three")
+    assert len(expected) == 3
+    for label, text in (
+        ("シェルの引用符", "'/srv/agent/one' '/srv/agent/two' '/srv/agent/three'"),
+        ("引用符を読点で並べる", "'/srv/agent/one','/srv/agent/two','/srv/agent/three'"),
+        ("太字", "**/srv/agent/one** **/srv/agent/two** **/srv/agent/three**"),
+        ("斜体", "_/srv/agent/one_ _/srv/agent/two_ _/srv/agent/three_"),
+        ("リンク", "[one](/srv/agent/one) [two](/srv/agent/two) [three](/srv/agent/three)"),
+        ("閉じ括弧の後ろの句点", "(/srv/agent/one). (/srv/agent/two). (/srv/agent/three)."),
+        ("閉じ引用符の後ろの句点", "'/srv/agent/one'. '/srv/agent/two'. '/srv/agent/three'."),
+    ):
+        assert token_pair_digests(text) == expected, f"{label} で組が変わった"
+
+
+def test_characters_inside_a_locator_are_not_taken_as_wrappers():
+    """宛先の内側にある包みと同じ字は落とさないこと。
+
+    引用符や星や下線は宛先の綴りにも現れる。先頭で開いた数を超えて末尾から落とすと、値の
+    違う宛先が同じ語に潰れる。包まれていない語の末尾の点も経路の一部でありうるため残す。
+    """
+    from senda_argus_hooks.core.instruction_files import _distinctive_tokens
+
+    assert _distinctive_tokens("'https://h.test/a?q=it's'") == ["https://h.test/a?q=it's"]
+    assert _distinctive_tokens("/srv/agent/*") == ["/srv/agent/*"]
+    assert _distinctive_tokens("/srv/agent_") == ["/srv/agent_"]
+    assert _distinctive_tokens("/srv/agent/one.") == ["/srv/agent/one."]
+
+
 def test_the_split_looks_only_at_what_follows_the_separator():
     """区切りの直後から起点が始まるかだけを見ること。
 
@@ -740,6 +778,9 @@ def test_the_derivation_stays_linear_on_repeated_separators():
     cases = (
         (_strip_assignment_prefix, lambda n: "A=" * n + "/srv/agent/config", "等号"),
         (_split_at_next_locator, lambda n: "," * n + "/srv/a", "区切り"),
+        # 区切りのたびに後ろの包みを読み直すと、交互に並べた本文で 2 乗の仕事になる。
+        (_split_at_next_locator, lambda n: "](" * n + "/srv/a", "リンクの境目と包み"),
+        (_split_at_next_locator, lambda n: ",'" * n + "/srv/a", "区切りと引用符"),
     )
     for fn, build, label in cases:
         small = _per_char(fn, build, _SMALL)

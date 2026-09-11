@@ -69,8 +69,8 @@ SYSTEM_ROLE: Final[str] = "system"
 # developer の役割で受ける。system だけを見ると、その形の指示が 1 件も拾えない。
 INSTRUCTION_ROLES: Final[frozenset[str]] = frozenset({SYSTEM_ROLE, "developer"})
 
-# 実測で、3 つの計画の文書 195 件のうち、64 では 121 件しか全体を運べない。256 なら 188 件が
-# 収まり、1 件あたりの大きさは 17 キロバイトに収まる。上限を超える本文では、一部だけを見た
+# 実測で、3 つの計画の文書 208 件のうち、64 では 133 件しか全体を運べない。256 なら 201 件が
+# 収まる。上限いっぱいでも、1 件 71 バイトのダイジェストが 256 件で 18,176 バイトに収まる。上限を超える本文では、一部だけを見た
 # 書き込みと全体を見た指示とで残る組が食い違い、突合が成立しないことがある。
 MAX_LINE_DIGESTS: Final[int] = 256
 
@@ -156,8 +156,9 @@ def _fold_case(token: str) -> str:
 
 # 組に使う語に含まれていることを求める区切り。**長さと文字種だけでは足りない。** 同じ計画の
 # 文書は識別子の語彙を共有し、規則名や事象名のような下線や点を含む長い語が、無関係な文書どうしで
-# 並んで現れる。実測で、3 つの計画の文書 195 件を総当たりした 18905 組のうち 54 組が 2 組以上
-# 重なった。位置を指す語に限ると 2 組以上は 13 組、3 組以上は 0 組になる。
+# 並んで現れる。実測で、3 つの計画の文書から写しを除いた 198 件を総当たりした 19503 対のうち、
+# 長さと文字種だけで絞ると 190 対が 2 組以上、125 対が 3 組以上重なった。位置を指す語に限ると
+# どちらも 0 対になる。
 #
 # 位置を指す語だけが、要約を経ても書き換えられずに残るという性質を持つ。要約は文言を作り替えるが、
 # 払い出しが指す先は書き換えられない。
@@ -382,39 +383,60 @@ def line_digests_with_overflow(
     return seen.result(), seen.overflowed()
 
 
-def _strip_prose_brackets(token: str) -> str:
-    """語の外側を囲む括弧だけを落とす。
+# 文の側から宛先を包む字。**語に使える字のうち、起点の先頭には来られないもの**である。
+# 起点は区切りか駆動名か種別から始まるため、これらの字が語の先頭にあれば必ず文の側である。
+#
+# 括弧は開きと閉じが別の字で、宛先の内側でも対になる。引用符と強調の印は同じ字で開いて閉じ、
+# 宛先の内側にも同じ字が現れうる。**包み方を 1 つずつ足さない。** 指示ファイルは Markdown で
+# 書かれ、シェルの引用符や太字や斜体やリンクで宛先を包む。包み方ごとに手当てすると、次の
+# 包み方でまた組が 1 つも作れなくなる。
+_PROSE_WRAPPERS: Final[str] = "[]()'*_"
 
-    角括弧が対象の一部になるのは、種別の直後に来る宛先の中だけである。丸括弧は綴りとしては
-    宛先の中に置けるが、文の側でも宛先を囲む。**どちらの括弧も、全体を囲む形なら文の側である。**
-    語へ取り込むと、要約で付いたり外れたりするだけでその語を含む組が全部変わり、突合が落ちる。
+# 同じ字で開いて閉じる包み。先頭で開いた数だけ末尾から閉じ、内側の同じ字は残す。
+_SYMMETRIC_WRAPPERS: Final[str] = "'*_"
 
-    宛先の中の括弧は対になっているため、この操作では落ちない。
+# 閉じた包みの後ろに続く句読点。閉じる字が控えているときだけ文の側として落とす。
+# 包まれていない語の末尾の点は経路の一部でありうるため、ここでは触らない。
+_PROSE_PUNCTUATION: Final[str] = ".,;:!?"
+
+
+def _strip_prose_wrappers(token: str) -> str:
+    """語の外側を包む字と、包みの後ろに続く句読点だけを落とす。
+
+    包みを語へ取り込むと起点の判定に落ち、組が 1 つも作れない。要約で包みが付いたり外れたり
+    するだけでその語を含む組が全部変わり、要約を経ても保たれるという性質を失う。
+
+    宛先の内側の括弧は対になっているため落ちない。内側の引用符は、先頭で開いた数を超えて
+    末尾から落とさないため残る。
 
     **落とす量に比例した仕事で済ませる。** 1 つずつ切り出すと、そのたびに残りを複製することに
-    なり、括弧が続く長さの 2 乗の仕事になる。書き手は本文を自由に決められるため、括弧を並べた
+    なり、包みが続く長さの 2 乗の仕事になる。書き手は本文を自由に決められるため、包みを並べた
     本文を書くだけで導出に時間を使わせられる。位置を数えてから 1 度で切る。
     """
-    # 対象の一部になる括弧は、種別の直後にしか現れない。**先頭の括弧はどれも文の側である。**
-    # 起点の定まった語は区切りか種別か駆動名から始まるため、開く括弧も閉じる括弧も先頭には来ない。
     head = 0
-    while head < len(token) and token[head] in "[]()":
+    opened = dict.fromkeys(_SYMMETRIC_WRAPPERS, 0)
+    while head < len(token) and token[head] in _PROSE_WRAPPERS:
+        if token[head] in opened:
+            opened[token[head]] += 1
         head += 1
     token = token[head:]
-    # 先頭を落として対にならなくなった閉じ括弧と、もともと余っている閉じ括弧を落とす。
-    # 数え直しも 1 度で済ませ、末尾を削るたびに全体を数えない。
+    # 末尾から落としてよい数。括弧は対にならずに余っている閉じの数、同じ字の包みは先頭で開いた数。
+    # 数え直しは 1 度で済ませ、末尾を削るたびに全体を数えない。
+    closable = dict(opened)
+    closable["]"] = token.count("]") - token.count("[")
+    closable[")"] = token.count(")") - token.count("(")
     tail = len(token)
-    extra_square = token.count("]") - token.count("[")
-    extra_round = token.count(")") - token.count("(")
     while tail > 0:
-        last = token[tail - 1]
-        if last == "]" and extra_square > 0:
-            extra_square -= 1
-        elif last == ")" and extra_round > 0:
-            extra_round -= 1
-        else:
+        if closable.get(token[tail - 1], 0) > 0:
+            closable[token[tail - 1]] -= 1
+            tail -= 1
+            continue
+        mark = tail
+        while mark > 0 and token[mark - 1] in _PROSE_PUNCTUATION:
+            mark -= 1
+        if mark == tail or mark == 0 or closable.get(token[mark - 1], 0) <= 0:
             break
-        tail -= 1
+        tail = mark
     return token[:tail]
 
 
@@ -451,13 +473,30 @@ def _split_at_next_locator(token: str) -> list[str]:
     切ると URL の内側が失われ、切らないと宛先の並びが 1 語に潰れて組が 1 つも作れない。起点の
     判定は突合で使うものと同じものを使い回す。定義を 2 つ持つと、片方だけ変えたときに切り方と
     突合が食い違う。
+
+    **区切りの直後の包みは読み飛ばしてから問う。** 宛先を引用符や括弧で包んで並べる書き方では、
+    区切りの直後は包みの字で、起点はその後ろから始まる。包みの字を見て起点ではないと判断すると、
+    並びが 1 語に潰れる。Markdown のリンクは閉じ角括弧の直後に丸括弧で宛先を包むため、その
+    境目も区切りとして扱う。
     """
     out: list[str] = []
     start = 0
+    # この位置より手前まで、包みの字の連なりを読み終えている。区切りのたびに同じ連なりを
+    # 読み直すと、区切りと包みを交互に並べた本文で長さの 2 乗の仕事になる。
+    wrapped_until = 0
     for i, ch in enumerate(token):
-        if ch not in _LIST_SEPARATORS or i + 1 >= len(token):
+        if i + 1 >= len(token):
             continue
-        if not _starts_rooted(token, i + 1):
+        if ch not in _LIST_SEPARATORS and not (ch == "]" and token[i + 1] == "("):
+            continue
+        at = i + 1
+        if at < wrapped_until:
+            at = wrapped_until
+        else:
+            while at < len(token) and token[at] in _PROSE_WRAPPERS:
+                at += 1
+            wrapped_until = at
+        if not _starts_rooted(token, at):
             continue
         piece = token[start:i]
         if piece:
@@ -493,7 +532,7 @@ def _distinctive_tokens(text: str) -> list[str]:
             # /api と /api/ が同じダイジェストになり、別の資源を指す組が一致する。落とすのは
             # 文の側にしか現れない記号だけにする。
             token = raw.replace("\\", "/").rstrip(",;:~@?#&").lstrip("-:@")
-            token = _strip_prose_brackets(token)
+            token = _strip_prose_wrappers(token)
             token = _strip_assignment_prefix(token)
             token = _fold_case(token)
             if len(token) < MIN_TOKEN_LENGTH:
@@ -516,10 +555,11 @@ def token_pair_digests(
     要約を経ると行はそのまま残らないが、払い出しが指す先、すなわち経路や URL は書き換えられずに
     残る。**1 語では足りない。** 同じ計画の文書どうしは語彙を共有するため、語 1 つの一致は
     無関係な文書の間でも起きる。組にすると、組み合わせが一致する確率は大きく下がる。実測で、
-    3 つの計画の文書 195 件を総当たりした 18905 組のうち、3 組以上重なったものは無かった。
+    3 つの計画の文書から写しを除いた 198 件を総当たりした 19503 対のうち、3 組以上重なった対は
+    無かった。
 
     **組は同じ行の中でだけ作る。** 連続する行をまとめると、同じ計画の文書どうしで 3 組以上の
-    重なりが出る。実測で連続 2 行をまとめた場合は 12 組、本文全体では 28 組が 3 組以上重なった。
+    重なりが出る。実測で連続 2 行をまとめた場合は 2 対、本文全体では 3 対が 3 組以上重なった。
 
     組は並べ替えてから作る。要約は語の順序を変えるため、順序を含めると突合が成立しない。
 
