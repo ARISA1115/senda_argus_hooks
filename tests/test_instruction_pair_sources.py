@@ -692,6 +692,22 @@ def test_the_delimiters_inside_a_single_locator_are_kept():
     assert a and a != b
 
 
+def test_regrouping_the_locators_keeps_the_pairs():
+    """宛先の並びを組み替えただけの要約でも、組が同じになること。
+
+    窓を元の並びの近さで当てると、宛先が窓の幅を超える行で、どの宛先どうしを組にするかが
+    並び順で決まる。実測で、20 個の宛先を番号順に並べた行と、番号を 4 で割った余りでまとめ
+    直した行は、どちらも 54 組を出して共通の組が 0 だった。
+    """
+    from senda_argus_hooks.core.instruction_files import token_pair_digests
+
+    urls = [f"https://collect.example.test/endpoint/{i:02d}" for i in range(20)]
+    ordered = set(token_pair_digests(" ".join(urls)))
+    regrouped = set(token_pair_digests(" ".join(u for r in range(4) for u in urls[r::4])))
+    assert ordered
+    assert ordered == regrouped
+
+
 def test_wrapped_locators_form_the_same_pairs_as_bare_ones():
     """宛先を包む字の有無で、組が変わらないこと。
 

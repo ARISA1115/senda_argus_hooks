@@ -38,6 +38,10 @@ class ArgusExporter(BaseExporter):
 
     endpoint + "/v1/agent-runs/ingest" に POST する。
     送信エラーは無視してパイプラインを継続する (fire-and-forget)。
+
+    指示ファイルの伝播の検知を効かせるには、api_key に収集用の鍵を設定する。受け取り側は、通常の
+    テナントの鍵で届いた記録から書き込みと指示の証拠を採らない。収集用の鍵は発行時に並べた agent_id
+    の記録に限って証拠を信頼させるため、この処理で動くエージェントの agent_id を並べて発行する。
     """
 
     def __init__(self, config: dict[str, Any]) -> None:
