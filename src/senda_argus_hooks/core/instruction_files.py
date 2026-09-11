@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import re
 import posixpath
+from collections.abc import Mapping
 from typing import Any, Final, Optional
 
 # 文脈が切れても残り、次回の指示に差し込まれるファイルの名前。基底名だけで判定する。置き場所は
@@ -681,22 +682,41 @@ _ROLE_LIST_KEYS: Final[tuple[str, ...]] = ("messages", "input", "contents")
 _ROLE_REQUIRED_KEYS: Final[tuple[str, ...]] = _ROLE_LIST_KEYS
 
 
+def _is_sequence(value: Any) -> bool:
+    """列として辿ってよい値かを返す。**組み込みの列だけに限らない。**
+
+    提供元の SDK は、繰り返しの欄を組み込みの列ではない独自の型で持つ。指示の塊の部品の列も、
+    役割つきの要素の列も、その型で届く。組み込みの列だけを列として扱うと、その型で届いた指示から
+    本文が 1 文字も取れず、突合が成立しない。
+
+    文字列とバイト列と写像は列として扱わない。要素の数と添字と繰り返しを型が持つものだけを列と
+    みなす。型で見るのは、属性を引かれると動的に応じる型があり、インスタンスで見ると誤るため。
+    1 度しか辿れない繰り返しは数を持たないため、ここで取り込まない。
+    """
+    if isinstance(value, (list, tuple)):
+        return True
+    if isinstance(value, (str, bytes, bytearray, Mapping)):
+        return False
+    kind = type(value)
+    return all(hasattr(kind, name) for name in ("__iter__", "__len__", "__getitem__"))
+
+
 def _flatten_batch(value: Any) -> Any:
     """束ねられた列を 1 段ほどく。
 
     枠組みによっては、1 回の要求に複数の会話を束ねて渡す。外側の列は役割を持たないため、
     ほどかずに渡すと役割の判定も本文の取り出しも成立せず、指示が 1 件も拾えない。
     """
-    if not isinstance(value, (list, tuple)) or not value:
+    if not _is_sequence(value) or not len(value):
         return value
-    if all(isinstance(item, (list, tuple)) for item in value):
+    if all(_is_sequence(item) for item in value):
         return [inner for item in value for inner in item]
     return value
 
 
 def _declares_role(value: Any) -> bool:
     """役割を宣言した要素を含む列かどうかを返す。"""
-    if not isinstance(value, (list, tuple)):
+    if not _is_sequence(value):
         return False
     return any(_role_of(item) for item in value)
 
@@ -724,7 +744,7 @@ def _block_text(block: Any) -> str:
 
 def _parts_text(parts: Any) -> str:
     """部品の列から本文を連結する。列でなければ空を返す。"""
-    if not isinstance(parts, (list, tuple)):
+    if not _is_sequence(parts):
         return ""
     texts = []
     for part in parts:
@@ -777,7 +797,7 @@ def _texts_from(source: Any) -> list[str]:
         return [source] if source else []
     if isinstance(source, dict):
         return [t for t in [_block_text(source)] if t]
-    if isinstance(source, (list, tuple)):
+    if _is_sequence(source):
         has_role = any(_role_of(item) for item in source)
         for item in source:
             if has_role:
@@ -789,7 +809,7 @@ def _texts_from(source: Any) -> list[str]:
             if isinstance(content, str):
                 if content:
                     texts.append(content)
-            elif isinstance(content, (list, tuple)):
+            elif _is_sequence(content):
                 texts.extend(t for t in (_block_text(b) for b in content) if t)
             else:
                 t = _block_text(content)
@@ -820,9 +840,9 @@ def collect_instruction_sources(
                 if not _declares_role(value):
                     continue
             sources.append(value)
-    if isinstance(positional, (list, tuple)):
+    if _is_sequence(positional):
         for item in positional:
-            if isinstance(item, (list, tuple)):
+            if _is_sequence(item):
                 flat = _flatten_batch(item)
                 if _declares_role(flat):
                     sources.append(flat)
