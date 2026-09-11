@@ -7,6 +7,7 @@ from typing import Any, Callable
 from senda_argus_hooks.core.instruction_files import (
     collect_instruction_sources,
     system_prompt_line_digests,
+    system_prompt_pair_digests,
 )
 from senda_argus_hooks.core.hashing import sha256_value
 from senda_argus_hooks.core.model_identity import models_correspond
@@ -177,9 +178,11 @@ def _emit_llm_request(
     name = _model_name(model)
     # この系統は指示をモデルの構築時に受け取り、モデル側が保持する。要求には contents しか
     # 載らないため、呼び出しの引数だけを見ると常に空になる。保持元も併せて見る。
-    system_prompt_line_hashes = system_prompt_line_digests(
-        *collect_instruction_sources(kwargs, args, model)
-    )
+    # 導出のもとは 1 度だけ作る。2 度たどると、model の属性が参照のたびに変わりうる保持体で
+    # 行と組が別のもとから作られ、突合が片方だけ成立しない。
+    _sources = collect_instruction_sources(kwargs, args, model)
+    system_prompt_line_hashes = system_prompt_line_digests(*_sources)
+    system_prompt_pair_hashes = system_prompt_pair_digests(*_sources)
     llm_data: dict[str, Any] = {
         "provider": "vertex_ai",
         "operation": "generate_content",
@@ -197,6 +200,10 @@ def _emit_llm_request(
         llm_data.update(extra)
     if system_prompt_line_hashes:
         llm_data["system_prompt_line_hashes"] = system_prompt_line_hashes
+    # 組は行と独立に載せる。行の内側へ入れると、行を出す条件を変えたときに組が
+    # 黙って止まる。2 つは別々の導出で、片方が空でももう片方は成立する。
+    if system_prompt_pair_hashes:
+        llm_data["system_prompt_pair_hashes"] = system_prompt_pair_hashes
     emit_event(
         "llm.request",
         source={"component": "instrumentor", "sdk": "vertexai", "provider": "vertex_ai", "operation": "generate_content"},

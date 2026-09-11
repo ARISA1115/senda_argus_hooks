@@ -7,6 +7,7 @@ from typing import Any, Callable
 from senda_argus_hooks.core.instruction_files import (
     collect_instruction_sources,
     system_prompt_line_digests,
+    system_prompt_pair_digests,
 )
 from senda_argus_hooks.core.hashing import sha256_value
 from senda_argus_hooks.core.response_meta import extract_response_model as _extract_response_model
@@ -97,9 +98,12 @@ class OllamaInstrumentor(BaseInstrumentor):
             with audit_guard(operation):
                 latency_ms = int((time.perf_counter() - start) * 1000)
                 output_payload = _safe_response(response) if cfg.capture_response else {"response_hash": sha256_value(_safe_response(response))}
-                system_prompt_line_hashes = system_prompt_line_digests(
-                    messages=kwargs.get("messages"), system=kwargs.get("system")
-                )
+                # 指示の載る場所は提供元と操作ごとに違う。応答系の要求では instructions と input に
+                # 載り、位置引数で渡る形もある。名前を 2 つ決め打ちすると、その形の呼び出しでは
+                # 行も組も空になり、判定が静かに止まる。場所の網羅は共通の収集へ任せる。
+                _sources = collect_instruction_sources(kwargs, args)
+                system_prompt_line_hashes = system_prompt_line_digests(*_sources)
+                system_prompt_pair_hashes = system_prompt_pair_digests(*_sources)
                 llm_data: dict[str, Any] = {
                     "provider": "ollama",
                     "operation": operation,
@@ -118,6 +122,10 @@ class OllamaInstrumentor(BaseInstrumentor):
                     llm_data["model_digest"] = model_digest
                 if system_prompt_line_hashes:
                     llm_data["system_prompt_line_hashes"] = system_prompt_line_hashes
+                # 組は行と独立に載せる。行の内側へ入れると、行を出す条件を変えたときに組が
+                # 黙って止まる。2 つは別々の導出で、片方が空でももう片方は成立する。
+                if system_prompt_pair_hashes:
+                    llm_data["system_prompt_pair_hashes"] = system_prompt_pair_hashes
                 emit_event(
                     "llm.request",
                     source={"component": "instrumentor", "sdk": "ollama", "provider": "ollama", "operation": operation},
