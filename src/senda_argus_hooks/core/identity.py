@@ -90,6 +90,7 @@ def derive_agent_id(
     environment: str,
     agent_hint: str | None = None,
     runtime: str | None = None,
+    sdk: str | None = None,
 ) -> str:
     """Derive an execution-origin identifier.
 
@@ -99,7 +100,11 @@ def derive_agent_id(
 
     どの取り込みが出したかは identifier に混ぜない。代わりに実行時の区別を混ぜる。理由は
     runtime_discriminator に書いた。
+
+    **sdk は受け取るが混ぜない。** 公開している関数で、既存の呼び出し元はこの名前で値を渡して
+    いる。引数ごと消すと、更新しただけで呼び出し元が型の誤りで落ちる。
     """
+    del sdk
     return stable_hash(
         {
             "project": project,
