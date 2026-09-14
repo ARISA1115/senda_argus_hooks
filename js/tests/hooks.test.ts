@@ -34,3 +34,15 @@ test("MCP hook emits requested and completed", async () => {
   assert.deepEqual(sink.events.map(e => e.event_type), ["mcp.tool_call.requested", "mcp.tool_call.completed"]);
   assert.match(String(sink.events[0].purpose_id), /^purpose_/);
 });
+
+test("register accepts Python-style exporter configuration objects", async () => {
+  const client = {
+    responses: { create: async () => ({ id: "r1" }) },
+    chat: { completions: { create: async () => ({ id: "c1" }) } },
+    embeddings: { create: async () => ({ data: [] }) }
+  };
+  const installed = register({ project: "config-test", exporters: [{ type: "null" }], redact: true }, { openai: client });
+  assert.equal(installed.openai, true);
+  const result = await client.responses.create();
+  assert.equal(result.id, "r1");
+});

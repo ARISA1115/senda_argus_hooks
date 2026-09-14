@@ -1,14 +1,30 @@
 import { getContext, runWithContext, newRunId } from "./core/context.js";
 import { newEvent } from "./core/event.js";
 import { redactEvent } from "./core/redaction.js";
-import type { Exporter, RegisterOptions, RuntimeConfig } from "./core/types.js";
+import type { Exporter, ExporterConfig, RegisterOptions, RuntimeConfig } from "./core/types.js";
 import { JsonlExporter } from "./exporters/jsonl.js";
+import { StdoutExporter } from "./exporters/stdout.js";
+import { NullExporter } from "./exporters/null.js";
 
 let config: RuntimeConfig = {
   project: "default", environment: "dev", capturePrompt: false, captureResponse: false,
   captureArguments: false, captureResult: false, captureHash: true, redact: true, actor: {}
 };
 let exporters: Exporter[] = [];
+
+function isExporter(value: Exporter | ExporterConfig): value is Exporter {
+  return typeof (value as Exporter)?.emit === "function";
+}
+
+function exporterFromConfig(value: Exporter | ExporterConfig): Exporter {
+  if (isExporter(value)) return value;
+  switch (value.type) {
+    case "jsonl": return new JsonlExporter(value.path);
+    case "stdout": return new StdoutExporter();
+    case "null": return new NullExporter();
+    default: throw new Error(`Unsupported exporter type: ${String((value as any)?.type)}`);
+  }
+}
 
 export function configure(options: RegisterOptions = {}): void {
   config = {
@@ -26,7 +42,9 @@ export function configure(options: RegisterOptions = {}): void {
     turnId: options.turnId, agentId: options.agentId,
     purposeId: options.purposeId, agentHint: options.agentHint
   };
-  exporters = options.exporters?.length ? options.exporters : [new JsonlExporter()];
+  exporters = options.exporters?.length
+    ? options.exporters.map(exporterFromConfig)
+    : [new JsonlExporter()];
 }
 
 export function getConfig(): RuntimeConfig { return config; }

@@ -15,3 +15,7 @@ export function runWithContext<T>(context: TraceContext, fn: () => T): T {
 export function newRunId(): string {
   return `run_${randomUUID().replaceAll("-", "")}`;
 }
+
+export function newTraceId(): string {
+  return `trace_${randomUUID().replaceAll("-", "")}`;
+}

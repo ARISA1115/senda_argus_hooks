@@ -6,7 +6,8 @@ export { instrumentOllama } from "./instrumentors/ollama.js";
 export { instrumentMCP } from "./instrumentors/mcp.js";
 export { JsonlExporter } from "./exporters/jsonl.js";
 export { StdoutExporter } from "./exporters/stdout.js";
-export type { EventRecord, Exporter, RegisterOptions, RuntimeConfig, TraceContext } from "./core/types.js";
+export { NullExporter } from "./exporters/null.js";
+export type { EventRecord, Exporter, ExporterConfig, RegisterOptions, RuntimeConfig, TraceContext } from "./core/types.js";
 
 export { SendaArgusLangChainCallbackHandler, langChainCallbackHandler } from "./integrations/langchain.js";
 export { instrumentLangGraph, invokeWithArgus, streamWithArgus } from "./integrations/langgraph.js";

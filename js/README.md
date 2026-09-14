@@ -1,6 +1,6 @@
-# Senda-Argus Hooks JS v0.1
+# Senda-Argus Hooks JS v0.2.0
 
-Node.js / TypeScript hook package included with Senda-Argus Hooks v0.6.0.
+Node.js / TypeScript hook package for Senda-Argus Hooks. JS v0.2.0 is included in project release v0.7.0; the Python package remains independently versioned.
 
 ## Scope
 
@@ -10,11 +10,20 @@ Node.js / TypeScript hook package included with Senda-Argus Hooks v0.6.0.
 - Ollama: `chat`
 - MCP: `Client.callTool`
 
-## Build
+## Build and test
 
 ```bash
 npm install
+npm run build
 npm test
+```
+
+Production sources compile from `src/` directly into `dist/`, so the package entry points `dist/index.js` and `dist/index.d.ts` exist after `npm run build`. Test sources compile separately into `dist-test/`.
+
+To inspect the publishable package contents without publishing:
+
+```bash
+npm run test:package
 ```
 
 ## Usage
@@ -23,7 +32,7 @@ npm test
 import OpenAI from "openai";
 import Anthropic from "@anthropic-ai/sdk";
 import ollama from "ollama";
-import { Client } from "@modelcontextprotocol/client";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { register, shutdown } from "@senda/argus-hooks";
 
 const openai = new OpenAI();
@@ -33,6 +42,7 @@ const mcp = new Client({ name: "my-client", version: "1.0.0" });
 register({
   project: "example-agent",
   environment: "dev",
+  exporters: [{ type: "jsonl", path: "./logs/events.jsonl" }],
   capturePrompt: false,
   captureResponse: false,
   captureArguments: true,
@@ -53,9 +63,11 @@ await shutdown();
 
 ### Why targets are passed to `register()`
 
-Node.js ESM exports cannot be safely replaced globally after import in the same way Python classes can be monkey-patched. v0.1 therefore patches the supported SDK client/module objects directly. This remains hook-only with respect to business logic: applications keep calling their normal SDK methods and do not emit audit events themselves.
+Node.js ESM exports cannot be safely replaced globally after import in the same way Python classes can be monkey-patched. The JS package therefore patches the supported SDK client/module objects directly. This remains hook-only with respect to business logic: applications keep calling their normal SDK methods and do not emit audit events themselves.
 
 A preload/loader based ESM auto-instrumentation layer can be added in a later JS release without changing the normalized event schema.
+
+Exporter configuration objects compatible with the Python package are supported for `jsonl`, `stdout`, and `null`, while custom exporter instances remain supported.
 
 ## Framework integrations (JS v0.2.0 / Senda-Argus Hooks v0.7.0)
 
@@ -112,7 +124,7 @@ This emits normalized `retrieval.*`, `embedding.*`, and `rag.query.*` events.
 
 ### Vercel AI SDK
 
-Senda-Argus exposes a Language Model V3 middleware compatible with current AI SDK middleware/wrapping patterns:
+Senda-Argus exposes middleware compatible with AI SDK wrapping patterns (verified with AI SDK v7 `generateText()`):
 
 ```ts
 import { wrapLanguageModel } from "ai";
@@ -148,13 +160,17 @@ The JS test suite includes deterministic compatibility tests for:
 - LangChain callback lifecycle
 - LangGraph invoke and stream lifecycle
 - LlamaIndex retrieval / embedding / query instrumentation
-- Vercel AI SDK Language Model V3 middleware
-- OpenAI Agents tracing processor integration
+- Vercel AI SDK middleware
+- OpenAI Agents tracing processor integration, including `onTraceStart`, `onTraceEnd`, `onSpanStart`, `onSpanEnd`, `forceFlush`, and `shutdown`
+- lifecycle trace correlation for MCP, LangChain, LangGraph, and LlamaIndex
 
 Run:
 
 ```bash
 cd js
-tsc -p tsconfig.json
-node --test dist/tests/*.test.js
+npm install
+npm test
+npm run test:package
 ```
+
+For a local packed-package smoke test, run `npm pack`, install the generated `.tgz` into a clean temporary project, and verify that `import "@senda/argus-hooks"` succeeds.

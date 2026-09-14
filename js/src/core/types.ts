@@ -42,10 +42,15 @@ export interface Exporter {
   shutdown?(): void | Promise<void>;
 }
 
+export type ExporterConfig =
+  | { type: "jsonl"; path?: string }
+  | { type: "stdout" }
+  | { type: "null" };
+
 export interface RegisterOptions {
   project?: string;
   environment?: string;
-  exporters?: Exporter[];
+  exporters?: Array<Exporter | ExporterConfig>;
   capturePrompt?: boolean;
   captureResponse?: boolean;
   captureArguments?: boolean;
