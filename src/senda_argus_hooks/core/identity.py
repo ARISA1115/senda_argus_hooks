@@ -17,6 +17,24 @@ def stable_hash(value: Any, *, prefix: str, length: int = 16) -> str:
     return f"{prefix}_{digest}"
 
 
+# MCP のセッションがサーバ名を持たないときに付ける名前。Argus はこの名前を資産として記録せず、
+# 承認の候補にも出さない。承認すると、名前を持たない全てのセッションのツールが承認済みになるため。
+UNNAMED_MCP_SERVER = "unknown"
+
+
+def resolve_mcp_server_name(obj: Any) -> Any:
+    """MCP クライアントのオブジェクトからサーバ名を読む。
+
+    計装ごとに読み方を変えない。読む属性が違うと、同じセッションが計装によって別のサーバ名で
+    記録され、承認したサーバと観測したサーバが一致しなくなる。空の値は持たないものとして扱う。
+    """
+    for attr in ("server", "server_name", "name"):
+        value = getattr(obj, attr, None)
+        if value:
+            return value
+    return UNNAMED_MCP_SERVER
+
+
 def normalize_url(url: str | None) -> str | None:
     if not url:
         return None

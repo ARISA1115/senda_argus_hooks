@@ -11,7 +11,7 @@ from senda_argus_hooks.core.instruction_files import (
     system_prompt_pair_digests,
 )
 from senda_argus_hooks.core.hashing import sha256_value
-from senda_argus_hooks.core.identity import data_source_hash, derive_mcp_profile_id, derive_purpose_id, mcp_data_source_profile, normalize_url
+from senda_argus_hooks.core.identity import data_source_hash, derive_mcp_profile_id, derive_purpose_id, mcp_data_source_profile, normalize_url, resolve_mcp_server_name
 from senda_argus_hooks.core.runtime import emit_event, get_config
 from senda_argus_hooks.core.purpose_registry import register_mcp_tool_source, selected_tool_purpose
 from .base import BaseInstrumentor, audit_guard
@@ -145,7 +145,7 @@ class ArgusSDKInstrumentor(BaseInstrumentor):
             tool = args[0] if args else kwargs.get("tool") or kwargs.get("name")
             arguments = args[1] if len(args) > 1 else kwargs.get("arguments") or {}
             capability = kwargs.get("capability")
-            server = getattr(obj, "server", "unknown")
+            server = resolve_mcp_server_name(obj)
             server_url = getattr(obj, "url", None) or getattr(obj, "base_url", None) or getattr(obj, "server_url", None)
             purpose_profile = mcp_data_source_profile(mcp_server_name=server, mcp_server_url=server_url, tool_name=tool, capability=capability)
             purpose_id = derive_purpose_id(mcp_server_name=server, mcp_server_url=server_url, tool_name=tool, capability=capability)
