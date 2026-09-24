@@ -1,0 +1,35 @@
+services:
+  python-agent:
+    build:
+      context: ..
+      dockerfile: docker/python/Dockerfile
+    environment:
+      SENDA_ARGUS_PROJECT: example-python-agent
+      SENDA_ARGUS_ENVIRONMENT: prod
+      SENDA_ARGUS_AGENT_ID: example-python-agent
+      SENDA_ARGUS_EXPORTERS: jsonl,stdout
+      # To send directly to Senda-Argus instead:
+      # SENDA_ARGUS_EXPORTERS: argus,jsonl
+      # SENDA_ARGUS_ENDPOINT: http://senda-argus:8000
+      # SENDA_ARGUS_API_KEY: change-me
+    volumes:
+      - ./examples/python-agent:/app:ro
+      - senda_python_events:/var/log/senda-argus
+    command: ["python", "/app/agent.py"]
+
+  node-agent:
+    build:
+      context: ..
+      dockerfile: docker/node/Dockerfile
+    environment:
+      SENDA_ARGUS_PROJECT: example-node-agent
+      SENDA_ARGUS_ENVIRONMENT: prod
+      SENDA_ARGUS_AGENT_ID: example-node-agent
+      SENDA_ARGUS_EXPORTER: stdout
+    volumes:
+      - senda_node_events:/var/log/senda-argus
+    command: ["node", "-e", "console.log('replace this command with your Node Agent')"]
+
+volumes:
+  senda_python_events:
+  senda_node_events:
