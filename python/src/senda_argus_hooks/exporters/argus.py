@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import atexit
 import json
+import logging
 import queue
 import threading
+import time
 import urllib.error
 import urllib.request
 from typing import Any
@@ -17,6 +19,9 @@ from .base import BaseExporter
 _SEND_QUEUE_MAX = 1000
 _DRAIN_TIMEOUT = 3.0
 _SHUTDOWN = object()
+_DROP_WARN_INTERVAL = 60.0
+
+_logger = logging.getLogger("senda_argus_hooks.exporters.argus")
 
 
 class ArgusExporter(BaseExporter):
@@ -45,6 +50,32 @@ class ArgusExporter(BaseExporter):
         self._worker: threading.Thread | None = None
         self._worker_lock = threading.Lock()
         self._atexit_registered = False
+        self._drop_lock = threading.Lock()
+        self._dropped_events_count = 0
+        self._last_drop_warn = 0.0
+
+    def _record_drop(self, count: int) -> None:
+        """送出キュー満杯で捨てたイベント数を計数し、警告を一定間隔に間引いてログに残す。
+
+        count は捨てたバッチに含まれるイベント数。バッチ単位でなくイベント単位で数えるため、
+        バッチサイズが 1 を超えても欠落数を正しく表す。障害で連続 drop するとき export ごとに
+        同期ログを書くとログが氾濫し呼び出し経路を塞ぐため、警告は間引いて非ブロッキング性を保つ。
+        沈黙 drop で欠落を見失わない。
+        """
+        now = time.monotonic()
+        with self._drop_lock:
+            self._dropped_events_count += count
+            total = self._dropped_events_count
+            should_warn = (now - self._last_drop_warn) >= _DROP_WARN_INTERVAL
+            if should_warn:
+                self._last_drop_warn = now
+        if should_warn:
+            _logger.warning("Argus 送出キューが満杯のためイベントを破棄しました。累計 %d 件", total)
+
+    def dropped_events(self) -> int:
+        """送出キュー満杯で捨てたバッチの累計を返す。"""
+        with self._drop_lock:
+            return self._dropped_events_count
 
     def _send(self, payload: bytes, headers: dict[str, str]) -> None:
         req = urllib.request.Request(
@@ -94,7 +125,7 @@ class ArgusExporter(BaseExporter):
         try:
             self._queue.put_nowait((payload, headers))
         except queue.Full:
-            pass
+            self._record_drop(len(events))
 
     def shutdown(self) -> None:
         # 終了時に積み残したバッチを送り切る。daemon ワーカーは通常終了で待たれないため、
