@@ -1,7 +1,7 @@
 import { getContext, runWithContext, newRunId } from "./core/context.js";
 import { newEvent } from "./core/event.js";
 import { redactEvent } from "./core/redaction.js";
-import type { Exporter, ExporterConfig, RegisterOptions, RuntimeConfig } from "./core/types.js";
+import type { EventRecord, Exporter, ExporterConfig, RegisterOptions, RuntimeConfig } from "./core/types.js";
 import { JsonlExporter } from "./exporters/jsonl.js";
 import { StdoutExporter } from "./exporters/stdout.js";
 import { NullExporter } from "./exporters/null.js";
@@ -49,26 +49,58 @@ export function configure(options: RegisterOptions = {}): void {
 
 export function getConfig(): RuntimeConfig { return config; }
 
-export function emitEvent(eventType: string, args: {
+// 観測の失敗でホストアプリの呼び出しを変えない。同期の例外も、失敗した Promise も受け止める。
+function contain(run: () => void | Promise<void> | undefined): Promise<void> | undefined {
+  let pending: void | Promise<void> | undefined;
+  try {
+    pending = run();
+  } catch {
+    return undefined;
+  }
+  if (pending && typeof (pending as PromiseLike<void>).then === "function") {
+    return Promise.resolve(pending).catch(() => undefined);
+  }
+  return undefined;
+}
+
+type EmitArgs = {
   data?: Record<string, unknown>; source?: Record<string, unknown>; actor?: Record<string, unknown>;
   status?: string; latencyMs?: number; error?: Record<string, unknown>; purposeId?: string; agentId?: string;
-} = {}) {
+};
+
+function buildEvent(eventType: string, args: EmitArgs): EventRecord {
   let event = newEvent({
     config, context: getContext(), eventType, source: args.source, actor: args.actor,
     data: args.data, status: args.status, latencyMs: args.latencyMs, error: args.error,
     purposeId: args.purposeId, agentId: args.agentId
   });
   if (config.redact) event = redactEvent(event);
-  for (const exporter of exporters) void exporter.emit(event);
+  return event;
+}
+
+export function emitEvent(eventType: string, args: EmitArgs = {}): EventRecord | undefined {
+  let event: EventRecord;
+  try {
+    event = buildEvent(eventType, args);
+  } catch {
+    // 本文から事象を組み立てられなくても、起きたこと自体は本文を空にして残す。
+    try {
+      event = buildEvent(eventType, { status: args.status, latencyMs: args.latencyMs });
+      event.security = { ...event.security, observation_failed: true };
+    } catch {
+      return undefined;
+    }
+  }
+  for (const exporter of exporters) void contain(() => exporter.emit(event));
   return event;
 }
 
 export async function flush(): Promise<void> {
-  for (const exporter of exporters) await exporter.flush?.();
+  for (const exporter of exporters) await contain(() => exporter.flush?.());
 }
 export async function shutdown(): Promise<void> {
   await flush();
-  for (const exporter of exporters) await exporter.shutdown?.();
+  for (const exporter of exporters) await contain(() => exporter.shutdown?.());
 }
 
 export function withTrace<T>(fn: () => T, context: Record<string, string | undefined> = {}): T {
