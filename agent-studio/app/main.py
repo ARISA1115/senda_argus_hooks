@@ -12,7 +12,7 @@ BASE=Path(__file__).resolve().parent
 DB=os.getenv('SENDA_STUDIO_DB','/data/studio.db')
 store=EventStore(DB)
 subscribers:set[asyncio.Queue]=set()
-app=FastAPI(title='Senda Agent Studio', version='0.3.0')
+app=FastAPI(title='Senda Arugus Agent Studio', version='0.3.0')
 app.mount('/static', StaticFiles(directory=BASE/'static'), name='static')
 _runtime=None
 
