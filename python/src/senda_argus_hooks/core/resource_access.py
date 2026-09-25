@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Final, Optional
+from typing import Any, Final
 
 from senda_argus_hooks.core.hashing import sha256_value
 from senda_argus_hooks.core.identity import stable_hash
@@ -67,7 +67,7 @@ def _first_present(arguments: dict[str, Any], keys: tuple[str, ...]) -> Any:
     return _MISSING
 
 
-def resource_identity(arguments: Any, *, server: str | None = None) -> Optional[str]:
+def resource_identity(arguments: Any, *, server: str | None = None) -> str | None:
     """資源を指す引数から、同一性を表すダイジェストを返す。該当しなければ None。
 
     ツール名を含めない。含めると、同じ資源への読み取りと書き込みが別の値になり、往復を追えない。
@@ -93,7 +93,7 @@ def resource_identity(arguments: Any, *, server: str | None = None) -> Optional[
     return stable_hash(text, prefix="resource")
 
 
-def access_direction(arguments: Any) -> Optional[str]:
+def access_direction(arguments: Any) -> str | None:
     """呼び出しの向きを返す。判別できない場合は None。
 
     本文にあたる引数が在れば書き込みとする。値が空でも書き込みとする。空の本文は資源を空に

@@ -8,8 +8,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
-from senda_argus_hooks.exporters.argus import ArgusExporter
 from senda_argus_hooks.exporters import create_exporter
+from senda_argus_hooks.exporters.argus import ArgusExporter
 
 
 def _wait_until(predicate, timeout: float = 2.0) -> None:

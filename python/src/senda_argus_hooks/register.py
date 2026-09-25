@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 from typing import Any
 
 # Import exporters package to register built-in exporters.
@@ -8,7 +9,16 @@ from senda_argus_hooks.core.context import RuntimeConfig
 from senda_argus_hooks.core.queue import EventBus
 from senda_argus_hooks.core.runtime import configure, get_bus
 from senda_argus_hooks.exporters.registry import create_exporter
-from senda_argus_hooks.instrumentors import AnthropicInstrumentor, ArgusSDKInstrumentor, BedrockInstrumentor, LiteLLMInstrumentor, MCPPythonInstrumentor, OllamaInstrumentor, OpenAIInstrumentor, VertexAIInstrumentor
+from senda_argus_hooks.instrumentors import (
+    AnthropicInstrumentor,
+    ArgusSDKInstrumentor,
+    BedrockInstrumentor,
+    LiteLLMInstrumentor,
+    MCPPythonInstrumentor,
+    OllamaInstrumentor,
+    OpenAIInstrumentor,
+    VertexAIInstrumentor,
+)
 from senda_argus_hooks.integrations.openai_agents import OpenAIAgentsInstrumentor
 
 _ACTIVE_INSTRUMENTORS: list[Any] = []
@@ -106,7 +116,7 @@ def register(
             rag_handle = instrument_rag(**rag)
             _ACTIVE_RAG_INSTRUMENTATIONS.append(rag_handle)
             installed["rag"] = bool(rag_handle.installed())
-        except Exception:
+        except Exception:  # noqa: BLE001 - 計装を有効にできなくても呼び出し元を止めない
             installed["rag"] = False
 
     return {"project": project, "environment": environment, "instrumentors": installed, "rag": rag_handle}
@@ -118,7 +128,7 @@ def _activate(instrumentor) -> bool:
         if result:
             _ACTIVE_INSTRUMENTORS.append(instrumentor)
         return bool(result)
-    except Exception:
+    except Exception:  # noqa: BLE001 - 計装を有効にできなくても呼び出し元を止めない
         return False
 
 
@@ -128,17 +138,13 @@ def flush() -> None:
 
 def shutdown() -> None:
     flush()
-    for rag_handle in list(_ACTIVE_RAG_INSTRUMENTATIONS):
-        try:
+    for rag_handle in list(_ACTIVE_RAG_INSTRUMENTATIONS):  # noqa: PERF101 - 後始末の間に一覧が書き換わっても回す対象を固定する
+        with contextlib.suppress(Exception):
             rag_handle.uninstrument()
-        except Exception:
-            pass
     _ACTIVE_RAG_INSTRUMENTATIONS.clear()
-    for instrumentor in list(_ACTIVE_INSTRUMENTORS):
-        try:
+    for instrumentor in list(_ACTIVE_INSTRUMENTORS):  # noqa: PERF101 - 後始末の間に一覧が書き換わっても回す対象を固定する
+        with contextlib.suppress(Exception):
             instrumentor.uninstrument()
-        except Exception:
-            pass
     _ACTIVE_INSTRUMENTORS.clear()
     get_bus().shutdown()
 

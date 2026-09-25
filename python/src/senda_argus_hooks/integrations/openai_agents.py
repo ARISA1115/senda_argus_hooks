@@ -1,15 +1,17 @@
 from __future__ import annotations
 
+import contextlib
 import inspect
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
+from senda_argus_hooks.core.hashing import sha256_value
 from senda_argus_hooks.core.instruction_files import (
     collect_instruction_sources,
     system_prompt_line_digests,
     system_prompt_pair_digests,
 )
-from senda_argus_hooks.core.hashing import sha256_value
 from senda_argus_hooks.core.runtime import emit_event, get_config
 from senda_argus_hooks.instrumentors.base import BaseInstrumentor
 
@@ -87,7 +89,7 @@ class OpenAIAgentsInstrumentor(BaseInstrumentor):
                     original = getattr(runner, method_name, None)
                     if original is not None:
                         candidates.append((runner, method_name, original))
-        except Exception:
+        except Exception:  # noqa: BLE001 - 計装を有効にできなくても呼び出し元を止めない
             return False
 
         patched = False
@@ -95,7 +97,7 @@ class OpenAIAgentsInstrumentor(BaseInstrumentor):
             if hasattr(original, "__senda_patched__"):
                 continue
             wrapped = self._wrap_async(original, method_name) if inspect.iscoroutinefunction(original) else self._wrap_sync(original, method_name)
-            setattr(wrapped, "__senda_patched__", True)
+            wrapped.__senda_patched__ = True
             setattr(cls, method_name, wrapped)
             self._patches.append((cls, method_name, original))
             patched = True
@@ -281,10 +283,8 @@ def _span_event_type(span: Any, *, suffix: str) -> str:
 def _safe_value(value: Any) -> Any:
     for attr in ("model_dump", "dict"):
         if hasattr(value, attr):
-            try:
+            with contextlib.suppress(Exception):
                 return getattr(value, attr)()
-            except Exception:
-                pass
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     if isinstance(value, dict):

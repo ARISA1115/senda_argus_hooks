@@ -15,7 +15,6 @@ class JsonlExporter(BaseExporter):
         self.lock = Lock()
 
     def export(self, events: list[dict[str, Any]]) -> None:
-        with self.lock:
-            with self.path.open("a", encoding="utf-8") as f:
-                for event in events:
-                    f.write(json.dumps(event, ensure_ascii=False, default=str) + "\n")
+        with self.lock, self.path.open("a", encoding="utf-8") as f:
+            for event in events:
+                f.write(json.dumps(event, ensure_ascii=False, default=str) + "\n")

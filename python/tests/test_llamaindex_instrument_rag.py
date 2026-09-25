@@ -86,7 +86,7 @@ def test_instrument_rag_patches_components_with_one_call(tmp_path: Path):
         "rag.query.completed",
     ]
 
-    query_completed = [e for e in _events(path) if e["event_type"] == "rag.query.completed"][0]
+    query_completed = next(e for e in _events(path) if e["event_type"] == "rag.query.completed")
     assert query_completed["data"]["rag"]["context_count"] == 1
     assert query_completed["data"]["rag"]["context_hash"]
 
@@ -120,13 +120,13 @@ def test_instrument_rag_awaits_async_methods_before_reporting_completion(tmp_pat
     shutdown()
 
     events = _events(path)
-    retrieval_completed = [e for e in events if e["event_type"] == "retrieval.completed"][0]
+    retrieval_completed = next(e for e in events if e["event_type"] == "retrieval.completed")
     assert retrieval_completed["data"]["retrieval"]["result_count"] == 1
 
-    embedding_completed = [e for e in events if e["event_type"] == "embedding.completed"][0]
+    embedding_completed = next(e for e in events if e["event_type"] == "embedding.completed")
     assert embedding_completed["data"]["embedding"]["vector_dimension"] == 3
 
-    query_completed = [e for e in events if e["event_type"] == "rag.query.completed"][0]
+    query_completed = next(e for e in events if e["event_type"] == "rag.query.completed")
     assert query_completed["data"]["rag"]["context_count"] == 1
     assert query_completed["data"]["rag"]["context_hash"]
 

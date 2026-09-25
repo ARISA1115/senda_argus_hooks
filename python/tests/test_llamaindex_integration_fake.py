@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 from pathlib import Path
 
@@ -105,10 +106,8 @@ def test_llamaindex_retrieve_with_argus_emits_failed_event(tmp_path: Path):
     path = tmp_path / "events.jsonl"
     register(project="test", exporters=[{"type": "jsonl", "path": str(path)}])
 
-    try:
+    with contextlib.suppress(RuntimeError):
         retrieve_with_argus(FailedRetriever(), "hello")
-    except RuntimeError:
-        pass
     shutdown()
 
     events = _events(path)

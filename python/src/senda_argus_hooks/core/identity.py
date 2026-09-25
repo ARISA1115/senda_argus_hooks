@@ -47,7 +47,7 @@ def normalize_url(url: str | None) -> str | None:
         netloc = parts.netloc.lower()
         path = parts.path.rstrip("/") or "/"
         return urlunsplit((scheme, netloc, path, "", ""))
-    except Exception:
+    except Exception:  # noqa: BLE001 - 観測の失敗で計装対象の呼び出しを止めない
         return raw.lower().rstrip("/")
 
 

@@ -4,16 +4,19 @@ import io
 import json
 import re
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
+from senda_argus_hooks.core.hashing import sha256_value
 from senda_argus_hooks.core.instruction_files import (
     collect_instruction_sources,
     system_prompt_line_digests,
     system_prompt_pair_digests,
 )
-from senda_argus_hooks.core.hashing import sha256_value
 from senda_argus_hooks.core.model_identity import models_correspond
-from senda_argus_hooks.core.response_meta import extract_response_model as _extract_response_model
+from senda_argus_hooks.core.response_meta import (
+    extract_response_model as _extract_response_model,
+)
 from senda_argus_hooks.core.runtime import emit_event, get_config
 
 from .base import BaseInstrumentor, audit_guard
@@ -38,14 +41,14 @@ class BedrockInstrumentor(BaseInstrumentor):
     def instrument(self) -> bool:
         try:
             from botocore.client import BaseClient  # type: ignore
-        except Exception:
+        except Exception:  # noqa: BLE001 - 任意の SDK の import 失敗は種類を問わず未導入として扱う
             return False
 
         if hasattr(BaseClient._make_api_call, "__senda_patched__"):
             return True
         original = BaseClient._make_api_call
         wrapped = self._wrap(original)
-        setattr(wrapped, "__senda_patched__", True)
+        wrapped.__senda_patched__ = True
         BaseClient._make_api_call = wrapped  # type: ignore[method-assign]
         self._patches.append((BaseClient, "_make_api_call", original))
         return True
@@ -178,7 +181,7 @@ def _selected_tool_names(operation_name: Any, response: Any) -> list[str]:
 def _service_name(client: Any) -> str:
     try:
         return str(client.meta.service_model.service_name)
-    except Exception:
+    except Exception:  # noqa: BLE001 - 観測の失敗で計装対象の呼び出しを止めない
         return ""
 
 
@@ -202,13 +205,13 @@ def _read_and_rewrap_body(response: dict[str, Any]) -> bytes | None:
         return None
     try:
         raw = body.read()
-    except Exception:
+    except Exception:  # noqa: BLE001 - 観測の失敗で計装対象の呼び出しを止めない
         return None
     try:
         from botocore.response import StreamingBody  # type: ignore
 
         response["body"] = StreamingBody(io.BytesIO(raw), len(raw))
-    except Exception:
+    except Exception:  # noqa: BLE001 - botocore の型で包み直せないときは BytesIO のまま本文を返す
         response["body"] = io.BytesIO(raw)
     return raw
 

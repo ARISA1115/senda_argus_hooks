@@ -4,9 +4,6 @@ from __future__ import annotations
 
 import json
 from typing import Any
-from unittest.mock import MagicMock, patch
-
-import pytest
 
 from senda_argus_hooks.instrumentors.argus_sdk import (
     _extract_senda_argus_report,

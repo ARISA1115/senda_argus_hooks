@@ -8,7 +8,7 @@ normalizer を渡す。判定は正規化後の完全一致または前方一致
 
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
 
 
 def models_correspond(model_id: str, response_model: str, normalize: Callable[[str], str]) -> bool:

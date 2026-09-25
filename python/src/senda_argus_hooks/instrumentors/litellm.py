@@ -1,16 +1,21 @@
 from __future__ import annotations
 
+import contextlib
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
+from senda_argus_hooks.core.hashing import sha256_value
 from senda_argus_hooks.core.instruction_files import (
     collect_instruction_sources,
     system_prompt_line_digests,
     system_prompt_pair_digests,
 )
-from senda_argus_hooks.core.hashing import sha256_value
-from senda_argus_hooks.core.response_meta import extract_response_model as _extract_response_model
+from senda_argus_hooks.core.response_meta import (
+    extract_response_model as _extract_response_model,
+)
 from senda_argus_hooks.core.runtime import emit_event, get_config
+
 from .base import BaseInstrumentor, audit_guard
 
 
@@ -23,7 +28,7 @@ class LiteLLMInstrumentor(BaseInstrumentor):
     def instrument(self) -> bool:
         try:
             import litellm
-        except Exception:
+        except Exception:  # noqa: BLE001 - 任意の SDK の import 失敗は種類を問わず未導入として扱う
             return False
         patched = False
         for name in ("completion", "acompletion", "embedding", "image_generation"):
@@ -31,7 +36,7 @@ class LiteLLMInstrumentor(BaseInstrumentor):
             if original is None or hasattr(original, "__senda_patched__"):
                 continue
             wrapped = self._wrap(original, name)
-            setattr(wrapped, "__senda_patched__", True)
+            wrapped.__senda_patched__ = True
             setattr(litellm, name, wrapped)
             self._patches.append((litellm, name, original))
             patched = True
@@ -205,10 +210,8 @@ def _selected_tool_names(response: Any) -> list[str]:
 def _safe_response(response: Any) -> Any:
     for attr in ("model_dump", "dict", "json"):
         if hasattr(response, attr):
-            try:
+            with contextlib.suppress(Exception):
                 return getattr(response, attr)()
-            except Exception:
-                pass
     return str(response)
 
 

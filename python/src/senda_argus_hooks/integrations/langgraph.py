@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import time
 from collections.abc import AsyncIterator, Iterable, Iterator
 from typing import Any
@@ -110,10 +111,8 @@ def _graph_name(graph: Any) -> str:
 def _safe_value(value: Any) -> Any:
     for attr in ("model_dump", "dict"):
         if hasattr(value, attr):
-            try:
+            with contextlib.suppress(Exception):
                 return getattr(value, attr)()
-            except Exception:
-                pass
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     if isinstance(value, dict):

@@ -179,7 +179,9 @@ def test_the_agent_span_puts_the_digests_where_the_matcher_reads(tmp_path, monke
     """
     import types
 
-    from senda_argus_hooks.integrations.openai_agents import SendaArgusOpenAIAgentsProcessor
+    from senda_argus_hooks.integrations.openai_agents import (
+        SendaArgusOpenAIAgentsProcessor,
+    )
 
     path = tmp_path / "events.jsonl"
     register(project="test-agent-span", exporters=[{"type": "jsonl", "path": str(path)}])
@@ -308,7 +310,9 @@ def test_the_generation_span_start_carries_the_llm_payload(tmp_path, monkeypatch
     """
     import types
 
-    from senda_argus_hooks.integrations.openai_agents import SendaArgusOpenAIAgentsProcessor
+    from senda_argus_hooks.integrations.openai_agents import (
+        SendaArgusOpenAIAgentsProcessor,
+    )
 
     path = tmp_path / "events.jsonl"
     register(project="test-span-start", exporters=[{"type": "jsonl", "path": str(path)}])
@@ -338,7 +342,9 @@ def test_the_generation_span_without_instructions_still_carries_the_envelope(tmp
     """
     import types
 
-    from senda_argus_hooks.integrations.openai_agents import SendaArgusOpenAIAgentsProcessor
+    from senda_argus_hooks.integrations.openai_agents import (
+        SendaArgusOpenAIAgentsProcessor,
+    )
 
     path = tmp_path / "events.jsonl"
     register(project="test-span-plain", exporters=[{"type": "jsonl", "path": str(path)}])
@@ -576,10 +582,11 @@ def _per_char(fn, build, n: int) -> float:
     import time
 
     token = build(n)
-    best = min(
-        (lambda st: (fn(token), time.perf_counter() - st)[1])(time.perf_counter())
-        for _ in range(7)
-    )
+    best = float("inf")
+    for _ in range(7):
+        started = time.perf_counter()
+        fn(token)
+        best = min(best, time.perf_counter() - started)
     return best / n
 
 

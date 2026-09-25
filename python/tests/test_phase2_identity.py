@@ -2,8 +2,12 @@ import json
 from pathlib import Path
 
 from senda_argus_hooks import register, shutdown
+from senda_argus_hooks.core.identity import (
+    derive_embedding_purpose_id,
+    derive_purpose_id,
+    derive_retrieval_purpose_id,
+)
 from senda_argus_hooks.sdk import MockMCPClient
-from senda_argus_hooks.core.identity import derive_embedding_purpose_id, derive_purpose_id, derive_retrieval_purpose_id
 
 
 def test_phase2_schema_identity_fields(tmp_path: Path):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import atexit
+import contextlib
 import json
 import logging
 import queue
@@ -138,8 +139,6 @@ class ArgusExporter(BaseExporter):
         worker = self._worker
         if worker is None or not worker.is_alive():
             return
-        try:
+        with contextlib.suppress(queue.Full):
             self._queue.put_nowait(_SHUTDOWN)
-        except queue.Full:
-            pass
         worker.join(timeout=_DRAIN_TIMEOUT)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -32,9 +33,7 @@ def audit_guard(operation: str) -> Iterator[None]:
     try:
         yield
     except Exception:
-        try:
+        # 記録そのものが失敗してもガードを破らない。ログの送り先が落ちている場合でも
+        # 観測の失敗を本来の呼び出しへ波及させないことを優先する。
+        with contextlib.suppress(Exception):
             logger.warning("senda_argus_hooks の観測処理に失敗しました operation=%s", operation, exc_info=True)
-        except Exception:
-            # 記録そのものが失敗してもガードを破らない。ログの送り先が落ちている場合でも
-            # 観測の失敗を本来の呼び出しへ波及させないことを優先する。
-            pass

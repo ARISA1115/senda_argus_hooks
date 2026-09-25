@@ -9,9 +9,9 @@ from __future__ import annotations
 
 from senda_argus_hooks.core.instruction_files import (
     MAX_LINE_DIGESTS,
-    collect_instruction_sources,
     MIN_LINE_LENGTH,
     classify_instruction_write,
+    collect_instruction_sources,
     instruction_file_name,
     line_digests,
     system_prompt_line_digests,
@@ -99,7 +99,7 @@ def test_short_lines_are_excluded() -> None:
 
 
 def test_repeated_lines_are_collapsed() -> None:
-    assert len(line_digests("\n".join([_LONG, _LONG, _LONG2]))) == 2
+    assert len(line_digests(f"{_LONG}\n{_LONG}\n{_LONG2}")) == 2
 
 
 def test_line_digest_count_is_bounded() -> None:
@@ -293,7 +293,7 @@ def test_instrumentors_do_not_read_arguments_from_a_missing_name() -> None:
             for child in ast.iter_child_nodes(node):
                 parent[child] = node
 
-        def visible_from(node: ast.AST) -> set[str]:
+        def visible_from(node: ast.AST, parent: dict[ast.AST, ast.AST] = parent) -> set[str]:
             names: set[str] = set()
             cur: ast.AST | None = node
             while cur is not None:

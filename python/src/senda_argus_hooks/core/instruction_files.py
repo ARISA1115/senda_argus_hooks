@@ -19,10 +19,10 @@
 from __future__ import annotations
 
 import hashlib
-import re
 import posixpath
+import re
 from collections.abc import Mapping
-from typing import Any, Final, Optional
+from typing import Any, Final
 
 # 文脈が切れても残り、次回の指示に差し込まれるファイルの名前。基底名だけで判定する。置き場所は
 # 実装ごとに異なるが、名前は共通しているため。利用者の設定で足せるようにする。
@@ -202,7 +202,7 @@ def _digest(value: str) -> str:
     return _DIGEST_PREFIX + hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def instruction_file_name(path: Any) -> Optional[str]:
+def instruction_file_name(path: Any) -> str | None:
     """パスが指示ファイルを指すなら、一覧に載っている名前を返す。
 
     判定は基底名で行う。ただし一覧に区切りを含む名前がある場合は、末尾の一致でも認める。
@@ -309,13 +309,13 @@ class BoundedDigestSet:
     なので、結果は最後にまとめて選ぶ場合と同じになる。
     """
 
-    __slots__ = ("_limit", "_slack", "_seen", "_ceiling", "_overflowed")
+    __slots__ = ("_ceiling", "_limit", "_overflowed", "_seen", "_slack")
 
     def __init__(self, limit: int) -> None:
         self._limit = limit
         self._slack = max(limit * 4, limit + 1)
         self._seen: set[str] = set()
-        self._ceiling: Optional[str] = None
+        self._ceiling: str | None = None
         # **落としたことを黙って忘れない。** 落とした事実まで消すと、上限を超える本文を書けば
         # 証拠が静かに欠けたまま完全な記録に見える。落としたかどうかは読み手が知る必要がある。
         self._overflowed = False
@@ -607,7 +607,7 @@ def system_prompt_pair_digests(*sources: Any, **named: Any) -> list[str]:
     return token_pair_digests("\n".join(texts))
 
 
-def _first_present_key(source: dict[str, Any], keys: tuple[str, ...]) -> Optional[str]:
+def _first_present_key(source: dict[str, Any], keys: tuple[str, ...]) -> str | None:
     """最初に見つかった名前を返す。値ではなく名前で扱いを分けるために要る。"""
     for key in keys:
         if key in source and source[key] is not None:
@@ -622,7 +622,7 @@ def _first_present(source: dict[str, Any], keys: tuple[str, ...]) -> Any:
     return None
 
 
-def classify_instruction_write(arguments: Any) -> Optional[dict[str, Any]]:
+def classify_instruction_write(arguments: Any) -> dict[str, Any] | None:
     """指示ファイルへの書き込みなら、突合に使う情報を返す。該当しなければ None。
 
     返すのは、一覧に載っている名前と、本文全体のダイジェストと、行ごとのダイジェストと、

@@ -53,14 +53,12 @@ class TestAuditGuard:
             raise RuntimeError("observation failed")
 
     def test_does_not_swallow_keyboard_interrupt(self):
-        with pytest.raises(KeyboardInterrupt):
-            with audit_guard("test.operation"):
-                raise KeyboardInterrupt
+        with pytest.raises(KeyboardInterrupt), audit_guard("test.operation"):
+            raise KeyboardInterrupt
 
     def test_does_not_swallow_system_exit(self):
-        with pytest.raises(SystemExit):
-            with audit_guard("test.operation"):
-                raise SystemExit(1)
+        with pytest.raises(SystemExit), audit_guard("test.operation"):
+            raise SystemExit(1)
 
     def test_normal_block_runs_to_completion(self):
         seen = []
@@ -134,7 +132,7 @@ class TestGuardSurvivesLoggingFailure:
     """
 
     def test_logger_raising_does_not_escape(self, monkeypatch):
-        import senda_argus_hooks.instrumentors.base as base
+        from senda_argus_hooks.instrumentors import base
 
         def _boom(*args, **kwargs):
             raise RuntimeError("log sink down")
@@ -158,8 +156,8 @@ class TestGuardSurvivesLoggingFailure:
             capture_response=False,
         )
         try:
-            import senda_argus_hooks.instrumentors.base as base
             import senda_argus_hooks.instrumentors.openai as inst
+            from senda_argus_hooks.instrumentors import base
 
             def _emit_boom(*args, **kwargs):
                 raise RuntimeError("emit failed")

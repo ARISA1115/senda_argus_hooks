@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 
 class MockLLMClient:
@@ -16,8 +16,8 @@ class MockLLMClient:
     provider = "mock"
     model = "mock"
 
-    def generate_answer(self, request: Dict[str, Any]) -> Dict[str, Any]:
-        tool_results: Dict[str, Dict[str, Any]] = request.get("tool_results") or {}
+    def generate_answer(self, request: dict[str, Any]) -> dict[str, Any]:
+        tool_results: dict[str, dict[str, Any]] = request.get("tool_results") or {}
         if not tool_results:
             content = "CVE-2024-3094について調査しました。詳細は追加調査が必要です。"
             return {"provider": self.provider, "model": self.model, "content": content}
@@ -61,10 +61,10 @@ class MockLLMClient:
 """.strip()
         return {"provider": self.provider, "model": self.model, "content": content}
 
-    def refine_prompt(self, request: Dict[str, Any]) -> Dict[str, Any]:
+    def refine_prompt(self, request: dict[str, Any]) -> dict[str, Any]:
         current_prompt = request.get("current_prompt", "")
-        missing_capabilities: List[str] = request.get("missing_capabilities") or []
-        missing_sections: List[str] = request.get("missing_sections") or []
+        missing_capabilities: list[str] = request.get("missing_capabilities") or []
+        missing_sections: list[str] = request.get("missing_sections") or []
         required_headings = request.get("required_headings", "")
 
         additions: list[str] = []
@@ -104,9 +104,9 @@ class OllamaClient:
         self.timeout = timeout
         self.temperature = temperature
 
-    def chat(self, messages: List[Dict[str, str]], *, purpose: str = "answer", model: Optional[str] = None, options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def chat(self, messages: list[dict[str, str]], *, purpose: str = "answer", model: str | None = None, options: dict[str, Any] | None = None) -> dict[str, Any]:
         selected_model = model or self.model
-        request_body: Dict[str, Any] = {
+        request_body: dict[str, Any] = {
             "model": selected_model,
             "messages": messages,
             "stream": False,
@@ -122,7 +122,7 @@ class OllamaClient:
             raise RuntimeError(f"Ollamaへの接続に失敗しました: {url}. `ollama serve` が起動しているか確認してください。") from exc
         response = json.loads(raw)
         msg = response.get("message") or {}
-        content: Optional[str] = msg.get("content")
+        content: str | None = msg.get("content")
         tool_calls = msg.get("tool_calls") or []
         if not content and not tool_calls:
             raise RuntimeError(f"Ollamaから想定外のレスポンスが返りました: {raw[:500]}")

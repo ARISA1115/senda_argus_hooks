@@ -1,6 +1,7 @@
-from pathlib import Path
+import contextlib
 import sys
 import types
+from pathlib import Path
 
 from senda_argus_hooks import register, shutdown
 from senda_argus_hooks.integrations.openai_agents import SendaArgusOpenAIAgentsProcessor
@@ -43,10 +44,8 @@ def test_openai_agents_runner_instrumentor_sync_success_and_failure(tmp_path: Pa
 
     register(project="test", exporters=[{"type": "jsonl", "path": str(path)}], auto_instrument=True, capture_result=True)
     assert Runner.run_sync({"task": "hello"})["ok"] is True
-    try:
+    with contextlib.suppress(RuntimeError):
         Runner.run_sync({"task": "hello"}, fail=True)
-    except RuntimeError:
-        pass
     shutdown()
 
     event_types = [event["event_type"] for event in _events(path)]

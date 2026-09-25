@@ -1,15 +1,17 @@
 from __future__ import annotations
 
+import contextlib
 import re
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
+from senda_argus_hooks.core.hashing import sha256_value
 from senda_argus_hooks.core.instruction_files import (
     collect_instruction_sources,
     system_prompt_line_digests,
     system_prompt_pair_digests,
 )
-from senda_argus_hooks.core.hashing import sha256_value
 from senda_argus_hooks.core.model_identity import models_correspond
 from senda_argus_hooks.core.runtime import emit_event, get_config
 
@@ -36,7 +38,7 @@ class VertexAIInstrumentor(BaseInstrumentor):
     def instrument(self) -> bool:
         try:
             from vertexai.generative_models import GenerativeModel  # type: ignore
-        except Exception:
+        except Exception:  # noqa: BLE001 - 任意の SDK の import 失敗は種類を問わず未導入として扱う
             return False
 
         sync_name = "_generate_content" if hasattr(GenerativeModel, "_generate_content") else "generate_content"
@@ -44,7 +46,7 @@ class VertexAIInstrumentor(BaseInstrumentor):
             return True
         original_sync = getattr(GenerativeModel, sync_name)
         wrapped_sync = self._wrap_sync(original_sync)
-        setattr(wrapped_sync, "__senda_patched__", True)
+        wrapped_sync.__senda_patched__ = True
         setattr(GenerativeModel, sync_name, wrapped_sync)
         self._patches.append((GenerativeModel, sync_name, original_sync))
 
@@ -55,7 +57,7 @@ class VertexAIInstrumentor(BaseInstrumentor):
         if async_name is not None:
             original_async = getattr(GenerativeModel, async_name)
             wrapped_async = self._wrap_async(original_async)
-            setattr(wrapped_async, "__senda_patched__", True)
+            wrapped_async.__senda_patched__ = True
             setattr(GenerativeModel, async_name, wrapped_async)
             self._patches.append((GenerativeModel, async_name, original_async))
         return True
@@ -300,7 +302,7 @@ def _absorb_stream_chunk(state: dict[str, Any], chunk: Any) -> None:
 
 
 def _emit_stream(model: Any, args: tuple, kwargs: dict[str, Any], state: dict[str, Any], start: float) -> None:
-    try:
+    with contextlib.suppress(Exception):
         cfg = get_config()
         if cfg.capture_response:
             output: dict[str, Any] = {"response": state["chunk_texts"]}
@@ -316,8 +318,6 @@ def _emit_stream(model: Any, args: tuple, kwargs: dict[str, Any], state: dict[st
             output,
             extra={"stream": True, "chunk_count": len(state["chunk_texts"])},
         )
-    except Exception:
-        pass
 
 
 def _wrap_stream(model: Any, args: tuple, kwargs: dict[str, Any], iterator: Any, start: float) -> Any:
@@ -331,10 +331,8 @@ def _wrap_stream(model: Any, args: tuple, kwargs: dict[str, Any], iterator: Any,
     def _gen():
         try:
             for chunk in iterator:
-                try:
+                with contextlib.suppress(Exception):
                     _absorb_stream_chunk(state, chunk)
-                except Exception:
-                    pass
                 yield chunk
         finally:
             _emit_stream(model, args, kwargs, state, start)
@@ -348,10 +346,8 @@ def _wrap_stream_async(model: Any, args: tuple, kwargs: dict[str, Any], iterator
     async def _gen():
         try:
             async for chunk in iterator:
-                try:
+                with contextlib.suppress(Exception):
                     _absorb_stream_chunk(state, chunk)
-                except Exception:
-                    pass
                 yield chunk
         finally:
             _emit_stream(model, args, kwargs, state, start)

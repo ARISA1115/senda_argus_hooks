@@ -1,13 +1,26 @@
 from __future__ import annotations
 
+import contextlib
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
-from senda_argus_hooks.core.instruction_files import classify_instruction_write
 from senda_argus_hooks.core.hashing import sha256_value
-from senda_argus_hooks.core.resource_access import classify_read_resource, classify_resource_access
-from senda_argus_hooks.core.identity import data_source_hash, derive_mcp_profile_id, derive_purpose_id, mcp_data_source_profile, normalize_url, resolve_mcp_server_name
+from senda_argus_hooks.core.identity import (
+    data_source_hash,
+    derive_mcp_profile_id,
+    derive_purpose_id,
+    mcp_data_source_profile,
+    normalize_url,
+    resolve_mcp_server_name,
+)
+from senda_argus_hooks.core.instruction_files import classify_instruction_write
+from senda_argus_hooks.core.resource_access import (
+    classify_read_resource,
+    classify_resource_access,
+)
 from senda_argus_hooks.core.runtime import emit_event, get_config
+
 from .base import BaseInstrumentor, audit_guard
 
 
@@ -19,21 +32,19 @@ class MCPPythonInstrumentor(BaseInstrumentor):
 
     def instrument(self) -> bool:
         candidates = []
-        try:
+        with contextlib.suppress(Exception):
             from mcp import ClientSession
             candidates.append((ClientSession, "call_tool", "call_tool"))
             candidates.append((ClientSession, "read_resource", "read_resource"))
             candidates.append((ClientSession, "list_tools", "list_tools"))
             candidates.append((ClientSession, "list_resources", "list_resources"))
-        except Exception:
-            pass
         patched = False
         for cls, method_name, op in candidates:
             original = getattr(cls, method_name, None)
             if original is None or hasattr(original, "__senda_patched__"):
                 continue
             wrapped = self._wrap(original, op)
-            setattr(wrapped, "__senda_patched__", True)
+            wrapped.__senda_patched__ = True
             setattr(cls, method_name, wrapped)
             self._patches.append((cls, method_name, original))
             patched = True
@@ -168,8 +179,6 @@ def _mcp_metadata(obj, operation: str, args, kwargs) -> dict[str, Any]:
 def _safe_response(response: Any) -> Any:
     for attr in ("model_dump", "dict"):
         if hasattr(response, attr):
-            try:
+            with contextlib.suppress(Exception):
                 return getattr(response, attr)()
-            except Exception:
-                pass
     return str(response)

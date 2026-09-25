@@ -1,19 +1,32 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
+from senda_argus_hooks.core.hashing import sha256_value
+from senda_argus_hooks.core.identity import (
+    data_source_hash,
+    derive_mcp_profile_id,
+    derive_purpose_id,
+    mcp_data_source_profile,
+    normalize_url,
+    resolve_mcp_server_name,
+)
 from senda_argus_hooks.core.instruction_files import (
-    collect_instruction_sources,
     classify_instruction_write,
+    collect_instruction_sources,
     system_prompt_line_digests,
     system_prompt_pair_digests,
 )
-from senda_argus_hooks.core.hashing import sha256_value
-from senda_argus_hooks.core.identity import data_source_hash, derive_mcp_profile_id, derive_purpose_id, mcp_data_source_profile, normalize_url, resolve_mcp_server_name
+from senda_argus_hooks.core.purpose_registry import (
+    register_mcp_tool_source,
+    selected_tool_purpose,
+)
 from senda_argus_hooks.core.runtime import emit_event, get_config
-from senda_argus_hooks.core.purpose_registry import register_mcp_tool_source, selected_tool_purpose
+
 from .base import BaseInstrumentor, audit_guard
 
 
@@ -26,7 +39,12 @@ class ArgusSDKInstrumentor(BaseInstrumentor):
     def instrument(self) -> bool:
         patched = False
         try:
-            from senda_argus_hooks.sdk import MockLLMClient, OllamaClient, MockMCPClient, PromptOpsClient
+            from senda_argus_hooks.sdk import (
+                MockLLMClient,
+                MockMCPClient,
+                OllamaClient,
+                PromptOpsClient,
+            )
             candidates = [
                 (MockLLMClient, "generate_answer", "llm", "mock.generate_answer"),
                 (MockLLMClient, "refine_prompt", "llm", "mock.refine_prompt"),
@@ -35,14 +53,14 @@ class ArgusSDKInstrumentor(BaseInstrumentor):
                 (PromptOpsClient, "agent_decision", "promptops", "agent.decision"),
                 (PromptOpsClient, "run_completed", "promptops", "promptops.run.completed"),
             ]
-        except Exception:
+        except Exception:  # noqa: BLE001 - 計装を有効にできなくても呼び出し元を止めない
             candidates = []
         for cls, method_name, kind, operation in candidates:
             original = getattr(cls, method_name, None)
             if original is None or hasattr(original, "__senda_patched__"):
                 continue
             wrapped = self._wrap_llm(original, operation) if kind == "llm" else (self._wrap_mcp(original, operation) if kind == "mcp" else self._wrap_promptops(original, operation))
-            setattr(wrapped, "__senda_patched__", True)
+            wrapped.__senda_patched__ = True
             setattr(cls, method_name, wrapped)
             self._patches.append((cls, method_name, original))
             patched = True
@@ -362,7 +380,7 @@ def _extract_senda_argus_content(safe_response: Any) -> dict[str, Any] | None:
         return None
     try:
         parsed = json.loads(content)
-    except Exception:
+    except Exception:  # noqa: BLE001 - 観測の失敗で計装対象の呼び出しを止めない
         return None
     if not isinstance(parsed, dict):
         return None
@@ -437,7 +455,7 @@ def _extract_senda_argus_report(response: dict) -> tuple[dict | None, list]:
             if isinstance(raw_args, str):
                 try:
                     raw_args = json.loads(raw_args)
-                except Exception:
+                except Exception:  # noqa: BLE001 - 観測の失敗で計装対象の呼び出しを止めない
                     raw_args = {}
             report_args = raw_args
         else:
@@ -450,10 +468,8 @@ def _extract_senda_argus_report(response: dict) -> tuple[dict | None, list]:
 def _safe_response(response: Any) -> Any:
     for attr in ("model_dump", "dict", "json"):
         if hasattr(response, attr):
-            try:
+            with contextlib.suppress(Exception):
                 return getattr(response, attr)()
-            except Exception:
-                pass
     return response
 
 

@@ -1,4 +1,4 @@
-from .register import register, flush, shutdown, unregister
 from . import audit
+from .register import flush, register, shutdown, unregister
 
-__all__ = ["register", "flush", "shutdown", "unregister", "audit"]
+__all__ = ["audit", "flush", "register", "shutdown", "unregister"]

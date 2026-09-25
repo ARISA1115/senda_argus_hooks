@@ -1,3 +1,4 @@
+import contextlib
 from pathlib import Path
 
 from senda_argus_hooks import register, shutdown
@@ -47,10 +48,8 @@ def test_langgraph_stream_with_argus_emits_failed_event(tmp_path: Path):
     path = tmp_path / "events.jsonl"
     register(project="test", exporters=[{"type": "jsonl", "path": str(path)}])
 
-    try:
+    with contextlib.suppress(RuntimeError):
         list(stream_with_argus(FailedGraph(), {"question": "hello"}))
-    except RuntimeError:
-        pass
     shutdown()
 
     event_types = [event["event_type"] for event in _events(path)]

@@ -1,20 +1,21 @@
 from __future__ import annotations
 
+import contextlib
 import time
 from typing import Any
 
+from senda_argus_hooks.core.hashing import sha256_value
+from senda_argus_hooks.core.identity import derive_tool_purpose_id
 from senda_argus_hooks.core.instruction_files import (
     collect_instruction_sources,
     system_prompt_line_digests,
     system_prompt_pair_digests,
 )
-from senda_argus_hooks.core.hashing import sha256_value
-from senda_argus_hooks.core.identity import derive_tool_purpose_id
 from senda_argus_hooks.core.runtime import emit_event, get_config
 
 try:  # Optional dependency. Unit tests use this module without LangChain installed.
     from langchain_core.callbacks import BaseCallbackHandler as _BaseCallbackHandler
-except Exception:  # pragma: no cover - depends on optional dependency availability
+except Exception:  # noqa: BLE001  # pragma: no cover - 任意の依存の import 失敗は種類を問わず未導入として扱う
     _BaseCallbackHandler = object
 
 
@@ -44,10 +45,8 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
     """
 
     def __init__(self, *, framework: str = "langchain", capture_payloads: bool | None = None):
-        try:
+        with contextlib.suppress(TypeError):
             super().__init__()
-        except TypeError:
-            pass
         self.framework = framework
         self.capture_payloads = capture_payloads
         self._starts: dict[str, float] = {}
@@ -350,10 +349,8 @@ def _safe_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
 def _safe_value(value: Any) -> Any:
     for attr in ("model_dump", "dict"):
         if hasattr(value, attr):
-            try:
+            with contextlib.suppress(Exception):
                 return getattr(value, attr)()
-            except Exception:
-                pass
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     if isinstance(value, (list, tuple)):

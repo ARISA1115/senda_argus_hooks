@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+import contextlib
 import functools
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
+from senda_argus_hooks.core.hashing import sha256_value
 from senda_argus_hooks.core.instruction_files import (
     collect_instruction_sources,
     system_prompt_line_digests,
     system_prompt_pair_digests,
 )
-from senda_argus_hooks.core.hashing import sha256_value
-from senda_argus_hooks.core.response_meta import extract_response_model as _extract_response_model
+from senda_argus_hooks.core.response_meta import (
+    extract_response_model as _extract_response_model,
+)
 from senda_argus_hooks.core.runtime import emit_event, get_config
 
 from .base import BaseInstrumentor, audit_guard
@@ -38,25 +42,25 @@ class OllamaInstrumentor(BaseInstrumentor):
     def instrument(self) -> bool:
         try:
             import ollama  # type: ignore
-        except Exception:
+        except Exception:  # noqa: BLE001 - 任意の SDK の import 失敗は種類を問わず未導入として扱う
             return False
 
         patched = False
 
-        if hasattr(ollama, "chat") and not hasattr(getattr(ollama, "chat"), "__senda_patched__"):
+        if hasattr(ollama, "chat") and not hasattr(ollama.chat, "__senda_patched__"):
             original = ollama.chat
             wrapped = self._wrap(original, "chat", client_type="module")
-            setattr(wrapped, "__senda_patched__", True)
+            wrapped.__senda_patched__ = True
             ollama.chat = wrapped  # type: ignore[assignment]
             self._patches.append((ollama, "chat", original))
             patched = True
 
         client_cls = getattr(ollama, "Client", None)
-        if client_cls is not None and hasattr(client_cls, "chat") and not hasattr(getattr(client_cls, "chat"), "__senda_patched__"):
+        if client_cls is not None and hasattr(client_cls, "chat") and not hasattr(client_cls.chat, "__senda_patched__"):
             original = client_cls.chat
             wrapped = self._wrap(original, "Client.chat", client_type="client")
-            setattr(wrapped, "__senda_patched__", True)
-            setattr(client_cls, "chat", wrapped)
+            wrapped.__senda_patched__ = True
+            client_cls.chat = wrapped
             self._patches.append((client_cls, "chat", original))
             patched = True
 
@@ -266,10 +270,8 @@ def _selected_tool_names(response: Any) -> list[str]:
 def _safe_response(response: Any) -> Any:
     for attr in ("model_dump", "dict"):
         if hasattr(response, attr):
-            try:
+            with contextlib.suppress(Exception):
                 return getattr(response, attr)()
-            except Exception:
-                pass
     if isinstance(response, (dict, list, str, int, float, bool)) or response is None:
         return response
     return str(response)
@@ -305,6 +307,6 @@ def _get_model_digest(model: Any) -> str | None:
                 digest = getattr(m, "digest", None)
             if isinstance(name, str) and isinstance(digest, str) and name and digest:
                 _MODEL_DIGEST_CACHE[name] = digest
-    except Exception:
+    except Exception:  # noqa: BLE001 - 観測の失敗で計装対象の呼び出しを止めない
         return None
     return _MODEL_DIGEST_CACHE.get(model) or _MODEL_DIGEST_CACHE.get(f"{model}:latest")
