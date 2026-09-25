@@ -5,6 +5,7 @@ import json
 import os
 import platform
 import socket
+import sys
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
@@ -48,19 +49,68 @@ def data_source_hash(profile: dict[str, Any]) -> str:
     return stable_hash(_clean(profile), prefix="data_source")
 
 
-def derive_agent_id(*, project: str, environment: str, sdk: str | None = None, agent_hint: str | None = None) -> str:
+def runtime_discriminator() -> str:
+    """1 つの実行主体を、別々に配備された実行主体から区別する値を返す。
+
+    **取り込みの名前で区別してはいけない。** 1 つの実行主体が取り込みごとに別の identifier を
+    名乗ると、受け取り側は主体の同一性で否定条件を判断するため、自分が書いた指示ファイルを
+    自分が読むだけの記憶の更新が、別の主体からの伝播として発火する。
+
+    **区別を無くしてもいけない。** 同じ計画と同じ環境で別々に配備された実行主体が 1 つの
+    identifier に潰れると、一方が書いて他方が読む本物の伝播が、自分で読んだものとして
+    握り潰される。
+
+    要るのは、1 つの実行主体の中では取り込みをまたいで同じで、別々に配備された実行主体の
+    間では違う値である。実行の入口がその条件を満たす。
+
+    **動かしている機械の名前は使わない。** 配置し直しで名前が変わる環境では、同じ実行主体が
+    再起動しただけで別の識別子になる。その主体が自分の指示ファイルを更新して読み直すだけの
+    振る舞いが、主体をまたぐ伝播として報告される。
+
+    **値は読み込みの時点で確定して持ち回る。** 入口が相対で渡されると、作業場所を変えた後に
+    解決し直した値が変わる。同じ処理が書き込みと推論の要求で別の識別子を名乗り、自分の更新を
+    自分で読むだけの振る舞いが伝播として報告される。
+    """
+    return _ENTRY_POINT
+
+
+def _resolve_entry_point() -> str:
+    try:
+        return os.path.realpath(sys.argv[0]) if sys.argv and sys.argv[0] else ""
+    except Exception:  # noqa: BLE001 - 観測が本来の実行を壊さない
+        return ""
+
+
+_ENTRY_POINT: str = _resolve_entry_point()
+
+
+def derive_agent_id(
+    *,
+    project: str,
+    environment: str,
+    agent_hint: str | None = None,
+    runtime: str | None = None,
+    sdk: str | None = None,
+) -> str:
     """Derive an execution-origin identifier.
 
     This intentionally avoids using MCP server/tool alone. MCP-derived grouping is
     represented by purpose_id / mcp_profile_id so that different agent codebases
     using the same capabilities can be grouped without conflating the executor.
+
+    どの取り込みが出したかは identifier に混ぜない。代わりに実行時の区別を混ぜる。理由は
+    runtime_discriminator に書いた。
+
+    **sdk は受け取るが混ぜない。** 公開している関数で、既存の呼び出し元はこの名前で値を渡して
+    いる。引数ごと消すと、更新しただけで呼び出し元が型の誤りで落ちる。
     """
+    del sdk
     return stable_hash(
         {
             "project": project,
             "environment": environment,
-            "sdk": sdk or "unknown",
             "agent_hint": agent_hint or "default",
+            "runtime": runtime or "default",
         },
         prefix="agent",
     )

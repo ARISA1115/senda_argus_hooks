@@ -182,6 +182,61 @@ def test_extraction_yields_values_for_each_provider_call_shape() -> None:
     assert not empty, f"値が空になる渡し方がある: {empty}"
 
 
+class _Repeated:
+    """組み込みの列ではない繰り返しの型。SDK が繰り返しの欄に使う型を模す。"""
+
+    def __init__(self, items) -> None:
+        self._items = list(items)
+
+    def __iter__(self):
+        return iter(self._items)
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def __getitem__(self, index):
+        return self._items[index]
+
+
+def test_a_repeated_field_container_is_read_like_a_list() -> None:
+    """SDK の繰り返しの欄で届いた指示からも、組み込みの列と同じ値が出ること。
+
+    指示の塊の部品の列も、役割つきの要素の列も、SDK では組み込みの列ではない型で届く。
+    組み込みの列だけを列として扱うと、その形の指示から本文が 1 文字も取れない。
+    """
+
+    class _Part:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+    class _Content:
+        def __init__(self, parts) -> None:
+            self.parts = parts
+
+    class _ModelHolder:
+        _system_instruction = _Content(_Repeated([_Part(_LONG), _Part(_LONG2)]))
+
+    expected = system_prompt_line_digests(_LONG + "\n" + _LONG2)
+    assert expected
+    assert system_prompt_line_digests(*collect_instruction_sources(None, None, _ModelHolder())) == expected
+
+    messages = _Repeated([{"role": "system", "content": _LONG}, {"role": "user", "content": _LONG2}])
+    assert system_prompt_line_digests(
+        *collect_instruction_sources({"messages": messages})
+    ) == system_prompt_line_digests(_LONG)
+
+
+def test_strings_and_mappings_are_not_read_as_sequences() -> None:
+    """文字列と写像は、要素の数と添字を持っていても列として辿らないこと。"""
+    from senda_argus_hooks.core.instruction_files import _is_sequence
+
+    assert not _is_sequence(_LONG)
+    assert not _is_sequence(b"bytes")
+    assert not _is_sequence({"role": "system"})
+    assert not _is_sequence(iter([1, 2]))
+    assert _is_sequence(_Repeated([1]))
+
+
 def test_non_instruction_roles_do_not_produce_digests() -> None:
     """指示でない役割は取り出さない。利用者の入力を指示として扱わない。"""
     sources = collect_instruction_sources({"messages": [{"role": "user", "content": _LONG}]})
