@@ -87,16 +87,43 @@ function redactString(value) {
     .replace(/(bearer\s+)[A-Za-z0-9._-]+/gi, "$1***REDACTED***");
 }
 
-function redact(value) {
-  if (Array.isArray(value)) return value.map(redact);
+// 再帰は呼び出しのスタックを使うため、深すぎる入れ子と循環は畳んで目印に置き換える。
+const MAX_DEPTH = 100;
+
+// 送り先が JSON にできる形へそろえる。秘匿の置き換えは redactFields のときだけ行う。
+function sanitize(value, redactFields, ancestors = new WeakSet(), depth = 0) {
+  if (typeof value === "bigint") return value.toString();
   if (value && typeof value === "object") {
-    const out = {};
-    for (const [key, item] of Object.entries(value)) {
-      out[key] = REDACT_FIELDS.has(key.toLowerCase()) ? "***REDACTED***" : redact(item);
+    if (ancestors.has(value)) return "[Circular]";
+    if (depth >= MAX_DEPTH) return "[MaxDepth]";
+    ancestors.add(value);
+    try {
+      if (Array.isArray(value)) return value.map((item) => sanitize(item, redactFields, ancestors, depth + 1));
+      const out = {};
+      for (const [key, item] of Object.entries(value)) {
+        out[key] = redactFields && REDACT_FIELDS.has(key.toLowerCase())
+          ? "***REDACTED***"
+          : sanitize(item, redactFields, ancestors, depth + 1);
+      }
+      return out;
+    } finally {
+      ancestors.delete(value);
     }
-    return out;
   }
-  return typeof value === "string" ? redactString(value) : value;
+  return redactFields && typeof value === "string" ? redactString(value) : value;
+}
+
+// 本文から事象を組み立てられなくても、起きたこと自体は本文を空にして残す。
+function sanitizeEvent(event, redactFields) {
+  let out;
+  try {
+    out = sanitize(event, redactFields);
+  } catch {
+    out = sanitize({...event, data: {}, source: {sdk: String(event.source?.sdk ?? "unknown")}, error: null}, redactFields);
+    out.security.observation_failed = true;
+  }
+  out.security.redacted = redactFields;
+  return out;
 }
 
 function normalizeUrl(raw) {
@@ -139,6 +166,7 @@ function defaultConfig(options = {}) {
     includeUrlPatterns: [],
     excludeUrlPatterns: [],
     useBeacon: true,
+    sendTimeoutMs: 30000,
     debug: false,
     ...options
   };
@@ -211,12 +239,15 @@ async function emit(eventType, {
     await previous;
     event.agent_id = await agentIdPending;
 
-    if (redactEnabled) {
-      event = redact(event);
-      event.security.redacted = true;
+    try {
+      event = sanitizeEvent(event, redactEnabled);
+    } catch {
+      recordDropped(1, "event could not be recorded");
+      return null;
     }
 
     state.events.push(event);
+    if (state.events.length > MAX_KEPT_EVENTS) state.events.splice(0, state.events.length - MAX_KEPT_EVENTS);
     state.buffer.push(event);
     if (state.buffer.length > MAX_BUFFER_EVENTS) {
       recordDropped(state.buffer.length - MAX_BUFFER_EVENTS, "send buffer is full");
@@ -230,10 +261,11 @@ async function emit(eventType, {
   }
 }
 
-// keepalive の本文はブラウザが 64 KiB までしか受けないため、1 回の本文をそれより小さく区切る。
+// keepalive と sendBeacon は、応答を読み終えていない要求の本文の合計を 64 KiB までしか受けない。
+// ページを閉じるときの送出だけ keepalive を使い、1 回の本文はそれより小さく区切る。
 const MAX_BODY_BYTES = 60 * 1024;
-const MAX_REQUEUE_EVENTS = 100;
 const MAX_BUFFER_EVENTS = 1000;
+const MAX_KEPT_EVENTS = 1000;
 const MAX_RETRY_DELAY_MS = 60000;
 const MAX_RETRY_AFTER_MS = 300000;
 const RETRY_STATUSES = new Set([401, 403, 408, 425, 429]);
@@ -254,7 +286,13 @@ function chunkEvents(events) {
   let current = [];
   let size = emptyBytes;
   for (const event of events) {
-    const itemBytes = bodyBytes(JSON.stringify(event)) + 1;
+    let itemBytes;
+    try {
+      itemBytes = bodyBytes(JSON.stringify(event)) + 1;
+    } catch {
+      recordDropped(1, "event is not serializable");
+      continue;
+    }
     if (current.length && size + itemBytes > MAX_BODY_BYTES) {
       chunks.push(current);
       current = [];
@@ -272,9 +310,11 @@ function recordDropped(count, reason) {
   globalThis.console?.warn?.(`[SendaArgus] dropped ${count} events: ${reason}`);
 }
 
+// 戻す分と送る前の分を合わせて MAX_BUFFER_EVENTS に収め、超えた古い分だけを捨てる。
 function requeue(events) {
-  const kept = events.slice(-MAX_REQUEUE_EVENTS);
-  if (events.length > kept.length) recordDropped(events.length - kept.length, "retry buffer is full");
+  const capacity = Math.max(0, MAX_BUFFER_EVENTS - state.buffer.length);
+  const kept = capacity ? events.slice(-capacity) : [];
+  if (events.length > kept.length) recordDropped(events.length - kept.length, "send buffer is full");
   state.buffer.unshift(...kept);
 }
 
@@ -285,11 +325,11 @@ function scheduleRetry(retryAfter) {
   state.retryAt = Date.now() + Math.max(hinted, state.retryDelayMs);
 }
 
-async function sendChunk(events, headers) {
+async function sendChunk(events, headers, force) {
   const body = JSON.stringify({events});
-  const withinKeepalive = bodyBytes(body) <= MAX_BODY_BYTES;
+  const withinLimit = bodyBytes(body) <= MAX_BODY_BYTES;
   // sendBeacon はヘッダを送れないため、鍵などのヘッダを設定した送り先には使わない。
-  if (!Object.keys(headers).length && withinKeepalive
+  if (!Object.keys(headers).length && withinLimit
       && globalThis.navigator?.sendBeacon && state.config.useBeacon !== false) {
     const queued = globalThis.navigator.sendBeacon(
       state.config.endpoint,
@@ -299,12 +339,26 @@ async function sendChunk(events, headers) {
   }
 
   const rawFetch = state.originals.fetch || globalThis.fetch;
-  const response = await rawFetch(state.config.endpoint, {
-    method: "POST",
-    headers: {"content-type": "application/json", ...headers},
-    body,
-    keepalive: withinKeepalive
-  });
+  // 応答しない送り先で送出が止まり続けないよう、ページを閉じるとき以外は時間で打ち切る。
+  const controller = !force && typeof AbortController === "function" ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), state.config.sendTimeoutMs) : null;
+  let response;
+  try {
+    response = await rawFetch(state.config.endpoint, {
+      method: "POST",
+      headers: {"content-type": "application/json", ...headers},
+      body,
+      keepalive: force && withinLimit,
+      ...(controller ? {signal: controller.signal} : {})
+    });
+    try {
+      await response?.text?.();
+    } catch {
+      // 本文を読めなくても、状態の判定には響かない
+    }
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
   if (response?.ok) return {outcome: "sent"};
   const status = response?.status ?? 0;
   if (!status || status >= 500 || RETRY_STATUSES.has(status)) {
@@ -315,6 +369,8 @@ async function sendChunk(events, headers) {
 
 async function flush({force = false} = {}) {
   if (!state.config || !state.buffer.length) return;
+  // 時計が後ろへ戻ると待ち時間が伸びるため、上限を超えて先の時刻は戻ったものとみなす。
+  if (state.retryAt - Date.now() > MAX_RETRY_AFTER_MS) state.retryAt = 0;
   if (!force && (state.flushing || Date.now() < state.retryAt)) return;
   state.flushing = true;
   try {
@@ -327,11 +383,18 @@ async function flush({force = false} = {}) {
     if (!state.config.endpoint) return;
 
     const headers = sentHeaders();
-    const chunks = chunkEvents(events);
+    let chunks;
+    try {
+      chunks = chunkEvents(events);
+    } catch {
+      requeue(events);
+      scheduleRetry();
+      return;
+    }
     for (let index = 0; index < chunks.length; index += 1) {
       let result;
       try {
-        result = await sendChunk(chunks[index], headers);
+        result = await sendChunk(chunks[index], headers, force);
       } catch {
         result = {outcome: "retry"};
       }
@@ -689,6 +752,7 @@ function register(options = {}) {
   state.installed = true;
   state.retryAt = 0;
   state.retryDelayMs = 0;
+  state.flushing = false;
 
   if (state.config.instrumentFetch) patchFetch();
   if (state.config.instrumentXHR) patchXHR();

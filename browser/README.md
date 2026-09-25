@@ -117,7 +117,11 @@ SendaArgus.register({
 
 When `headers` is set, for example an API key for the collector, batches are sent with `fetch` so that the headers reach the collector. Header entries whose value is `null` or `undefined` are ignored, and `navigator.sendBeacon` is used only when no header remains. For a cross-origin collector, the collector must allow the configured header names in its CORS policy; the hooks send no other custom header.
 
-Each request body is kept under 60 KiB so that it can be sent with `keepalive` while the page is closing. When the collector answers 401, 403, 408, 425, 429 or 5xx, or the request fails, the newest 100 events of the batch are kept and sent again after a backoff that starts at 1 second and doubles up to 60 seconds, or after `Retry-After`. Other 4xx answers drop the batch and log a warning. Closing the page flushes immediately regardless of the backoff.
+Each request body is kept under 60 KiB. Only the flush that runs while the page is closing uses `keepalive`, because browsers limit the total size of `keepalive` bodies in flight to 64 KiB. Other requests are abandoned after `sendTimeoutMs`, 30 seconds by default, and retried.
+
+When the collector answers 401, 403, 408, 425, 429 or 5xx, or the request fails, the batch is kept and sent again after a backoff that starts at 1 second and doubles up to 60 seconds, or after `Retry-After`. Other 4xx answers drop the batch and log a warning. Up to 1000 unsent events are kept; older ones are dropped with a warning. Closing the page flushes immediately regardless of the backoff.
+
+Values that JSON cannot represent are converted before they are recorded: `BigInt` becomes a string, and cycles and nesting deeper than 100 levels become `[Circular]` and `[MaxDepth]`. `getEvents()` returns the latest 1000 events.
 
 ## Classification behavior
 
