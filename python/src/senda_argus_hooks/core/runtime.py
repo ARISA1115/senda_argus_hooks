@@ -13,6 +13,7 @@ from .context import (
     get_trace_id,
     get_turn_id,
     new_run_id,
+    new_turn_id,
     reset_run_id,
     reset_span_id,
     reset_trace_id,
@@ -50,6 +51,26 @@ def _process_run_id() -> str:
                 run_id = new_run_id()
                 _process_run_ids[pid] = run_id
     return run_id
+
+
+def _fallback_turn_id(event_type: str) -> str | None:
+    """turn 境界が未指定の llm.request に一意な turn_id を採番する。
+
+    受動計装は span も set_turn_id も張らないため turn_id は空になる。取り込み側の
+    LLM_MESSAGES_HASH_MISMATCH は (run_id, turn_id) で messages_hash を比較するので、
+    プロセス寿命で安定な run_id (フォールバック run_id) と turn_id 空が重なると、
+    プロセス全 llm.request が単一バケットへ集約し、正当な別プロンプトごとに
+    messages_hash が変わって誤発火が氾濫する。llm.request の turn 境界ごとに一意な
+    turn_id を採番して付与し、正当な別プロンプトを別バケットへ分離する。
+
+    span / 明示 config / ContextVar の turn_id はこれより優先される。turn_id を比較キー
+    に使うのはこの照合だけのため、採番は llm.request に限定し他イベントの turn_id は空の
+    ままにする。明示 turn_id を共有する能動 SDK 経路と、同一 turn_id で messages_hash が
+    変わる真の改竄検知は不変のまま残す。
+    """
+    if event_type == "llm.request":
+        return new_turn_id()
+    return None
 
 
 def configure(config: RuntimeConfig, bus: EventBus) -> None:
@@ -105,7 +126,7 @@ def emit_event(
         session_id=_config.session_id,
         conversation_id=_config.conversation_id,
         run_id=get_run_id() or _config.run_id or _process_run_id(),
-        turn_id=get_turn_id() or _config.turn_id,
+        turn_id=get_turn_id() or _config.turn_id or _fallback_turn_id(event_type),
         agent_id=effective_agent_id(source, agent_id),
         purpose_id=purpose_id or get_purpose_id(),
         runtime=_runtime_metadata,
