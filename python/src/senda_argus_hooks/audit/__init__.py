@@ -1,3 +1,3 @@
-from .api import event, agent_decision, span, mcp_tool_call
+from .api import agent_decision, event, mcp_tool_call, span
 
-__all__ = ["event", "agent_decision", "span", "mcp_tool_call"]
+__all__ = ["agent_decision", "event", "mcp_tool_call", "span"]

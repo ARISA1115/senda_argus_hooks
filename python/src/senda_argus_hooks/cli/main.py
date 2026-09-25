@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import sys
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from senda_argus_hooks.exporters.parquet import flatten_event
 
@@ -102,10 +104,8 @@ def cmd_convert(args) -> int:
         with out.open("w", encoding="utf-8") as f:
             for event in events:
                 if "raw_json" in event:
-                    try:
+                    with contextlib.suppress(Exception):
                         event = json.loads(event["raw_json"])
-                    except Exception:
-                        pass
                 f.write(json.dumps(event, ensure_ascii=False, default=str) + "\n")
         print(str(out))
         return 0
@@ -353,7 +353,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return int(args.func(args))
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - CLI の最上位で全ての失敗を終了コードに変える
         print(f"error: {exc}", file=sys.stderr)
         return 2
 

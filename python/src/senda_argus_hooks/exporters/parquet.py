@@ -8,7 +8,6 @@ from typing import Any
 
 from .base import BaseExporter
 
-
 _FLAT_KEYS = [
     "schema_version",
     "event_id",

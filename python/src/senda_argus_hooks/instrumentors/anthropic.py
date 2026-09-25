@@ -1,11 +1,22 @@
 from __future__ import annotations
 
+import contextlib
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from senda_argus_hooks.core.hashing import sha256_value
+from senda_argus_hooks.core.instruction_files import (
+    collect_instruction_sources,
+    system_prompt_line_digests,
+    system_prompt_pair_digests,
+)
+from senda_argus_hooks.core.response_meta import (
+    extract_response_model as _extract_response_model,
+)
 from senda_argus_hooks.core.runtime import emit_event, get_config
-from .base import BaseInstrumentor
+
+from .base import BaseInstrumentor, audit_guard
 
 
 class AnthropicInstrumentor(BaseInstrumentor):
@@ -17,21 +28,19 @@ class AnthropicInstrumentor(BaseInstrumentor):
     def instrument(self) -> bool:
         try:
             import anthropic
-        except Exception:
+        except Exception:  # noqa: BLE001 - 任意の SDK の import 失敗は種類を問わず未導入として扱う
             return False
         patched = False
         candidates = []
-        try:
+        with contextlib.suppress(Exception):
             candidates.append((anthropic.resources.messages.Messages, "create", "messages.create"))
-        except Exception:
-            pass
         for cls, method_name, op in candidates:
             current = getattr(cls, method_name, None)
             if current is None or hasattr(current, "__senda_patched__"):
                 continue
             original = current
             wrapped = self._wrap(original, op)
-            setattr(wrapped, "__senda_patched__", True)
+            wrapped.__senda_patched__ = True
             setattr(cls, method_name, wrapped)
             self._patches.append((cls, method_name, original))
             patched = True
@@ -44,13 +53,35 @@ class AnthropicInstrumentor(BaseInstrumentor):
             input_payload = _input_payload(args, kwargs, cfg.capture_prompt, cfg.capture_hash)
             try:
                 response = original(obj, *args, **kwargs)
+            except Exception as exc:
+                latency_ms = int((time.perf_counter() - start) * 1000)
+                emit_event("llm.error", source={"component": "instrumentor", "sdk": "anthropic", "provider": "anthropic", "operation": operation}, data={"llm": {"provider": "anthropic", "operation": operation, "model": kwargs.get("model"), "input": input_payload}}, status="error", latency_ms=latency_ms, error={"type": exc.__class__.__name__, "message": str(exc)})
+                raise
+
+            # 観測の後処理は本来の呼び出しから隔離する。ここで失敗しても応答は返す。
+            with audit_guard(operation):
                 latency_ms = int((time.perf_counter() - start) * 1000)
                 output_payload = _safe_response(response) if cfg.capture_response else {"response_hash": sha256_value(_safe_response(response))}
                 messages_hash = sha256_value(kwargs.get("messages") or [])
+                # 指示の載る場所は提供元と操作ごとに違う。応答系の要求では instructions と input に
+                # 載り、位置引数で渡る形もある。名前を 2 つ決め打ちすると、その形の呼び出しでは
+                # 行も組も空になり、判定が静かに止まる。場所の網羅は共通の収集へ任せる。
+                _sources = collect_instruction_sources(kwargs, args)
+                system_prompt_line_hashes = system_prompt_line_digests(*_sources)
+                system_prompt_pair_hashes = system_prompt_pair_digests(*_sources)
                 llm_data: dict[str, Any] = {"provider": "anthropic", "operation": operation, "model": kwargs.get("model"), "messages_hash": messages_hash, "input": input_payload, "output": output_payload}
                 usage = _extract_usage(response)
                 if usage:
                     llm_data["usage"] = usage
+                response_model = _extract_response_model(response)
+                if response_model:
+                    llm_data["response_model"] = response_model
+                if system_prompt_line_hashes:
+                    llm_data["system_prompt_line_hashes"] = system_prompt_line_hashes
+                # 組は行と独立に載せる。行の内側へ入れると、行を出す条件を変えたときに組が
+                # 黙って止まる。2 つは別々の導出で、片方が空でももう片方は成立する。
+                if system_prompt_pair_hashes:
+                    llm_data["system_prompt_pair_hashes"] = system_prompt_pair_hashes
                 emit_event(
                     "llm.request",
                     source={"component": "instrumentor", "sdk": "anthropic", "provider": "anthropic", "operation": operation},
@@ -58,11 +89,22 @@ class AnthropicInstrumentor(BaseInstrumentor):
                     status="success",
                     latency_ms=latency_ms,
                 )
-                return response
-            except Exception as exc:
-                latency_ms = int((time.perf_counter() - start) * 1000)
-                emit_event("llm.error", source={"component": "instrumentor", "sdk": "anthropic", "provider": "anthropic", "operation": operation}, data={"llm": {"provider": "anthropic", "operation": operation, "model": kwargs.get("model"), "input": input_payload}}, status="error", latency_ms=latency_ms, error={"type": exc.__class__.__name__, "message": str(exc)})
-                raise
+                offered = _offered_tool_names(kwargs)
+                selected = _selected_tool_names(response)
+                if offered and selected:
+                    alternatives = [{"name": name} for name in offered]
+                    for selected_tool in selected:
+                        emit_event(
+                            "agent.decision",
+                            source={"component": "instrumentor", "sdk": "anthropic", "provider": "anthropic", "operation": operation},
+                            data={
+                                "alternatives": alternatives,
+                                "selected_tool": selected_tool,
+                            },
+                            status="success",
+                            latency_ms=latency_ms,
+                        )
+            return response
         return wrapper
 
     def uninstrument(self) -> bool:
@@ -130,13 +172,48 @@ def _extract_messages(args, kwargs) -> list[Any] | None:
         messages = list(messages)
     return messages if isinstance(messages, list) else None
 
+def _offered_tool_names(kwargs) -> list[str]:
+    """Messages API に渡された提示ツール集合の名前を取り出す。
+
+    Anthropic は tools=[{"name":..., "input_schema":...}] の形をとる。
+    """
+    tools = kwargs.get("tools")
+    names: list[str] = []
+    if isinstance(tools, (list, tuple)):
+        for tool in tools:
+            name = ""
+            if isinstance(tool, dict):
+                name = str(tool.get("name") or "")
+            if name:
+                names.append(name)
+    return names
+
+
+def _selected_tool_names(response: Any) -> list[str]:
+    """LLM 応答でモデルが選択したツール名を順序を保って全て取り出す。
+
+    Anthropic は content に複数の tool_use ブロックが入りうる。最初の 1 件で
+    打ち切ると後続の選択が監査から漏れるため、全て収集する。
+    """
+    resp = _safe_response(response)
+    if not isinstance(resp, dict):
+        return []
+    names: list[str] = []
+    content = resp.get("content")
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                name = str(block.get("name") or "")
+                if name:
+                    names.append(name)
+    return names
+
+
 def _safe_response(response: Any) -> Any:
     for attr in ("model_dump", "dict"):
         if hasattr(response, attr):
-            try:
+            with contextlib.suppress(Exception):
                 return getattr(response, attr)()
-            except Exception:
-                pass
     return str(response)
 
 
