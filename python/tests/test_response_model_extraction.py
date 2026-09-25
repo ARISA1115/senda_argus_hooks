@@ -124,6 +124,83 @@ def test_litellm_instrumentor_emits_response_model_on_swap(tmp_path, monkeypatch
     assert llm_event["data"]["llm"]["response_model"] == "gpt-3.5-turbo"
 
 
+def test_ollama_instrumentor_emits_response_model_and_digest(tmp_path, monkeypatch):
+    from senda_argus_hooks.instrumentors.ollama import _MODEL_DIGEST_CACHE
+
+    _MODEL_DIGEST_CACHE.clear()
+
+    def chat(*args, **kwargs):
+        # リクエストで指定されたモデルと異なるモデルが応答するすり替えを再現する
+        return _Response({"message": {"content": "ok"}, "model": "qwen2.5:7b"})
+
+    fake_ollama = types.ModuleType("ollama")
+    fake_ollama.chat = chat
+    fake_ollama.list = lambda: {
+        "models": [{"model": "argus-qwen25-14b-toolplan:latest", "digest": "sha256:abc123"}]
+    }
+    monkeypatch.setitem(sys.modules, "ollama", fake_ollama)
+
+    path = tmp_path / "events.jsonl"
+    register(
+        project="test-ollama-swap",
+        exporters=[{"type": "jsonl", "path": str(path)}],
+        auto_instrument=True,
+        instrument_openai=False,
+        instrument_anthropic=False,
+        instrument_litellm=False,
+        instrument_mcp=False,
+        instrument_argus_sdk=False,
+        instrument_openai_agents=False,
+        capture_prompt=False,
+        capture_response=False,
+    )
+    fake_ollama.chat(model="argus-qwen25-14b-toolplan:latest", messages=[])
+    shutdown()
+    _MODEL_DIGEST_CACHE.clear()
+
+    events = _read_events(path)
+    llm_event = next(e for e in events if e["event_type"] == "llm.request")
+    assert llm_event["data"]["llm"]["model"] == "argus-qwen25-14b-toolplan:latest"
+    assert llm_event["data"]["llm"]["response_model"] == "qwen2.5:7b"
+    assert llm_event["data"]["llm"]["model_digest"] == "sha256:abc123"
+
+
+def test_ollama_instrumentor_omits_digest_when_list_unavailable(tmp_path, monkeypatch):
+    from senda_argus_hooks.instrumentors.ollama import _MODEL_DIGEST_CACHE
+
+    _MODEL_DIGEST_CACHE.clear()
+
+    def chat(*args, **kwargs):
+        return _Response({"message": {"content": "ok"}, "model": kwargs.get("model")})
+
+    fake_ollama = types.ModuleType("ollama")
+    fake_ollama.chat = chat
+    # list API を持たない環境ではダイジェスト無しで観測を継続する
+    monkeypatch.setitem(sys.modules, "ollama", fake_ollama)
+
+    path = tmp_path / "events.jsonl"
+    register(
+        project="test-ollama-nodigest",
+        exporters=[{"type": "jsonl", "path": str(path)}],
+        auto_instrument=True,
+        instrument_openai=False,
+        instrument_anthropic=False,
+        instrument_litellm=False,
+        instrument_mcp=False,
+        instrument_argus_sdk=False,
+        instrument_openai_agents=False,
+        capture_prompt=False,
+        capture_response=False,
+    )
+    fake_ollama.chat(model="qwen2.5:7b", messages=[])
+    shutdown()
+    _MODEL_DIGEST_CACHE.clear()
+
+    events = _read_events(path)
+    llm_event = next(e for e in events if e["event_type"] == "llm.request")
+    assert "model_digest" not in llm_event["data"]["llm"]
+
+
 def test_langchain_handler_emits_requested_and_response_model(tmp_path: Path):
     path = tmp_path / "events.jsonl"
     register(project="test-langchain-swap", exporters=[{"type": "jsonl", "path": str(path)}])
