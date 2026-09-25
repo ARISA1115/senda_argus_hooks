@@ -4,6 +4,10 @@ import functools
 import time
 from typing import Any, Callable
 
+from senda_argus_hooks.core.instruction_files import (
+    collect_instruction_sources,
+    system_prompt_line_digests,
+)
 from senda_argus_hooks.core.hashing import sha256_value
 from senda_argus_hooks.core.response_meta import extract_response_model as _extract_response_model
 from senda_argus_hooks.core.runtime import emit_event, get_config
@@ -93,6 +97,9 @@ class OllamaInstrumentor(BaseInstrumentor):
             with audit_guard(operation):
                 latency_ms = int((time.perf_counter() - start) * 1000)
                 output_payload = _safe_response(response) if cfg.capture_response else {"response_hash": sha256_value(_safe_response(response))}
+                system_prompt_line_hashes = system_prompt_line_digests(
+                    messages=kwargs.get("messages"), system=kwargs.get("system")
+                )
                 llm_data: dict[str, Any] = {
                     "provider": "ollama",
                     "operation": operation,
@@ -109,6 +116,8 @@ class OllamaInstrumentor(BaseInstrumentor):
                 model_digest = _get_model_digest(model)
                 if model_digest:
                     llm_data["model_digest"] = model_digest
+                if system_prompt_line_hashes:
+                    llm_data["system_prompt_line_hashes"] = system_prompt_line_hashes
                 emit_event(
                     "llm.request",
                     source={"component": "instrumentor", "sdk": "ollama", "provider": "ollama", "operation": operation},

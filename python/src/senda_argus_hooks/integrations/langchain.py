@@ -3,6 +3,10 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from senda_argus_hooks.core.instruction_files import (
+    collect_instruction_sources,
+    system_prompt_line_digests,
+)
 from senda_argus_hooks.core.hashing import sha256_value
 from senda_argus_hooks.core.identity import derive_tool_purpose_id
 from senda_argus_hooks.core.runtime import emit_event, get_config
@@ -30,6 +34,9 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
         self.capture_payloads = capture_payloads
         self._starts: dict[str, float] = {}
         self._messages_hashes: dict[str, str] = {}
+        # 指示の行ダイジェストは役割の分かる経路でだけ控える。役割の無い prompts は指示と
+        # 利用者入力が 1 つの文字列に混ざるため、利用者の入力を指示として扱ってしまう。
+        self._prompt_line_hashes: dict[str, list[str]] = {}
         self._tool_types: dict[str, str] = {}
         self._requested_models: dict[str, str] = {}
 
@@ -55,6 +62,9 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
         requested_model = _requested_model(serialized, kwargs)
         if requested_model:
             self._requested_models[run_id] = requested_model
+        line_hashes = system_prompt_line_digests(*collect_instruction_sources({"messages": messages}))
+        if line_hashes:
+            self._prompt_line_hashes[run_id] = line_hashes
         payload = {"serialized": serialized, "messages": messages, "kwargs": _safe_kwargs(kwargs)}
         emit_event(
             "llm.request.started",
@@ -82,6 +92,9 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
         response_model = _extract_response_model(response)
         if response_model:
             llm_data["response_model"] = response_model
+        line_hashes = self._prompt_line_hashes.pop(run_id, None)
+        if line_hashes:
+            llm_data["system_prompt_line_hashes"] = line_hashes
         emit_event(
             "llm.request",
             source={"component": "integration", "sdk": self.framework, "operation": "on_llm_end"},
