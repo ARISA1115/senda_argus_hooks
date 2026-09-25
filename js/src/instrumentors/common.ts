@@ -1,6 +1,6 @@
 import { performance } from "node:perf_hooks";
 import { sha256Value } from "../core/hashing.js";
-import { emitEvent, getConfig } from "../runtime.js";
+import { emitEvent, getConfig, observe } from "../runtime.js";
 
 type AnyFn = (...args: any[]) => any;
 const patched = Symbol.for("senda.argus.patched");
@@ -17,32 +17,32 @@ export function patchAsyncMethod(target: any, method: string, opts: {
   const wrapped: AnyFn & { [patched]?: boolean } = function(this: unknown, ...args: any[]) {
     const cfg = getConfig();
     const started = performance.now();
-    const base = opts.input(args);
-    try {
-      const result = original.apply(this, args);
-      if (result && typeof result.then === "function") {
-        return result.then((value: any) => {
-          const output = opts.output?.(value) ?? { response_hash: sha256Value(safeValue(value)) };
-          emitEvent("llm.request", {
-            source: { component: "instrumentor", sdk: opts.sdk, provider: opts.provider, operation: opts.operation },
-            data: { llm: { provider: opts.provider, operation: opts.operation, ...base, output: cfg.captureResponse ? safeValue(value) : output } },
-            status: "success", latencyMs: Math.round(performance.now() - started)
-          });
-          return value;
-        }, (error: any) => {
-          emitError(error, base, opts, started); throw error;
-        });
-      }
-      const output = opts.output?.(result) ?? { response_hash: sha256Value(safeValue(result)) };
+    let base: Record<string, unknown> = {};
+    observe(() => { base = opts.input(args); });
+    const emitSuccess = (value: any) => observe(() => {
+      const output = opts.output?.(value) ?? { response_hash: sha256Value(safeValue(value)) };
       emitEvent("llm.request", {
         source: { component: "instrumentor", sdk: opts.sdk, provider: opts.provider, operation: opts.operation },
-        data: { llm: { provider: opts.provider, operation: opts.operation, ...base, output: cfg.captureResponse ? safeValue(result) : output } },
+        data: { llm: { provider: opts.provider, operation: opts.operation, ...base, output: cfg.captureResponse ? safeValue(value) : output } },
         status: "success", latencyMs: Math.round(performance.now() - started)
       });
-      return result;
+    });
+    let result: any;
+    try {
+      result = original.apply(this, args);
     } catch (error) {
       emitError(error, base, opts, started); throw error;
     }
+    if (result && typeof result.then === "function") {
+      return result.then((value: any) => {
+        emitSuccess(value);
+        return value;
+      }, (error: any) => {
+        emitError(error, base, opts, started); throw error;
+      });
+    }
+    emitSuccess(result);
+    return result;
   };
   wrapped[patched] = true;
   target[method] = wrapped;
@@ -50,12 +50,12 @@ export function patchAsyncMethod(target: any, method: string, opts: {
 }
 
 function emitError(error: any, base: Record<string, unknown>, opts: any, started: number) {
-  emitEvent("llm.error", {
+  observe(() => emitEvent("llm.error", {
     source: { component: "instrumentor", sdk: opts.sdk, provider: opts.provider, operation: opts.operation },
     data: { llm: { provider: opts.provider, operation: opts.operation, ...base } },
     status: "error", latencyMs: Math.round(performance.now() - started),
     error: { type: error?.constructor?.name ?? "Error", message: String(error?.message ?? error) }
-  });
+  }));
 }
 
 export function llmInput(args: any[], payloadIndex = 0): Record<string, unknown> {

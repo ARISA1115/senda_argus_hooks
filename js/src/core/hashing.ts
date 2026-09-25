@@ -14,9 +14,16 @@ function normalize(value: unknown): unknown {
   return value;
 }
 
+// JSON.stringify は undefined や関数に対して文字列でなく undefined を返すため、必ず文字列へそろえる。
 export function stableStringify(value: unknown): string {
-  try { return JSON.stringify(normalize(value)); }
-  catch { return String(value); }
+  try {
+    const text = JSON.stringify(normalize(value));
+    if (typeof text === "string") return text;
+  } catch {
+    // 循環や深すぎる入れ子は下の String へ落とす
+  }
+  try { return String(value); }
+  catch { return "[unserializable]"; }
 }
 
 export function sha256Value(value: unknown): string {
