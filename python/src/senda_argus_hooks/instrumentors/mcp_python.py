@@ -6,7 +6,7 @@ from typing import Any, Callable
 from senda_argus_hooks.core.instruction_files import classify_instruction_write
 from senda_argus_hooks.core.hashing import sha256_value
 from senda_argus_hooks.core.resource_access import classify_read_resource, classify_resource_access
-from senda_argus_hooks.core.identity import data_source_hash, derive_mcp_profile_id, derive_purpose_id, mcp_data_source_profile, normalize_url
+from senda_argus_hooks.core.identity import data_source_hash, derive_mcp_profile_id, derive_purpose_id, mcp_data_source_profile, normalize_url, resolve_mcp_server_name
 from senda_argus_hooks.core.runtime import emit_event, get_config
 from .base import BaseInstrumentor, audit_guard
 
@@ -112,7 +112,7 @@ def _mcp_metadata(obj, operation: str, args, kwargs) -> dict[str, Any]:
     cfg = get_config()
     arguments = _extract_arguments(operation, args, kwargs)
     tool_name = arguments.get("tool")
-    server_name = getattr(obj, "server", None) or getattr(obj, "server_name", None) or getattr(obj, "name", None) or "unknown"
+    server_name = resolve_mcp_server_name(obj)
     server_url = getattr(obj, "url", None) or getattr(obj, "base_url", None) or getattr(obj, "server_url", None)
     capability = kwargs.get("capability") or getattr(obj, "capability", None)
     args_hash = sha256_value(arguments)
