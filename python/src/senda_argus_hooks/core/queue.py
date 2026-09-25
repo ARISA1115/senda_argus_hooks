@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import atexit
+import contextlib
 from threading import Lock
 from typing import Any
 
@@ -17,20 +18,14 @@ class EventBus:
 
     def emit(self, event: dict[str, Any]) -> None:
         # Hook SDK must never break the host application.
-        try:
-            with self.lock:
-                self.buffer.append(event)
-                if len(self.buffer) >= self.batch_size:
-                    self._flush_locked()
-        except Exception:
-            pass
+        with contextlib.suppress(Exception), self.lock:
+            self.buffer.append(event)
+            if len(self.buffer) >= self.batch_size:
+                self._flush_locked()
 
     def flush(self) -> None:
-        try:
-            with self.lock:
-                self._flush_locked()
-        except Exception:
-            pass
+        with contextlib.suppress(Exception), self.lock:
+            self._flush_locked()
 
     def _flush_locked(self) -> None:
         if not self.buffer:
@@ -38,16 +33,12 @@ class EventBus:
         events = self.buffer
         self.buffer = []
         for exporter in self.exporters:
-            try:
+            # Do not break user workloads due to audit exporter errors.
+            with contextlib.suppress(Exception):
                 exporter.export(events)
-            except Exception:
-                # Do not break user workloads due to audit exporter errors.
-                pass
 
     def shutdown(self) -> None:
         self.flush()
         for exporter in self.exporters:
-            try:
+            with contextlib.suppress(Exception):
                 exporter.shutdown()
-            except Exception:
-                pass

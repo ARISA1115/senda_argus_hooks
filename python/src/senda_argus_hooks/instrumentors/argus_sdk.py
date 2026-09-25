@@ -1,14 +1,33 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from senda_argus_hooks.core.hashing import sha256_value
-from senda_argus_hooks.core.identity import data_source_hash, derive_mcp_profile_id, derive_purpose_id, mcp_data_source_profile, normalize_url
+from senda_argus_hooks.core.identity import (
+    data_source_hash,
+    derive_mcp_profile_id,
+    derive_purpose_id,
+    mcp_data_source_profile,
+    normalize_url,
+    resolve_mcp_server_name,
+)
+from senda_argus_hooks.core.instruction_files import (
+    classify_instruction_write,
+    collect_instruction_sources,
+    system_prompt_line_digests,
+    system_prompt_pair_digests,
+)
+from senda_argus_hooks.core.purpose_registry import (
+    register_mcp_tool_source,
+    selected_tool_purpose,
+)
 from senda_argus_hooks.core.runtime import emit_event, get_config
-from senda_argus_hooks.core.purpose_registry import register_mcp_tool_source, selected_tool_purpose
-from .base import BaseInstrumentor
+
+from .base import BaseInstrumentor, audit_guard
 
 
 class ArgusSDKInstrumentor(BaseInstrumentor):
@@ -20,7 +39,12 @@ class ArgusSDKInstrumentor(BaseInstrumentor):
     def instrument(self) -> bool:
         patched = False
         try:
-            from senda_argus_hooks.sdk import MockLLMClient, OllamaClient, MockMCPClient, PromptOpsClient
+            from senda_argus_hooks.sdk import (
+                MockLLMClient,
+                MockMCPClient,
+                OllamaClient,
+                PromptOpsClient,
+            )
             candidates = [
                 (MockLLMClient, "generate_answer", "llm", "mock.generate_answer"),
                 (MockLLMClient, "refine_prompt", "llm", "mock.refine_prompt"),
@@ -29,14 +53,14 @@ class ArgusSDKInstrumentor(BaseInstrumentor):
                 (PromptOpsClient, "agent_decision", "promptops", "agent.decision"),
                 (PromptOpsClient, "run_completed", "promptops", "promptops.run.completed"),
             ]
-        except Exception:
+        except Exception:  # noqa: BLE001 - 計装を有効にできなくても呼び出し元を止めない
             candidates = []
         for cls, method_name, kind, operation in candidates:
             original = getattr(cls, method_name, None)
             if original is None or hasattr(original, "__senda_patched__"):
                 continue
             wrapped = self._wrap_llm(original, operation) if kind == "llm" else (self._wrap_mcp(original, operation) if kind == "mcp" else self._wrap_promptops(original, operation))
-            setattr(wrapped, "__senda_patched__", True)
+            wrapped.__senda_patched__ = True
             setattr(cls, method_name, wrapped)
             self._patches.append((cls, method_name, original))
             patched = True
@@ -53,36 +77,6 @@ class ArgusSDKInstrumentor(BaseInstrumentor):
             messages_hash = sha256_value(args[0]) if args else None
             try:
                 response = original(obj, *args, **kwargs)
-                latency_ms = int((time.perf_counter() - start) * 1000)
-                output_payload = _output_payload(response, cfg.capture_response, cfg.capture_hash)
-                if isinstance(response, dict):
-                    model = response.get("model") or model
-                    purpose = response.get("purpose") or purpose
-                    report, actual_tools = _extract_senda_argus_report(response)
-                    if report is not None:
-                        steering_detected = bool(actual_tools) and report.get("tool_name") not in {
-                            (tc.get("function") or {}).get("name") for tc in actual_tools if isinstance(tc, dict)
-                        }
-                        emit_event(
-                            "llm.tool_selection.proposed",
-                            source={"component": "instrumentor", "sdk": "senda_argus_hooks.sdk", "provider": provider, "operation": operation},
-                            data={"senda_argus_report": report, "steering_detected": steering_detected},
-                            status="success",
-                        )
-                llm_data = {"provider": provider, "operation": operation, "purpose": purpose, "model": model, "input": input_payload, "output": output_payload}
-                if messages_hash:
-                    llm_data["messages_hash"] = messages_hash
-                usage = _extract_usage(response)
-                if usage:
-                    llm_data["usage"] = usage
-                emit_event(
-                    "llm.request",
-                    source={"component": "instrumentor", "sdk": "senda_argus_hooks.sdk", "provider": provider, "operation": operation},
-                    data={"llm": llm_data},
-                    status="success",
-                    latency_ms=latency_ms,
-                )
-                return response
             except Exception as exc:
                 latency_ms = int((time.perf_counter() - start) * 1000)
                 emit_event(
@@ -94,6 +88,72 @@ class ArgusSDKInstrumentor(BaseInstrumentor):
                     error={"type": exc.__class__.__name__, "message": str(exc)},
                 )
                 raise
+
+            # 観測の後処理は本来の呼び出しから隔離する。ここで失敗しても応答は返す。
+            with audit_guard(operation):
+                latency_ms = int((time.perf_counter() - start) * 1000)
+                output_payload = _output_payload(response, cfg.capture_response, cfg.capture_hash)
+                # レスポンスが自己申告した実モデルは model を上書きせず response_model として
+                # 別フィールドで保持する。上書きするとリクエスト時に指定したモデルの情報が
+                # 失われ、Argus 側の ModelSwapRule がすり替えを検知できなくなる。
+                response_model = None
+                if isinstance(response, dict):
+                    response_model = response.get("model")
+                    purpose = response.get("purpose") or purpose
+                    report, actual_tools = _extract_senda_argus_report(response)
+                    if report is not None:
+                        actual_names = [
+                            (tc.get("function") or {}).get("name")
+                            for tc in actual_tools if isinstance(tc, dict)
+                        ]
+                        actual_names = [n for n in actual_names if n]
+                        steering_detected = bool(actual_tools) and report.get("tool_name") not in set(actual_names)
+                        proposed_data: dict[str, Any] = {
+                            "senda_argus_report": report,
+                            "steering_detected": steering_detected,
+                        }
+                        # 誘導検知が読む offered/chosen は自己申告でなく独立観測から埋める。offered は
+                        # リクエストが LLM に提示したツール集合、chosen は応答の実 tool 呼び出し。自己申告
+                        # (report) は上の consistency 判定にのみ使い、観測でない値を誘導判定へ流さない。
+                        observed_offered = _offered_tool_names(kwargs)
+                        if observed_offered:
+                            proposed_data["alternatives"] = [{"name": n} for n in observed_offered]
+                        if actual_names:
+                            proposed_data["selected_tool"] = actual_names[0]
+                        emit_event(
+                            "llm.tool_selection.proposed",
+                            source={"component": "instrumentor", "sdk": "senda_argus_hooks.sdk", "provider": provider, "operation": operation},
+                            data=proposed_data,
+                            status="success",
+                        )
+                # 指示の載る場所は提供元と操作ごとに違う。応答系の要求では instructions と input に
+                # 載り、位置引数で渡る形もある。名前を 2 つ決め打ちすると、その形の呼び出しでは
+                # 行も組も空になり、判定が静かに止まる。場所の網羅は共通の収集へ任せる。
+                _sources = collect_instruction_sources(kwargs, args)
+                system_prompt_line_hashes = system_prompt_line_digests(*_sources)
+                system_prompt_pair_hashes = system_prompt_pair_digests(*_sources)
+                llm_data = {"provider": provider, "operation": operation, "purpose": purpose, "model": model, "input": input_payload, "output": output_payload}
+                if messages_hash:
+                    llm_data["messages_hash"] = messages_hash
+                usage = _extract_usage(response)
+                if usage:
+                    llm_data["usage"] = usage
+                if isinstance(response_model, str) and response_model.strip():
+                    llm_data["response_model"] = response_model
+                if system_prompt_line_hashes:
+                    llm_data["system_prompt_line_hashes"] = system_prompt_line_hashes
+                # 組は行と独立に載せる。行の内側へ入れると、行を出す条件を変えたときに組が
+                # 黙って止まる。2 つは別々の導出で、片方が空でももう片方は成立する。
+                if system_prompt_pair_hashes:
+                    llm_data["system_prompt_pair_hashes"] = system_prompt_pair_hashes
+                emit_event(
+                    "llm.request",
+                    source={"component": "instrumentor", "sdk": "senda_argus_hooks.sdk", "provider": provider, "operation": operation},
+                    data={"llm": llm_data},
+                    status="success",
+                    latency_ms=latency_ms,
+                )
+            return response
         return wrapper
 
     def _wrap_mcp(self, original: Callable, operation: str) -> Callable:
@@ -103,7 +163,7 @@ class ArgusSDKInstrumentor(BaseInstrumentor):
             tool = args[0] if args else kwargs.get("tool") or kwargs.get("name")
             arguments = args[1] if len(args) > 1 else kwargs.get("arguments") or {}
             capability = kwargs.get("capability")
-            server = getattr(obj, "server", "unknown")
+            server = resolve_mcp_server_name(obj)
             server_url = getattr(obj, "url", None) or getattr(obj, "base_url", None) or getattr(obj, "server_url", None)
             purpose_profile = mcp_data_source_profile(mcp_server_name=server, mcp_server_url=server_url, tool_name=tool, capability=capability)
             purpose_id = derive_purpose_id(mcp_server_name=server, mcp_server_url=server_url, tool_name=tool, capability=capability)
@@ -129,6 +189,11 @@ class ArgusSDKInstrumentor(BaseInstrumentor):
                 "mcp_profile_id": mcp_profile_id,
                 "arguments_hash": sha256_value(raw_args_payload),
             }
+            # 組み込みの MCP 経路からも指示ファイルへの書き込みが起こる。別経路の計装だけに
+            # 分類を置くと、こちらを通る書き込みが観測されず伝播の起点が欠ける。
+            _written = classify_instruction_write(arguments)
+            if _written:
+                base_mcp.update(_written)
             if cfg.capture_arguments:
                 base_mcp["arguments"] = args_payload
             emit_event(
@@ -140,6 +205,21 @@ class ArgusSDKInstrumentor(BaseInstrumentor):
             )
             try:
                 response = original(obj, *args, **kwargs)
+            except Exception as exc:
+                latency_ms = int((time.perf_counter() - start) * 1000)
+                emit_event(
+                    "mcp.tool_call.failed",
+                    source={"component": "instrumentor", "sdk": "senda_argus_hooks.sdk", "operation": operation},
+                    data={"mcp": base_mcp},
+                    status="error",
+                    latency_ms=latency_ms,
+                    error={"type": exc.__class__.__name__, "message": str(exc)},
+                    purpose_id=purpose_id,
+                )
+                raise
+
+            # 観測の後処理は本来の呼び出しから隔離する。ここで失敗しても応答は返す。
+            with audit_guard(operation):
                 latency_ms = int((time.perf_counter() - start) * 1000)
                 raw_result = _safe_response(response)
                 result_payload = raw_result if cfg.capture_result else None
@@ -155,19 +235,7 @@ class ArgusSDKInstrumentor(BaseInstrumentor):
                     latency_ms=latency_ms,
                     purpose_id=purpose_id,
                 )
-                return response
-            except Exception as exc:
-                latency_ms = int((time.perf_counter() - start) * 1000)
-                emit_event(
-                    "mcp.tool_call.failed",
-                    source={"component": "instrumentor", "sdk": "senda_argus_hooks.sdk", "operation": operation},
-                    data={"mcp": base_mcp},
-                    status="error",
-                    latency_ms=latency_ms,
-                    error={"type": exc.__class__.__name__, "message": str(exc)},
-                    purpose_id=purpose_id,
-                )
-                raise
+            return response
         return wrapper
 
 
@@ -176,6 +244,13 @@ class ArgusSDKInstrumentor(BaseInstrumentor):
             start = time.perf_counter()
             try:
                 response = original(obj, *args, **kwargs)
+            except Exception as exc:
+                latency_ms = int((time.perf_counter() - start) * 1000)
+                emit_event("promptops.error", source={"component": "instrumentor", "sdk": "senda_argus_hooks.sdk", "operation": operation}, data={"args": args, "kwargs": kwargs}, status="error", latency_ms=latency_ms, error={"type": exc.__class__.__name__, "message": str(exc)})
+                raise
+
+            # 観測の後処理は本来の呼び出しから隔離する。ここで失敗しても応答は返す。
+            with audit_guard(operation):
                 latency_ms = int((time.perf_counter() - start) * 1000)
                 event_type = operation
                 source = {"component": "instrumentor", "sdk": "senda_argus_hooks.sdk", "operation": operation}
@@ -190,11 +265,7 @@ class ArgusSDKInstrumentor(BaseInstrumentor):
                         for key, value in purpose_meta.items():
                             data.setdefault(key, value)
                 emit_event(event_type, source=source, data=data, status="success", latency_ms=latency_ms)
-                return response
-            except Exception as exc:
-                latency_ms = int((time.perf_counter() - start) * 1000)
-                emit_event("promptops.error", source={"component": "instrumentor", "sdk": "senda_argus_hooks.sdk", "operation": operation}, data={"args": args, "kwargs": kwargs}, status="error", latency_ms=latency_ms, error={"type": exc.__class__.__name__, "message": str(exc)})
-                raise
+            return response
         return wrapper
 
     def uninstrument(self) -> bool:
@@ -309,7 +380,7 @@ def _extract_senda_argus_content(safe_response: Any) -> dict[str, Any] | None:
         return None
     try:
         parsed = json.loads(content)
-    except Exception:
+    except Exception:  # noqa: BLE001 - 観測の失敗で計装対象の呼び出しを止めない
         return None
     if not isinstance(parsed, dict):
         return None
@@ -341,6 +412,29 @@ def _purpose_from_args(args) -> str | None:
     return None
 
 
+def _offered_tool_names(kwargs) -> list[str]:
+    """リクエストが LLM に提示したツール集合の名前を取り出す。
+
+    誘導検知の offered は収集側が独立観測する値であり、モデルの自己申告からは導かない。
+    OpenAI / ollama 互換の tools=[{"type":"function","function":{"name":...}}] と、素の
+    {"name":...} の双方から関数名を拾う。
+    """
+    tools = kwargs.get("tools")
+    names: list[str] = []
+    if isinstance(tools, (list, tuple)):
+        for tool in tools:
+            name = ""
+            if isinstance(tool, dict):
+                fn = tool.get("function")
+                if isinstance(fn, dict):
+                    name = str(fn.get("name") or "")
+                if not name:
+                    name = str(tool.get("name") or "")
+            if name:
+                names.append(name)
+    return names
+
+
 def _extract_senda_argus_report(response: dict) -> tuple[dict | None, list]:
     """tool_calls から senda_argus_report を取り出し、残りの実ツール呼び出しを返す。
 
@@ -361,7 +455,7 @@ def _extract_senda_argus_report(response: dict) -> tuple[dict | None, list]:
             if isinstance(raw_args, str):
                 try:
                     raw_args = json.loads(raw_args)
-                except Exception:
+                except Exception:  # noqa: BLE001 - 観測の失敗で計装対象の呼び出しを止めない
                     raw_args = {}
             report_args = raw_args
         else:
@@ -374,10 +468,8 @@ def _extract_senda_argus_report(response: dict) -> tuple[dict | None, list]:
 def _safe_response(response: Any) -> Any:
     for attr in ("model_dump", "dict", "json"):
         if hasattr(response, attr):
-            try:
+            with contextlib.suppress(Exception):
                 return getattr(response, attr)()
-            except Exception:
-                pass
     return response
 
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from typing import Any, Callable, Mapping
+import contextlib
+from collections.abc import Callable, Mapping
+from typing import Any
 
 
 class MockMCPClient:
@@ -13,7 +15,7 @@ class MockMCPClient:
     def __init__(self, tools: Mapping[str, Callable[..., Any]], *, server: str = "mock_mcp"):
         self.tools = dict(tools)
         self.server = server
-        try:
+        with contextlib.suppress(Exception):
             from senda_argus_hooks.core.purpose_registry import register_mcp_tool_source
 
             for tool_name in self.tools:
@@ -21,8 +23,6 @@ class MockMCPClient:
                     tool_name=tool_name,
                     mcp_server_name=server,
                 )
-        except Exception:
-            pass
 
     def call_tool(self, tool: str, arguments: dict[str, Any] | None = None, *, capability: str | None = None) -> Any:
         args = arguments or {}

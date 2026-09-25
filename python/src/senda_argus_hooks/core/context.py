@@ -31,6 +31,10 @@ def new_run_id() -> str:
     return f"run_{uuid4().hex}"
 
 
+def new_turn_id() -> str:
+    return f"turn_{uuid4().hex}"
+
+
 _current_trace_id: ContextVar[str | None] = ContextVar("senda_trace_id", default=None)
 _current_span_id: ContextVar[str | None] = ContextVar("senda_span_id", default=None)
 _current_run_id: ContextVar[str | None] = ContextVar("senda_run_id", default=None)

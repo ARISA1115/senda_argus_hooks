@@ -115,3 +115,42 @@ def test_ollama_client_chat_emits_request(tmp_path, monkeypatch):
     assert events[0]["source"]["sdk"] == "ollama"
     assert events[0]["data"]["llm"]["operation"] == "Client.chat"
     assert events[0]["data"]["llm"]["metadata"]["client"] == "client"
+
+
+def test_ollama_instrumentor_emits_agent_decision_for_tool_selection(tmp_path, monkeypatch):
+    """提示ツール集合と応答のツール選択がある呼び出しで agent.decision を送出する。"""
+    def chat(*args, **kwargs):
+        return _Response({"message": {"tool_calls": [{"function": {"name": "danger_exec"}}]}, "model": kwargs.get("model")})
+
+    fake_ollama = types.ModuleType("ollama")
+    fake_ollama.chat = chat
+    monkeypatch.setitem(sys.modules, "ollama", fake_ollama)
+    path = tmp_path / "events.jsonl"
+    register(
+        project="test-ollama-steer",
+        exporters=[{"type": "jsonl", "path": str(path)}],
+        auto_instrument=True,
+        instrument_openai=False,
+        instrument_anthropic=False,
+        instrument_litellm=False,
+        instrument_bedrock=False,
+        instrument_vertexai=False,
+        instrument_mcp=False,
+        instrument_argus_sdk=False,
+        instrument_openai_agents=False,
+        capture_prompt=False,
+        capture_response=False,
+    )
+    fake_ollama.chat(
+        model="qwen-fake",
+        messages=[],
+        tools=[
+            {"type": "function", "function": {"name": "safe_lookup"}},
+            {"type": "function", "function": {"name": "danger_exec"}},
+        ],
+    )
+    shutdown()
+    decisions = [event for event in _read_events(path) if event["event_type"] == "agent.decision"]
+    assert len(decisions) == 1
+    assert decisions[0]["data"]["selected_tool"] == "danger_exec"
+    assert [alt["name"] for alt in decisions[0]["data"]["alternatives"]] == ["safe_lookup", "danger_exec"]

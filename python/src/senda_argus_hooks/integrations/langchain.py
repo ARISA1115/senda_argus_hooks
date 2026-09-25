@@ -1,16 +1,39 @@
 from __future__ import annotations
 
+import contextlib
 import time
 from typing import Any
 
 from senda_argus_hooks.core.hashing import sha256_value
 from senda_argus_hooks.core.identity import derive_tool_purpose_id
+from senda_argus_hooks.core.instruction_files import (
+    collect_instruction_sources,
+    system_prompt_line_digests,
+    system_prompt_pair_digests,
+)
 from senda_argus_hooks.core.runtime import emit_event, get_config
 
 try:  # Optional dependency. Unit tests use this module without LangChain installed.
     from langchain_core.callbacks import BaseCallbackHandler as _BaseCallbackHandler
-except Exception:  # pragma: no cover - depends on optional dependency availability
+except Exception:  # noqa: BLE001  # pragma: no cover - 任意の依存の import 失敗は種類を問わず未導入として扱う
     _BaseCallbackHandler = object
+
+
+# 呼び出しごとに積む控えの上限。鍵は呼び出し側が決める値で、終了も失敗も呼ばれずに打ち切られる
+# 経路がある。上限が無いと、その打ち切りが続くだけで控えが際限なく伸びる。
+MAX_PENDING_RUNS: int = 1024
+
+
+def _remember(store: dict, key: str, value: Any) -> None:
+    """控えへ 1 件積む。上限を超えた分は古い順に落とす。
+
+    落とすのは観測の欠落であり、実行そのものには影響しない。上限を設けずに伸ばすと、観測が
+    利用者の処理を圧迫する。
+    """
+    store[key] = value
+    if len(store) > MAX_PENDING_RUNS:
+        for stale in list(store)[: len(store) - MAX_PENDING_RUNS]:
+            store.pop(stale, None)
 
 
 class SendaArgusCallbackHandler(_BaseCallbackHandler):
@@ -22,20 +45,26 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
     """
 
     def __init__(self, *, framework: str = "langchain", capture_payloads: bool | None = None):
-        try:
+        with contextlib.suppress(TypeError):
             super().__init__()
-        except TypeError:
-            pass
         self.framework = framework
         self.capture_payloads = capture_payloads
         self._starts: dict[str, float] = {}
         self._messages_hashes: dict[str, str] = {}
+        # 指示の行ダイジェストは役割の分かる経路でだけ控える。役割の無い prompts は指示と
+        # 利用者入力が 1 つの文字列に混ざるため、利用者の入力を指示として扱ってしまう。
+        self._prompt_line_hashes: dict[str, list[str]] = {}
+        self._prompt_pair_hashes: dict[str, list[str]] = {}
         self._tool_types: dict[str, str] = {}
+        self._requested_models: dict[str, str] = {}
 
     def on_llm_start(self, serialized: dict[str, Any], prompts: list[str], **kwargs: Any) -> None:
         run_id = _run_key(kwargs)
-        self._starts[run_id] = time.perf_counter()
-        self._messages_hashes[run_id] = sha256_value(prompts)
+        _remember(self._starts, run_id, time.perf_counter())
+        _remember(self._messages_hashes, run_id, sha256_value(prompts))
+        requested_model = _requested_model(serialized, kwargs)
+        if requested_model:
+            _remember(self._requested_models, run_id, requested_model)
         payload = {"serialized": serialized, "prompts": prompts, "kwargs": _safe_kwargs(kwargs)}
         emit_event(
             "llm.request.started",
@@ -46,8 +75,18 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
 
     def on_chat_model_start(self, serialized: dict[str, Any], messages: list[Any], **kwargs: Any) -> None:
         run_id = _run_key(kwargs)
-        self._starts[run_id] = time.perf_counter()
-        self._messages_hashes[run_id] = sha256_value(messages)
+        _remember(self._starts, run_id, time.perf_counter())
+        _remember(self._messages_hashes, run_id, sha256_value(messages))
+        requested_model = _requested_model(serialized, kwargs)
+        if requested_model:
+            _remember(self._requested_models, run_id, requested_model)
+        _sources = collect_instruction_sources({"messages": messages})
+        line_hashes = system_prompt_line_digests(*_sources)
+        if line_hashes:
+            _remember(self._prompt_line_hashes, run_id, line_hashes)
+        pair_hashes = system_prompt_pair_digests(*_sources)
+        if pair_hashes:
+            _remember(self._prompt_pair_hashes, run_id, pair_hashes)
         payload = {"serialized": serialized, "messages": messages, "kwargs": _safe_kwargs(kwargs)}
         emit_event(
             "llm.request.started",
@@ -60,6 +99,7 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
         run_id = _run_key(kwargs)
         latency_ms = _latency_ms(self._starts.pop(run_id, None))
         messages_hash = self._messages_hashes.pop(run_id, None)
+        requested_model = self._requested_models.pop(run_id, None)
         usage = _extract_llm_usage(response)
         payload = _safe_value(response)
         llm_data = _payload_or_hash("output", payload, self._capture_response())
@@ -67,6 +107,19 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
             llm_data["messages_hash"] = messages_hash
         if usage:
             llm_data["usage"] = usage
+        # ModelSwapRule 用: リクエスト時に指定したモデルと、レスポンスが自己申告した
+        # 実モデルの両方を送出し、Argus 側でモデルすり替えを検知できるようにする。
+        if requested_model:
+            llm_data["model"] = requested_model
+        response_model = _extract_response_model(response)
+        if response_model:
+            llm_data["response_model"] = response_model
+        line_hashes = self._prompt_line_hashes.pop(run_id, None)
+        if line_hashes:
+            llm_data["system_prompt_line_hashes"] = line_hashes
+        pair_hashes = self._prompt_pair_hashes.pop(run_id, None)
+        if pair_hashes:
+            llm_data["system_prompt_pair_hashes"] = pair_hashes
         emit_event(
             "llm.request",
             source={"component": "integration", "sdk": self.framework, "operation": "on_llm_end"},
@@ -76,7 +129,14 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
         )
 
     def on_llm_error(self, error: BaseException, **kwargs: Any) -> None:
-        latency_ms = _latency_ms(self._starts.pop(_run_key(kwargs), None))
+        # 失敗した呼び出しの控えも回収する。回収しないと、鍵は呼び出し側が決める値で上限も
+        # 無いため、失敗が続くだけで控えが積み上がる。開始で積むものはここで全部落とす。
+        run_id = _run_key(kwargs)
+        latency_ms = _latency_ms(self._starts.pop(run_id, None))
+        self._messages_hashes.pop(run_id, None)
+        self._prompt_line_hashes.pop(run_id, None)
+        self._prompt_pair_hashes.pop(run_id, None)
+        self._requested_models.pop(run_id, None)
         emit_event(
             "llm.error",
             source={"component": "integration", "sdk": self.framework, "operation": "on_llm_error"},
@@ -88,10 +148,10 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
 
     def on_tool_start(self, serialized: dict[str, Any], input_str: str | dict[str, Any] | None = None, **kwargs: Any) -> None:
         run_id = _run_key(kwargs)
-        self._starts[run_id] = time.perf_counter()
+        _remember(self._starts, run_id, time.perf_counter())
         tool_name = _tool_name(serialized, kwargs)
         tool_type = _tool_type(serialized, kwargs)
-        self._tool_types[run_id] = tool_type
+        _remember(self._tool_types, run_id, tool_type)
         purpose_id = derive_tool_purpose_id(framework=self.framework, tool_name=tool_name, tool_type=tool_type)
         tool = {
             "framework": self.framework,
@@ -152,7 +212,7 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
 
     def on_chain_start(self, serialized: dict[str, Any], inputs: dict[str, Any] | None = None, **kwargs: Any) -> None:
         run_id = _run_key(kwargs)
-        self._starts[run_id] = time.perf_counter()
+        _remember(self._starts, run_id, time.perf_counter())
         emit_event(
             "agent.step.started",
             source={"component": "integration", "sdk": self.framework, "operation": "on_chain_start"},
@@ -238,6 +298,42 @@ def _extract_llm_usage(response: Any) -> dict[str, int] | None:
     return result or None
 
 
+def _requested_model(serialized: dict[str, Any] | None, kwargs: dict[str, Any]) -> str | None:
+    """リクエスト時に指定されたモデル識別子を抽出する。
+
+    LangChain の callback は invocation_params (実行時パラメータ) に model /
+    model_name を載せる。無い場合は serialized の kwargs から取得する。
+    """
+    invocation_params = kwargs.get("invocation_params")
+    if isinstance(invocation_params, dict):
+        model = invocation_params.get("model") or invocation_params.get("model_name")
+        if isinstance(model, str) and model.strip():
+            return model
+    serialized_kwargs = (serialized or {}).get("kwargs")
+    if isinstance(serialized_kwargs, dict):
+        model = serialized_kwargs.get("model") or serialized_kwargs.get("model_name")
+        if isinstance(model, str) and model.strip():
+            return model
+    return None
+
+
+def _extract_response_model(response: Any) -> str | None:
+    """LLMResult がレスポンス側で自己申告した実モデル識別子を抽出する。
+
+    LangChain の LLMResult は llm_output に model_name (OpenAI 系) または
+    model を載せる。取得できない場合は None。
+    """
+    llm_output = getattr(response, "llm_output", None)
+    if llm_output is None and isinstance(response, dict):
+        llm_output = response.get("llm_output")
+    if not isinstance(llm_output, dict):
+        return None
+    model = llm_output.get("model_name") or llm_output.get("model")
+    if isinstance(model, str) and model.strip():
+        return model
+    return None
+
+
 def _run_key(kwargs: dict[str, Any]) -> str:
     return str(kwargs.get("run_id") or kwargs.get("parent_run_id") or "default")
 
@@ -253,10 +349,8 @@ def _safe_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
 def _safe_value(value: Any) -> Any:
     for attr in ("model_dump", "dict"):
         if hasattr(value, attr):
-            try:
+            with contextlib.suppress(Exception):
                 return getattr(value, attr)()
-            except Exception:
-                pass
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     if isinstance(value, (list, tuple)):

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import threading
 from typing import Any
 
 from .context import (
@@ -11,6 +13,7 @@ from .context import (
     get_trace_id,
     get_turn_id,
     new_run_id,
+    new_turn_id,
     reset_run_id,
     reset_span_id,
     reset_trace_id,
@@ -19,13 +22,55 @@ from .context import (
     set_trace_id,
 )
 from .event import new_event
-from .identity import derive_agent_id, runtime_metadata
+from .identity import derive_agent_id, runtime_discriminator, runtime_metadata
 from .queue import EventBus
 from .redaction import redact_event
 
 _config = RuntimeConfig()
 _bus = EventBus(exporters=[])
 _runtime_metadata = runtime_metadata()
+
+# 受動計装は span を張らないため get_run_id() も _config.run_id も None になりうる。
+# その場合の最終フォールバックとして、プロセス寿命で安定な run_id を返す。これにより
+# run_id 空のイベントが取り込み側で無音ドロップされるのを防ぎ、run スコープの検知ルールが
+# 受動計装のイベントでも成立する。span / 明示 config はこれより優先される。
+#
+# PID で採番するため、import 後に fork するプリフォーク型サーバやタスクランナーでも、子プロセスは
+# 親と別の run_id を持ち、別ワーカーの run スコープの監査と検知結果が混ざらない。
+_process_run_id_lock = threading.Lock()
+_process_run_ids: dict[int, str] = {}
+
+
+def _process_run_id() -> str:
+    pid = os.getpid()
+    run_id = _process_run_ids.get(pid)
+    if run_id is None:
+        with _process_run_id_lock:
+            run_id = _process_run_ids.get(pid)
+            if run_id is None:
+                run_id = new_run_id()
+                _process_run_ids[pid] = run_id
+    return run_id
+
+
+def _fallback_turn_id(event_type: str) -> str | None:
+    """turn 境界が未指定の llm.request に一意な turn_id を採番する。
+
+    受動計装は span も set_turn_id も張らないため turn_id は空になる。取り込み側の
+    LLM_MESSAGES_HASH_MISMATCH は (run_id, turn_id) で messages_hash を比較するので、
+    プロセス寿命で安定な run_id (フォールバック run_id) と turn_id 空が重なると、
+    プロセス全 llm.request が単一バケットへ集約し、正当な別プロンプトごとに
+    messages_hash が変わって誤発火が氾濫する。llm.request の turn 境界ごとに一意な
+    turn_id を採番して付与し、正当な別プロンプトを別バケットへ分離する。
+
+    span / 明示 config / ContextVar の turn_id はこれより優先される。turn_id を比較キー
+    に使うのはこの照合だけのため、採番は llm.request に限定し他イベントの turn_id は空の
+    ままにする。明示 turn_id を共有する能動 SDK 経路と、同一 turn_id で messages_hash が
+    変わる真の改竄検知は不変のまま残す。
+    """
+    if event_type == "llm.request":
+        return new_turn_id()
+    return None
 
 
 def configure(config: RuntimeConfig, bus: EventBus) -> None:
@@ -49,8 +94,12 @@ def effective_agent_id(source: dict[str, Any] | None = None, explicit: str | Non
         return get_agent_id() or ""
     if _config.agent_id:
         return _config.agent_id
-    sdk = (source or {}).get("sdk")
-    return derive_agent_id(project=_config.project, environment=_config.environment, sdk=sdk, agent_hint=_config.agent_hint)
+    return derive_agent_id(
+        project=_config.project,
+        environment=_config.environment,
+        agent_hint=_config.agent_hint,
+        runtime=runtime_discriminator(),
+    )
 
 
 def emit_event(
@@ -80,8 +129,8 @@ def emit_event(
         tenant_id=_config.tenant_id,
         session_id=_config.session_id,
         conversation_id=_config.conversation_id,
-        run_id=get_run_id() or _config.run_id,
-        turn_id=get_turn_id() or _config.turn_id,
+        run_id=get_run_id() or _config.run_id or _process_run_id(),
+        turn_id=get_turn_id() or _config.turn_id or _fallback_turn_id(event_type),
         agent_id=effective_agent_id(source, agent_id),
         purpose_id=purpose_id or get_purpose_id(),
         runtime=_runtime_metadata,

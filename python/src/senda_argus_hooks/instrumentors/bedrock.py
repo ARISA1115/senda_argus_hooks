@@ -1,0 +1,282 @@
+from __future__ import annotations
+
+import io
+import json
+import re
+import time
+from collections.abc import Callable
+from typing import Any
+
+from senda_argus_hooks.core.hashing import sha256_value
+from senda_argus_hooks.core.instruction_files import (
+    collect_instruction_sources,
+    system_prompt_line_digests,
+    system_prompt_pair_digests,
+)
+from senda_argus_hooks.core.model_identity import models_correspond
+from senda_argus_hooks.core.response_meta import (
+    extract_response_model as _extract_response_model,
+)
+from senda_argus_hooks.core.runtime import emit_event, get_config
+
+from .base import BaseInstrumentor, audit_guard
+
+
+class BedrockInstrumentor(BaseInstrumentor):
+    """Instrument Amazon Bedrock via botocore.
+
+    boto3 のクライアントクラスは実行時に動的生成されるため、個別クライアントの
+    メソッドではなく botocore.client.BaseClient._make_api_call を単一の割り込み点に
+    して bedrock-runtime の InvokeModel / Converse を観測する。
+
+    InvokeModel 応答の StreamingBody は一度しか読めないため、観測のために消費した
+    後は同内容のストリームに詰め直して呼び出し元に返す。
+    """
+
+    name = "bedrock"
+
+    def __init__(self):
+        self._patches: list[tuple[Any, str, Callable]] = []
+
+    def instrument(self) -> bool:
+        try:
+            from botocore.client import BaseClient  # type: ignore
+        except Exception:  # noqa: BLE001 - 任意の SDK の import 失敗は種類を問わず未導入として扱う
+            return False
+
+        if hasattr(BaseClient._make_api_call, "__senda_patched__"):
+            return True
+        original = BaseClient._make_api_call
+        wrapped = self._wrap(original)
+        wrapped.__senda_patched__ = True
+        BaseClient._make_api_call = wrapped  # type: ignore[method-assign]
+        self._patches.append((BaseClient, "_make_api_call", original))
+        return True
+
+    def _wrap(self, original: Callable) -> Callable:
+        def wrapper(client, operation_name, api_params):
+            if _service_name(client) != "bedrock-runtime" or operation_name not in ("InvokeModel", "Converse"):
+                return original(client, operation_name, api_params)
+            cfg = get_config()
+            start = time.perf_counter()
+            model = str((api_params or {}).get("modelId") or "")
+            input_payload = {"params_hash": sha256_value(api_params)} if not cfg.capture_prompt else {"params": api_params}
+            try:
+                response = original(client, operation_name, api_params)
+            except Exception as exc:
+                latency_ms = int((time.perf_counter() - start) * 1000)
+                emit_event(
+                    "llm.error",
+                    source={"component": "instrumentor", "sdk": "bedrock", "provider": "bedrock", "operation": operation_name},
+                    data={"llm": {"provider": "bedrock", "operation": operation_name, "model": model, "input": input_payload}},
+                    status="error",
+                    latency_ms=latency_ms,
+                    error={"type": exc.__class__.__name__, "message": str(exc)},
+                )
+                raise
+
+            # 観測の後処理は本来の呼び出しから隔離する。ここで失敗しても応答は返す。
+            with audit_guard(operation_name):
+                latency_ms = int((time.perf_counter() - start) * 1000)
+                # この経路の引数は api_params に入る。さらに InvokeModel では、提供元ごとの
+                # 要求項目が body へ直列化されて入るため、上位の名前には現れない。Converse は
+                # 上位に載る。両方を見ないと片方の操作で常に空になる。
+                _params = api_params if isinstance(api_params, dict) else {}
+                _sources = collect_instruction_sources(_params)
+                _sources.extend(collect_instruction_sources(_decoded_body(_params)))
+                system_prompt_line_hashes = system_prompt_line_digests(*_sources)
+                system_prompt_pair_hashes = system_prompt_pair_digests(*_sources)
+                llm_data: dict[str, Any] = {"provider": "bedrock", "operation": operation_name, "model": model, "input": input_payload}
+                if operation_name == "InvokeModel" and isinstance(response, dict):
+                    raw = _read_and_rewrap_body(response)
+                    parsed = _parse_json_bytes(raw)
+                    usage = _invoke_model_usage(response, parsed)
+                    if usage:
+                        llm_data["usage"] = usage
+                    # Bedrock 修飾 ID とネイティブ ID の表記差は偽陽性源のため、
+                    # 正規化して同一モデルと判定できる場合は response_model を送出しない。
+                    response_model = _extract_response_model(parsed)
+                    if response_model and not models_correspond(model, response_model, _model_core):
+                        llm_data["response_model"] = response_model
+                    llm_data["output"] = {"response_hash": sha256_value(raw)} if not cfg.capture_response else {"response": parsed}
+                elif operation_name == "Converse" and isinstance(response, dict):
+                    usage_raw = response.get("usage") if isinstance(response.get("usage"), dict) else {}
+                    usage = _int_usage(usage_raw.get("inputTokens"), usage_raw.get("outputTokens"))
+                    if usage:
+                        llm_data["usage"] = usage
+                    llm_data["output"] = {"response_hash": sha256_value(response.get("output"))} if not cfg.capture_response else {"response": response.get("output")}
+                if system_prompt_line_hashes:
+                    llm_data["system_prompt_line_hashes"] = system_prompt_line_hashes
+                # 組は行と独立に載せる。行の内側へ入れると、行を出す条件を変えたときに組が
+                # 黙って止まる。2 つは別々の導出で、片方が空でももう片方は成立する。
+                if system_prompt_pair_hashes:
+                    llm_data["system_prompt_pair_hashes"] = system_prompt_pair_hashes
+                emit_event(
+                    "llm.request",
+                    source={"component": "instrumentor", "sdk": "bedrock", "provider": "bedrock", "operation": operation_name},
+                    data={"llm": llm_data},
+                    status="success",
+                    latency_ms=latency_ms,
+                )
+                offered = _offered_tool_names(api_params)
+                selected = _selected_tool_names(operation_name, response)
+                if offered and selected:
+                    alternatives = [{"name": name} for name in offered]
+                    for selected_tool in selected:
+                        emit_event(
+                            "agent.decision",
+                            source={"component": "instrumentor", "sdk": "bedrock", "provider": "bedrock", "operation": operation_name},
+                            data={"alternatives": alternatives, "selected_tool": selected_tool},
+                            status="success",
+                            latency_ms=latency_ms,
+                        )
+            return response
+
+        return wrapper
+
+    def uninstrument(self) -> bool:
+        for target, method_name, original in self._patches:
+            setattr(target, method_name, original)
+        self._patches = []
+        return True
+
+
+def _offered_tool_names(api_params: Any) -> list[str]:
+    """Bedrock Converse に渡された提示ツール集合の名前を取り出す。
+
+    Converse は toolConfig={"tools":[{"toolSpec":{"name":...}}]} の形をとる。
+    """
+    names: list[str] = []
+    if isinstance(api_params, dict):
+        tool_config = api_params.get("toolConfig")
+        tools = tool_config.get("tools") if isinstance(tool_config, dict) else None
+        if isinstance(tools, list):
+            for tool in tools:
+                spec = tool.get("toolSpec") if isinstance(tool, dict) else None
+                name = str(spec.get("name") or "") if isinstance(spec, dict) else ""
+                if name:
+                    names.append(name)
+    return names
+
+
+def _selected_tool_names(operation_name: Any, response: Any) -> list[str]:
+    """Bedrock Converse 応答でモデルが選択したツール名を順序を保って全て取り出す。
+
+    Converse は output.message.content[] に toolUse ブロックを載せる。並列選択を漏らさず収集する。
+    """
+    names: list[str] = []
+    if operation_name == "Converse" and isinstance(response, dict):
+        output = response.get("output")
+        message = output.get("message") if isinstance(output, dict) else None
+        content = message.get("content") if isinstance(message, dict) else None
+        if isinstance(content, list):
+            for block in content:
+                tool_use = block.get("toolUse") if isinstance(block, dict) else None
+                name = str(tool_use.get("name") or "") if isinstance(tool_use, dict) else ""
+                if name:
+                    names.append(name)
+    return names
+
+
+def _service_name(client: Any) -> str:
+    try:
+        return str(client.meta.service_model.service_name)
+    except Exception:  # noqa: BLE001 - 観測の失敗で計装対象の呼び出しを止めない
+        return ""
+
+
+def _model_core(identifier: str) -> str:
+    """Bedrock 修飾 ID とネイティブモデル ID を比較可能な形に正規化する。
+
+    Bedrock の modelId はリージョン接頭辞・プロバイダ接頭辞・バージョン接尾辞を
+    含むが、anthropic 系レスポンスのボディはネイティブ ID を自己申告する。
+    ドット区切りの最終セグメントからバージョン接尾辞とリビジョンを除去した
+    中核部分を比較単位にする。
+    """
+    core = identifier.strip().lower().split(".")[-1]
+    core = core.split(":")[0]
+    return re.sub(r"-v\d+$", "", core)
+
+
+def _read_and_rewrap_body(response: dict[str, Any]) -> bytes | None:
+    """StreamingBody を読み取り、呼び出し元が再度読めるよう同内容に詰め直す。"""
+    body = response.get("body")
+    if body is None or not hasattr(body, "read"):
+        return None
+    try:
+        raw = body.read()
+    except Exception:  # noqa: BLE001 - 観測の失敗で計装対象の呼び出しを止めない
+        return None
+    try:
+        from botocore.response import StreamingBody  # type: ignore
+
+        response["body"] = StreamingBody(io.BytesIO(raw), len(raw))
+    except Exception:  # noqa: BLE001 - botocore の型で包み直せないときは BytesIO のまま本文を返す
+        response["body"] = io.BytesIO(raw)
+    return raw
+
+
+def _parse_json_bytes(raw: bytes | None) -> dict[str, Any]:
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else {}
+    except (ValueError, UnicodeDecodeError):
+        return {}
+
+
+def _int_usage(input_tokens: Any, output_tokens: Any) -> dict[str, int] | None:
+    result: dict[str, int] = {}
+    try:
+        if input_tokens is not None:
+            result["input_tokens"] = int(input_tokens)
+        if output_tokens is not None:
+            result["output_tokens"] = int(output_tokens)
+    except (TypeError, ValueError):
+        return None
+    return result or None
+
+
+def _invoke_model_usage(response: dict[str, Any], parsed: dict[str, Any]) -> dict[str, int] | None:
+    """InvokeModel のトークン使用量を応答ヘッダー優先で抽出し、ボディから補完する。"""
+    headers: dict[str, Any] = {}
+    metadata = response.get("ResponseMetadata")
+    if isinstance(metadata, dict) and isinstance(metadata.get("HTTPHeaders"), dict):
+        headers = metadata["HTTPHeaders"]
+    input_tokens = headers.get("x-amzn-bedrock-input-token-count")
+    output_tokens = headers.get("x-amzn-bedrock-output-token-count")
+    if input_tokens is None or output_tokens is None:
+        usage = parsed.get("usage")
+        if isinstance(usage, dict):
+            input_tokens = input_tokens if input_tokens is not None else usage.get("input_tokens")
+            output_tokens = output_tokens if output_tokens is not None else usage.get("output_tokens")
+    if input_tokens is None:
+        input_tokens = parsed.get("inputTextTokenCount") or parsed.get("prompt_token_count")
+    if output_tokens is None:
+        results = parsed.get("results")
+        if isinstance(results, list) and results and isinstance(results[0], dict):
+            output_tokens = results[0].get("tokenCount")
+        if output_tokens is None:
+            output_tokens = parsed.get("generation_token_count")
+    return _int_usage(input_tokens, output_tokens)
+
+
+def _decoded_body(api_params: dict[str, Any]) -> dict[str, Any]:
+    """InvokeModel の body を辞書へ戻す。取り出せない形なら空を返す。
+
+    body は提供元ごとの要求そのものが直列化されて入る。観測の後処理が本来の呼び出しを
+    壊さないよう、解けない場合も例外にしない。
+    """
+    body = api_params.get("body")
+    if isinstance(body, (bytes, bytearray)):
+        try:
+            body = body.decode("utf-8")
+        except Exception:  # noqa: BLE001
+            return {}
+    if isinstance(body, str):
+        try:
+            body = json.loads(body)
+        except Exception:  # noqa: BLE001
+            return {}
+    return body if isinstance(body, dict) else {}

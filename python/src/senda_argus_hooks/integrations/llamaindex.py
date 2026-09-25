@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import contextlib
 import time
 from collections.abc import Iterable
 from typing import Any
 
 from senda_argus_hooks.core.hashing import derive_embedding_sketch, sha256_value
-from senda_argus_hooks.core.identity import data_source_hash, derive_embedding_purpose_id, derive_rag_query_purpose_id, derive_retrieval_purpose_id, rag_data_source_profile
+from senda_argus_hooks.core.identity import (
+    data_source_hash,
+    derive_embedding_purpose_id,
+    derive_rag_query_purpose_id,
+    derive_retrieval_purpose_id,
+    rag_data_source_profile,
+)
 from senda_argus_hooks.core.runtime import emit_event, get_config
 
 
@@ -114,10 +121,8 @@ class RAGInstrumentation:
         if getattr(original, "_senda_argus_wrapped", False):
             return False
         wrapped = wrapper_factory(original)
-        try:
-            setattr(wrapped, "_senda_argus_wrapped", True)
-        except Exception:
-            pass
+        with contextlib.suppress(Exception):
+            wrapped._senda_argus_wrapped = True
         self._patches.append((obj, method_name, original))
         setattr(obj, method_name, wrapped)
         return True
@@ -130,10 +135,8 @@ class RAGInstrumentation:
 
     def uninstrument(self) -> None:
         for obj, method_name, original in reversed(self._patches):
-            try:
+            with contextlib.suppress(Exception):
                 setattr(obj, method_name, original)
-            except Exception:
-                pass
         self._patches.clear()
 
 
@@ -1132,7 +1135,7 @@ def _name(obj: Any, explicit: str | None = None) -> str:
         if callable(value):
             try:
                 value = value()
-            except Exception:
+            except Exception:  # noqa: BLE001 - 観測の失敗で計装対象の呼び出しを止めない
                 value = None
         if value:
             return str(value)
@@ -1192,12 +1195,10 @@ def _node_text(item: Any) -> str | None:
     node = _node(item)
     get_content = getattr(node, "get_content", None)
     if callable(get_content):
-        try:
+        with contextlib.suppress(Exception):
             text = get_content()
             if text is not None:
                 return str(text)
-        except Exception:
-            pass
     text = getattr(node, "text", None)
     if text is not None:
         return str(text)
@@ -1308,10 +1309,8 @@ def _rag_context_hash_payload(result: Any) -> dict[str, Any]:
 def _safe_value(value: Any) -> Any:
     for attr in ("model_dump", "dict"):
         if hasattr(value, attr):
-            try:
+            with contextlib.suppress(Exception):
                 return getattr(value, attr)()
-            except Exception:
-                pass
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     if isinstance(value, (list, tuple)):
