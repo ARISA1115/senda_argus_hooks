@@ -1,6 +1,6 @@
 {
   "name": "@senda/argus-hooks",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Senda-Argus Hooks JS - hook-only observability SDK for Node.js LLM and MCP runtimes",
   "type": "module",
   "main": "./dist/index.js",
@@ -9,6 +9,12 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./zerocode/preload": {
+      "import": "./dist/zerocode/preload.js"
+    },
+    "./zerocode/loader": {
+      "import": "./dist/zerocode/loader.js"
     }
   },
   "files": [

@@ -1464,3 +1464,19 @@ sudo python3 tools/senda_argus_zero_install.py install \
 ```
 
 See `ZERO_CODE_PYTHON.md` for discovery, bulk deployment, configuration, status, rollback, and offline installation details.
+
+## Node.js Zero-code deployment (v0.9.0)
+
+Existing Node agents can now be instrumented without adding imports or `register()` calls to application source.
+See `NODE_ZERO_CODE.md`.
+
+```bash
+node tools/senda_argus_zero_install_node.mjs scan
+sudo node tools/senda_argus_zero_install_node.mjs install \
+  --service my-agent.service \
+  --exporter argus \
+  --endpoint https://argus.example.local \
+  --api-key-file /root/senda-argus-api-key
+```
+
+The installer injects the Senda preload through `NODE_OPTIONS=--import=...` and supports ESM/CommonJS interception for the provider/MCP layer.

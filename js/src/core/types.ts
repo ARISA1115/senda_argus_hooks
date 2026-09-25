@@ -45,7 +45,8 @@ export interface Exporter {
 export type ExporterConfig =
   | { type: "jsonl"; path?: string }
   | { type: "stdout" }
-  | { type: "null" };
+  | { type: "null" }
+  | { type: "argus"; endpoint?: string; apiKey?: string; runId?: string; timeoutMs?: number };
 
 export interface RegisterOptions {
   project?: string;

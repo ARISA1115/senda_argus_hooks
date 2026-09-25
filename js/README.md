@@ -174,3 +174,18 @@ npm run test:package
 ```
 
 For a local packed-package smoke test, run `npm pack`, install the generated `.tgz` into a clean temporary project, and verify that `import "@senda/argus-hooks"` succeeds.
+
+## Zero-code preload (JS v0.3.0)
+
+The package now ships `@senda/argus-hooks/zerocode/preload` and an ESM loader that can intercept supported provider SDK imports without application source changes.
+The deployment installer is documented in the project-level `NODE_ZERO_CODE.md`.
+
+Automatic provider-layer targets:
+
+- OpenAI
+- Anthropic
+- Ollama
+- MCP Client
+- OpenAI Agents
+
+The package also adds the `argus` exporter type for direct HTTP delivery to `/v1/agent-runs/ingest`.

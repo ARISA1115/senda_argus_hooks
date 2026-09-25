@@ -5,6 +5,7 @@ import type { Exporter, ExporterConfig, RegisterOptions, RuntimeConfig } from ".
 import { JsonlExporter } from "./exporters/jsonl.js";
 import { StdoutExporter } from "./exporters/stdout.js";
 import { NullExporter } from "./exporters/null.js";
+import { ArgusExporter } from "./exporters/argus.js";
 
 let config: RuntimeConfig = {
   project: "default", environment: "dev", capturePrompt: false, captureResponse: false,
@@ -22,6 +23,7 @@ function exporterFromConfig(value: Exporter | ExporterConfig): Exporter {
     case "jsonl": return new JsonlExporter(value.path);
     case "stdout": return new StdoutExporter();
     case "null": return new NullExporter();
+    case "argus": return new ArgusExporter(value.endpoint, value.apiKey, value.runId, value.timeoutMs);
     default: throw new Error(`Unsupported exporter type: ${String((value as any)?.type)}`);
   }
 }
