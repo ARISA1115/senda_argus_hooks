@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import time
 from typing import Any, Callable
 
@@ -61,8 +62,10 @@ class BedrockInstrumentor(BaseInstrumentor):
                     usage = _invoke_model_usage(response, parsed)
                     if usage:
                         llm_data["usage"] = usage
+                    # Bedrock 修飾 ID とネイティブ ID の表記差は偽陽性源のため、
+                    # 正規化して同一モデルと判定できる場合は response_model を送出しない。
                     response_model = _extract_response_model(parsed)
-                    if response_model:
+                    if response_model and not _models_correspond(model, response_model):
                         llm_data["response_model"] = response_model
                     llm_data["output"] = {"response_hash": sha256_value(raw)} if not cfg.capture_response else {"response": parsed}
                 elif operation_name == "Converse" and isinstance(response, dict):
@@ -105,6 +108,30 @@ def _service_name(client: Any) -> str:
         return str(client.meta.service_model.service_name)
     except Exception:
         return ""
+
+
+def _model_core(identifier: str) -> str:
+    """Bedrock 修飾 ID とネイティブモデル ID を比較可能な形に正規化する。
+
+    Bedrock の modelId はリージョン接頭辞・プロバイダ接頭辞・バージョン接尾辞を
+    含むが、anthropic 系レスポンスのボディはネイティブ ID を自己申告する。
+    ドット区切りの最終セグメントからバージョン接尾辞とリビジョンを除去した
+    中核部分を比較単位にする。
+    """
+    core = identifier.strip().lower().split(".")[-1]
+    core = core.split(":")[0]
+    return re.sub(r"-v\d+$", "", core)
+
+
+def _models_correspond(model_id: str, response_model: str) -> bool:
+    """リクエストの modelId とレスポンス自己申告モデルが同一モデルを指すか判定する。"""
+    if not model_id or not response_model:
+        return False
+    a = _model_core(model_id)
+    b = _model_core(response_model)
+    if not a or not b:
+        return False
+    return a == b or a.startswith(b) or b.startswith(a)
 
 
 def _read_and_rewrap_body(response: dict[str, Any]) -> bytes | None:
