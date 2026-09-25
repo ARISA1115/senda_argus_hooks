@@ -1,0 +1,23 @@
+{
+  "name": "@senda/argus-browser-hooks",
+  "version": "0.2.0",
+  "description": "Browser-side observability hooks limited to LLM and MCP communication.",
+  "type": "module",
+  "main": "./dist/senda-argus-browser-hooks.js",
+  "module": "./src/index.js",
+  "exports": {
+    ".": {
+      "import": "./src/index.js",
+      "default": "./dist/senda-argus-browser-hooks.js"
+    }
+  },
+  "files": ["src", "dist", "README.md", "LICENSE"],
+  "scripts": {
+    "build": "node ./scripts/build.mjs",
+    "test": "node --test",
+    "prepublishOnly": "npm run build && npm test"
+  },
+  "keywords": ["browser-agent", "llm", "mcp", "observability", "security"],
+  "license": "Apache-2.0",
+  "engines": {"node": ">=18"}
+}

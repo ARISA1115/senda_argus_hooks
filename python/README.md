@@ -1,5 +1,8 @@
 # Senda-Argus Hooks
 
+> **Repository note (v0.6.0):** The Python package now lives under `python/` in the multi-runtime repository. Python import names and CLI entry points are unchanged.
+
+
 Senda-Argus Hooks is a hook-only observability SDK for LLM, MCP, agent runtime, and RAG audit events.
 
 It collects normalized execution events from SDK hooks, monkey patches, and runtime hooks without requiring application-level `audit.event()` calls or business logic changes in agent applications.
@@ -9,125 +12,6 @@ The collected events are designed for downstream analysis, correlation, risk sco
 > **Patent Notice**
 > Certain concepts and techniques related to Senda-Argus, including AI agent execution trace collection, decision trace reconstruction, and runtime audit event correlation, are patent pending in Japan.
 > This notice does not change the terms of the Apache License 2.0 applicable to this repository.
-
-## Repository layout
-
-Senda-Argus Hooks v0.6.0 keeps the Python and Node.js / TypeScript implementations as peer packages in the same repository.
-
-```text
-senda-argus-hooks/
-├─ python/
-│  ├─ pyproject.toml
-│  ├─ pytest.ini
-│  ├─ src/
-│  │  └─ senda_argus_hooks/
-│  ├─ tests/
-│  ├─ examples/
-│  ├─ docs/
-│  └─ components/
-├─ js/
-│  ├─ package.json
-│  ├─ tsconfig.json
-│  ├─ src/
-│  └─ tests/
-├─ browser/        # existing browser hook package (preserved)
-├─ LICENSE
-├─ README.md
-└─ RELEASE_NOTES_v0.6.0.md
-```
-
-The Python implementation lives under `python/`; the JavaScript / TypeScript implementation lives under `js/`. Both emit the normalized Senda-Argus event schema so downstream analysis can treat them consistently.
-
-The existing browser hook package is preserved under `browser/`. Generated build artifacts, caches, `.DS_Store`, `.egg-info`, and the repository `.git` directory are intentionally not included in the replacement ZIP.
-
-For Python development after replacing the repository contents:
-
-```bash
-cd python
-python -m pip install -e ".[dev]"
-pytest -q
-```
-
-For Node.js / TypeScript hooks:
-
-```bash
-cd js
-npm install
-npm test
-```
-
-
-
-## v0.7.0 - Node / TypeScript framework integrations
-
-v0.7.0 adds Node/TypeScript integrations for LangChain JS, LangGraph JS, LlamaIndex TS, Vercel AI SDK, and OpenAI Agents SDK JS/TS. The integrations preserve the shared `schema_version = 0.2` event model and normalize framework activity into existing `llm.*`, `tool_call.*`, `agent.*`, `retrieval.*`, `embedding.*`, and `rag.query.*` event families.
-
-See `js/README.md` and `RELEASE_NOTES_v0.7.0.md` for integration examples and verification status.
-
-## v0.6.0 - Node.js / JavaScript SDK hooks
-
-v0.6.0 adds **Senda-Argus Hooks JS v0.1** under `js/`. The Node.js implementation emits the same normalized event schema (`schema_version = "0.2"`) as the Python package so downstream Argus analysis can correlate Python and Node.js agent activity consistently.
-
-### Senda-Argus Hooks JS v0.1 scope
-
-```text
-Senda-Argus Hooks JS v0.1
-├─ Core
-│  ├─ AsyncLocalStorage context
-│  ├─ event schema 0.2
-│  ├─ SHA-256 hashing
-│  ├─ redaction
-│  └─ JSONL exporter
-├─ OpenAI
-│  ├─ responses.create
-│  ├─ chat.completions.create
-│  └─ embeddings.create
-├─ Anthropic
-│  └─ messages.create
-├─ Ollama
-│  └─ chat
-└─ MCP
-   └─ Client.callTool
-```
-
-The JS package is hook-only at the application-event level: normal SDK calls are wrapped and applications do not need to add `audit.event()` calls. For Node.js ESM compatibility, v0.1 patches SDK client/module objects passed to `register()` rather than attempting unsafe mutation of immutable ESM exports.
-
-Example:
-
-```ts
-import OpenAI from "openai";
-import Anthropic from "@anthropic-ai/sdk";
-import ollama from "ollama";
-import { register, shutdown } from "@senda/argus-hooks";
-
-const openai = new OpenAI();
-const anthropic = new Anthropic();
-
-register({
-  project: "node-agent",
-  environment: "dev",
-  capturePrompt: false,
-  captureResponse: false,
-  captureArguments: true,
-  captureResult: false,
-  redact: true,
-}, { openai, anthropic, ollama });
-
-// Use the SDK clients normally. Hooked methods emit normalized Senda events.
-
-await shutdown();
-```
-
-See `js/README.md` for build, test, and MCP examples.
-
-### JS v0.1 local verification
-
-The bundled JS source was compiled with TypeScript 5.8.3 and smoke-tested on Node.js v22.16.0 using fake SDK objects. Verified paths:
-
-* OpenAI `responses.create` -> `llm.request` with schema 0.2 and Node runtime metadata
-* MCP `Client.callTool` -> `mcp.tool_call.requested` -> `mcp.tool_call.completed` with stable `purpose_id`
-* Redaction marks emitted events with `security.redacted = true` when enabled
-
 
 ## Features
 
@@ -172,7 +56,6 @@ The verified event included `source.sdk = "ollama"`, `source.operation = "Client
 | Anthropic SDK                  | Experimental       | SDK method hook / monkey patch | Fake SDK hook test             | `llm.request`, `llm.error`                                                   |
 | LiteLLM                        | Experimental       | SDK method hook / monkey patch | Fake SDK hook test             | `llm.request`, `llm.error`                                                   |
 | Ollama Python SDK              | Experimental       | SDK method hook / monkey patch | Fake SDK hook test             | `llm.request`, `llm.error`                                                   |
-| Node.js / JavaScript SDK hooks | Experimental       | SDK object method hook         | Fake SDK hook tests            | `llm.request`, `llm.error`, `mcp.tool_call.*`                                |
 | MCP Python SDK                 | Experimental       | Client/session hook            | Fake `ClientSession` hook test | `mcp.tool_call.requested`, `mcp.tool_call.completed`, `mcp.tool_call.failed` |
 | OpenAI Agents SDK | Experimental | Runner hook / trace processor helper | Real SDK import/patch smoke test; invalid API key error-path test | `agent.run.*`, `agent.step.*`, `tool_call.*`, `llm.*` |
 | LangChain | Experimental | Callback handler | Real `CallbackManager` smoke test | `llm.*`, `tool_call.*`, `agent.step.*`, `agent.decision` |
@@ -199,13 +82,12 @@ Senda-Argus Hooks separates low-level SDK hooks from framework integrations.
 | Anthropic SDK | Experimental | SDK method hook / monkey patch | v0.2.0 | Captures `llm.request` and `llm.error` where supported |
 | LiteLLM | Experimental | SDK method hook / monkey patch | v0.2.0 | Wrapper SDKs may also invoke lower-level provider SDKs |
 | Ollama Python SDK | Experimental | SDK method hook / monkey patch | v0.5.0 | Captures native `ollama.chat(...)` and `ollama.Client.chat(...)` calls; install optional `ollama` package separately |
-| Senda-Argus Hooks JS | Experimental | Node.js SDK object method hooks | v0.6.0 | JS v0.1: OpenAI, Anthropic, Ollama and MCP `Client.callTool`; same event schema 0.2 |
 | MCP Python SDK | Experimental | Client/session hook | v0.2.0 | Captures MCP `ClientSession.call_tool` lifecycle events |
 | OpenAI Agents SDK | Experimental | Runner/tracing integration | v0.3.0 | Captures agent run lifecycle events and tracing-style spans |
 | LangChain | Experimental | Callback handler | v0.3.0 | Captures LLM, tool, chain, and agent callback events |
 | LangGraph | Experimental | Stream wrapper / event stream integration | v0.3.0 | Captures graph run and step events from streamed execution |
 | LlamaIndex / RAG | Experimental | `register(..., rag={...})` / `instrument_rag()` / wrapper helpers | v0.4.0 | Captures retrieval, embedding, and query lifecycle events |
-| Langflow | Example | Custom component helper / LangChain callback reuse / SDK hooks | v0.5.0 example | Use `python/examples/langflow/` to monitor Langflow-based agent, RAG, and MCP workflows |
+| Langflow | Example | Custom component helper / LangChain callback reuse / SDK hooks | v0.5.0 example | Use `examples/langflow/` to monitor Langflow-based agent, RAG, and MCP workflows |
 | Built-in mock MCP client | Tested | Runtime hook example | v0.2.0 | Used for local tests and smoke tests |
 | PromptOps examples | Tested as examples | Runtime hook example | v0.2.0 | Used for local tests and smoke tests |
 | Built-in Ollama example client | Example | Runtime hook example | v0.2.0 | Useful for local error-path checks |
@@ -288,13 +170,13 @@ Expected summary:
 
 ## Langflow example integration
 
-Langflow support is provided as an example integration under `python/examples/langflow/`.
+Langflow support is provided as an example integration under `examples/langflow/`.
 
 Langflow workflows may combine LLM providers, LangChain-compatible components, LangGraph-style agent flows, RAG retrievers, MCP tools, and custom Python components. Senda-Argus Hooks can be registered near the beginning of a Langflow flow to collect normalized audit events from these execution paths where hooks and callbacks are available.
 
 Recommended approaches:
 
-* Add `python/examples/langflow/custom_component_senda_argus_register.py` as a Langflow custom component.
+* Add `examples/langflow/custom_component_senda_argus_register.py` as a Langflow custom component.
 * Use `senda_argus_hooks.integrations.langflow.register_langflow_hooks()` from a Python/custom component.
 * Use `senda_argus_hooks.integrations.langflow.langflow_callback_handler()` for LangChain-compatible Langflow components that accept callbacks.
 * Enable MCP hooks when the Langflow flow connects to external MCP servers.
@@ -340,7 +222,7 @@ AI workflow platforms can become high-value attack surfaces because they often h
 
 Senda-Argus Hooks is intended to help monitor not only prompt and response activity, but also tool execution, MCP calls, RAG retrieval, retries, and workflow behavior across agentic AI applications. This helps investigate suspicious patterns such as unexpected tool usage, calls to unapproved MCP servers, unusual RAG source access, repeated failure-and-retry behavior, and potentially destructive database or system operations.
 
-See `python/docs/use-cases/agentic-ransomware-monitoring.md` for the recommended detection and monitoring model.
+See `docs/use-cases/agentic-ransomware-monitoring.md` for the recommended detection and monitoring model.
 
 ## Tested SDK versions
 
@@ -612,7 +494,7 @@ This is intended to answer:
 
 ```bash
 git clone <repository-url>
-cd senda-argus-hooks/python
+cd senda_argus_hooks
 
 python3 -m venv .venv
 source .venv/bin/activate
@@ -1252,14 +1134,14 @@ cd senda-argus-langflow-test
 source .venv/bin/activate
 
 python -m pip install --upgrade pip setuptools wheel
-python -m pip install -e /path/to/senda-argus-hooks/python
+python -m pip install -e /path/to/senda_argus_hooks
 python -m pip install ollama langflow
 
 mkdir -p components/argus logs
-cp /path/to/senda-argus-hooks/python/examples/langflow/custom_component_senda_argus_register.py \
+cp /path/to/senda_argus_hooks/examples/langflow/custom_component_senda_argus_register.py \
   components/argus/senda_argus_register.py
 
-export PYTHONPATH="/path/to/senda-argus-hooks/python/src:$PYTHONPATH"
+export PYTHONPATH="/path/to/senda_argus_hooks/src:$PYTHONPATH"
 export LANGFLOW_COMPONENTS_PATH="$PWD/components"
 export ARGUS_EXPORT_PATH="$PWD/logs/langflow-events.jsonl"
 

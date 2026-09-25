@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>PageAgent + Senda-Argus LLM/MCP Test</title>
+
+  <!-- Load Senda-Argus before PageAgent so browser AI communication is instrumented. -->
+  <script
+    src="../dist/senda-argus-browser-hooks.js"
+    data-project="page-agent-local-test"
+    data-environment="local"
+    data-exporter="console"></script>
+
+  <script
+    src="https://cdn.jsdelivr.net/npm/page-agent@1.12.2/dist/iife/page-agent.demo.js?autoInit=false"
+    crossorigin="anonymous"></script>
+</head>
+<body>
+  <h1>PageAgent LLM/MCP Hook Test</h1>
+  <button id="target">Target button</button>
+  <button id="run">Run PageAgent</button>
+
+  <script>
+    const agent = new window.PageAgent({
+      model: "qwen3:14b",
+      baseURL: "http://127.0.0.1:11434/v1",
+      apiKey: "ollama",
+      language: "en-US"
+    });
+
+    document.getElementById("run").addEventListener("click", async () => {
+      await agent.execute("Click the Target button");
+    });
+  </script>
+</body>
+</html>
