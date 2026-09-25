@@ -1480,3 +1480,15 @@ sudo node tools/senda_argus_zero_install_node.mjs install \
 ```
 
 The installer injects the Senda preload through `NODE_OPTIONS=--import=...` and supports ESM/CommonJS interception for the provider/MCP layer.
+
+## Senda Agent Studio MVP
+
+`agent-studio/` adds the initial WebUI/control plane for Hooked Docker Agents:
+
+- Agent list
+- Docker start/stop/restart
+- Agent creation/deploy
+- real-time Hook event display
+- Agent trace view
+
+See `agent-studio/README.md`.
