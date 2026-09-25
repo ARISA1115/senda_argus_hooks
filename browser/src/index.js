@@ -37,7 +37,13 @@ const state = {
   listeners: [],
   traceId: null,
   runId: null,
-  events: []
+  events: [],
+  emitQueue: Promise.resolve(),
+  ready: Promise.resolve(null),
+  retryAt: 0,
+  retryDelayMs: 0,
+  droppedEvents: 0,
+  flushing: false
 };
 
 function uid(prefix) {
@@ -182,7 +188,7 @@ async function emit(eventType, {
     conversation_id: state.config.conversationId,
     run_id: state.runId,
     turn_id: state.config.turnId,
-    agent_id: await deriveAgentId(source),
+    agent_id: null,
     purpose_id: purposeId || state.config.purposeId,
     source,
     actor: state.config.actor || {},
@@ -194,22 +200,125 @@ async function emit(eventType, {
     runtime: runtimeMetadata()
   };
 
-  if (state.config.redact) {
-    event = redact(event);
-    event.security.redacted = true;
-  }
+  // agent_id のハッシュは呼ばれた時点の設定で始め、記録だけを呼ばれた順に直前の emit の完了まで待たせる。
+  const agentIdPending = deriveAgentId(source);
+  agentIdPending.catch(() => undefined);
+  const redactEnabled = state.config.redact;
+  const previous = state.emitQueue;
+  let release;
+  state.emitQueue = new Promise((resolve) => { release = resolve; });
+  try {
+    await previous;
+    event.agent_id = await agentIdPending;
 
-  state.events.push(event);
-  state.buffer.push(event);
-  if (state.config.debug) console.debug("[SendaArgus]", eventType, event);
-  if (state.buffer.length >= state.config.batchSize) void flush();
-  return event;
+    if (redactEnabled) {
+      event = redact(event);
+      event.security.redacted = true;
+    }
+
+    state.events.push(event);
+    state.buffer.push(event);
+    if (state.buffer.length > MAX_BUFFER_EVENTS) {
+      recordDropped(state.buffer.length - MAX_BUFFER_EVENTS, "send buffer is full");
+      state.buffer.splice(0, state.buffer.length - MAX_BUFFER_EVENTS);
+    }
+    if (state.config.debug) console.debug("[SendaArgus]", eventType, event);
+    if (state.buffer.length >= state.config.batchSize) void flush();
+    return event;
+  } finally {
+    release();
+  }
 }
 
-async function flush() {
+// keepalive の本文はブラウザが 64 KiB までしか受けないため、1 回の本文をそれより小さく区切る。
+const MAX_BODY_BYTES = 60 * 1024;
+const MAX_REQUEUE_EVENTS = 100;
+const MAX_BUFFER_EVENTS = 1000;
+const MAX_RETRY_DELAY_MS = 60000;
+const MAX_RETRY_AFTER_MS = 300000;
+const RETRY_STATUSES = new Set([401, 403, 408, 425, 429]);
+
+function bodyBytes(text) {
+  return new TextEncoder().encode(text).length;
+}
+
+function sentHeaders() {
+  return Object.fromEntries(
+    Object.entries(state.config.headers || {}).filter(([, value]) => value != null)
+  );
+}
+
+function chunkEvents(events) {
+  const emptyBytes = bodyBytes(JSON.stringify({events: []}));
+  const chunks = [];
+  let current = [];
+  let size = emptyBytes;
+  for (const event of events) {
+    const itemBytes = bodyBytes(JSON.stringify(event)) + 1;
+    if (current.length && size + itemBytes > MAX_BODY_BYTES) {
+      chunks.push(current);
+      current = [];
+      size = emptyBytes;
+    }
+    current.push(event);
+    size += itemBytes;
+  }
+  if (current.length) chunks.push(current);
+  return chunks;
+}
+
+function recordDropped(count, reason) {
+  state.droppedEvents += count;
+  globalThis.console?.warn?.(`[SendaArgus] dropped ${count} events: ${reason}`);
+}
+
+function requeue(events) {
+  const kept = events.slice(-MAX_REQUEUE_EVENTS);
+  if (events.length > kept.length) recordDropped(events.length - kept.length, "retry buffer is full");
+  state.buffer.unshift(...kept);
+}
+
+function scheduleRetry(retryAfter) {
+  const seconds = Number(retryAfter);
+  const hinted = Number.isFinite(seconds) && seconds > 0 ? Math.min(seconds * 1000, MAX_RETRY_AFTER_MS) : 0;
+  state.retryDelayMs = Math.min(MAX_RETRY_DELAY_MS, Math.max(1000, state.retryDelayMs * 2));
+  state.retryAt = Date.now() + Math.max(hinted, state.retryDelayMs);
+}
+
+async function sendChunk(events, headers) {
+  const body = JSON.stringify({events});
+  const withinKeepalive = bodyBytes(body) <= MAX_BODY_BYTES;
+  // sendBeacon はヘッダを送れないため、鍵などのヘッダを設定した送り先には使わない。
+  if (!Object.keys(headers).length && withinKeepalive
+      && globalThis.navigator?.sendBeacon && state.config.useBeacon !== false) {
+    const queued = globalThis.navigator.sendBeacon(
+      state.config.endpoint,
+      new Blob([body], {type: "application/json"})
+    );
+    if (queued) return {outcome: "sent"};
+  }
+
+  const rawFetch = state.originals.fetch || globalThis.fetch;
+  const response = await rawFetch(state.config.endpoint, {
+    method: "POST",
+    headers: {"content-type": "application/json", ...headers},
+    body,
+    keepalive: withinKeepalive
+  });
+  if (response?.ok) return {outcome: "sent"};
+  const status = response?.status ?? 0;
+  if (!status || status >= 500 || RETRY_STATUSES.has(status)) {
+    return {outcome: "retry", retryAfter: response?.headers?.get?.("retry-after")};
+  }
+  return {outcome: "drop", status};
+}
+
+async function flush({force = false} = {}) {
   if (!state.config || !state.buffer.length) return;
-  const events = state.buffer.splice(0, state.buffer.length);
+  if (!force && (state.flushing || Date.now() < state.retryAt)) return;
+  state.flushing = true;
   try {
+    const events = state.buffer.splice(0, state.buffer.length);
     if (state.config.exporter === "console") {
       console.log("[SendaArgus events]", events);
       return;
@@ -217,28 +326,28 @@ async function flush() {
     if (state.config.exporter === "memory") return;
     if (!state.config.endpoint) return;
 
-    const body = JSON.stringify({events});
-    if (globalThis.navigator?.sendBeacon && state.config.useBeacon !== false) {
-      const ok = globalThis.navigator.sendBeacon(
-        state.config.endpoint,
-        new Blob([body], {type: "application/json"})
-      );
-      if (ok) return;
+    const headers = sentHeaders();
+    const chunks = chunkEvents(events);
+    for (let index = 0; index < chunks.length; index += 1) {
+      let result;
+      try {
+        result = await sendChunk(chunks[index], headers);
+      } catch {
+        result = {outcome: "retry"};
+      }
+      if (result.outcome === "sent") continue;
+      if (result.outcome === "drop") {
+        recordDropped(chunks[index].length, `collector responded ${result.status}`);
+        continue;
+      }
+      requeue(chunks.slice(index).flat());
+      scheduleRetry(result.retryAfter);
+      return;
     }
-
-    const rawFetch = state.originals.fetch || globalThis.fetch;
-    await rawFetch(state.config.endpoint, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        ...state.config.headers,
-        "x-senda-argus-internal": "1"
-      },
-      body,
-      keepalive: true
-    });
-  } catch {
-    state.buffer.unshift(...events.slice(-100));
+    state.retryDelayMs = 0;
+    state.retryAt = 0;
+  } finally {
+    state.flushing = false;
   }
 }
 
@@ -578,6 +687,8 @@ function register(options = {}) {
   if (state.installed) return api;
   state.config = defaultConfig(options);
   state.installed = true;
+  state.retryAt = 0;
+  state.retryDelayMs = 0;
 
   if (state.config.instrumentFetch) patchFetch();
   if (state.config.instrumentXHR) patchXHR();
@@ -585,10 +696,10 @@ function register(options = {}) {
 
   state.flushTimer = setInterval(() => void flush(), state.config.flushIntervalMs);
   state.flushTimer?.unref?.();
-  addListener(globalThis, "pagehide", () => void flush());
-  addListener(globalThis, "beforeunload", () => void flush());
+  addListener(globalThis, "pagehide", () => void flush({force: true}));
+  addListener(globalThis, "beforeunload", () => void flush({force: true}));
 
-  void emit("browser.ai.instrumented", {
+  state.ready = emit("browser.ai.instrumented", {
     source: {component: "runtime", sdk: "senda_argus_browser_hooks"},
     data: {
       scope: ["llm", "mcp"],
@@ -623,6 +734,10 @@ function unregister() {
   state.flushTimer = null;
   state.traceId = null;
   state.runId = null;
+}
+
+function ready() {
+  return state.ready;
 }
 
 function getEvents() {
@@ -671,6 +786,7 @@ const api = {
   unregister,
   flush,
   emit,
+  ready,
   getEvents,
   clearEvents,
   setContext,
@@ -679,7 +795,7 @@ const api = {
 
 if (typeof globalThis !== "undefined") globalThis.SendaArgus = api;
 
-export {register, unregister, flush, emit, getEvents, clearEvents, setContext};
+export {register, unregister, flush, emit, ready, getEvents, clearEvents, setContext};
 export default api;
 
 if (typeof document !== "undefined") queueMicrotask(autoRegisterFromScript);

@@ -113,6 +113,12 @@ SendaArgus.register({
 });
 ```
 
+`register()` returns synchronously. Await `SendaArgus.ready()` when the caller needs the `browser.ai.instrumented` startup event to be recorded first. Events are recorded in the order `emit()` is called.
+
+When `headers` is set, for example an API key for the collector, batches are sent with `fetch` so that the headers reach the collector. Header entries whose value is `null` or `undefined` are ignored, and `navigator.sendBeacon` is used only when no header remains. For a cross-origin collector, the collector must allow the configured header names in its CORS policy; the hooks send no other custom header.
+
+Each request body is kept under 60 KiB so that it can be sent with `keepalive` while the page is closing. When the collector answers 401, 403, 408, 425, 429 or 5xx, or the request fails, the newest 100 events of the batch are kept and sent again after a backoff that starts at 1 second and doubles up to 60 seconds, or after `Retry-After`. Other 4xx answers drop the batch and log a warning. Closing the page flushes immediately regardless of the backoff.
+
 ## Classification behavior
 
 ### LLM endpoints
