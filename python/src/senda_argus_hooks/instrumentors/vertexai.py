@@ -191,6 +191,54 @@ def _emit_llm_request(
     )
 
 
+def _attr_or_key(obj: Any, name: str) -> Any:
+    if isinstance(obj, dict):
+        return obj.get(name)
+    return getattr(obj, name, None)
+
+
+def _offered_tool_names(model: Any, kwargs: dict[str, Any]) -> list[str]:
+    """Vertex AI の generate_content に渡された提示ツール集合の名前を取り出す。
+
+    Vertex は tools=[Tool(function_declarations=[FunctionDeclaration(name=...)])] を受け取る。
+    Tool と FunctionDeclaration はオブジェクトと dict のどちらの形もありうる。
+    """
+    tools = kwargs.get("tools")
+    if tools is None:
+        tools = getattr(model, "_tools", None)
+    names: list[str] = []
+    if isinstance(tools, (list, tuple)):
+        for tool in tools:
+            decls = _attr_or_key(tool, "function_declarations")
+            if isinstance(decls, (list, tuple)):
+                for decl in decls:
+                    name = _attr_or_key(decl, "name")
+                    if name:
+                        names.append(str(name))
+    return names
+
+
+def _selected_tool_names(response: Any) -> list[str]:
+    """Vertex AI 応答でモデルが選択した function 名を順序を保って全て取り出す。
+
+    Vertex は candidates[].content.parts[].function_call.name に選択を載せる。並列選択も全て収集する。
+    """
+    names: list[str] = []
+    candidates = _attr_or_key(response, "candidates")
+    if isinstance(candidates, (list, tuple)):
+        for cand in candidates:
+            content = _attr_or_key(cand, "content")
+            parts = _attr_or_key(content, "parts")
+            if isinstance(parts, (list, tuple)):
+                for part in parts:
+                    fc = _attr_or_key(part, "function_call")
+                    if fc is not None:
+                        name = _attr_or_key(fc, "name")
+                        if name:
+                            names.append(str(name))
+    return names
+
+
 def _emit_request(model: Any, args: tuple, kwargs: dict[str, Any], response: Any, start: float) -> None:
     cfg = get_config()
     if cfg.capture_response:
@@ -198,6 +246,19 @@ def _emit_request(model: Any, args: tuple, kwargs: dict[str, Any], response: Any
     else:
         output = {"response_hash": sha256_value(str(response))}
     _emit_llm_request(model, args, kwargs, start, _usage(response), _response_model_of(response), output)
+    offered = _offered_tool_names(model, kwargs)
+    selected = _selected_tool_names(response)
+    if offered and selected:
+        alternatives = [{"name": name} for name in offered]
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        for selected_tool in selected:
+            emit_event(
+                "agent.decision",
+                source={"component": "instrumentor", "sdk": "vertexai", "provider": "vertex_ai", "operation": "generate_content"},
+                data={"alternatives": alternatives, "selected_tool": selected_tool},
+                status="success",
+                latency_ms=latency_ms,
+            )
 
 
 def _new_stream_state() -> dict[str, Any]:

@@ -287,3 +287,65 @@ def test_uninstrument_restores_original(tmp_path, monkeypatch):
     shutdown()
     assert _GenerativeModel._generate_content is original_sync
     assert _GenerativeModel._generate_content_async is original_async
+
+
+class _FakeFunctionCall:
+    def __init__(self, name):
+        self.name = name
+
+
+class _FakePart:
+    def __init__(self, name):
+        self.function_call = _FakeFunctionCall(name)
+
+
+class _FakeToolContent:
+    def __init__(self, names):
+        self.parts = [_FakePart(name) for name in names]
+
+
+class _FakeCandidate:
+    def __init__(self, names):
+        self.content = _FakeToolContent(names)
+
+
+class _FakeToolResponse:
+    def __init__(self, names):
+        self.candidates = [_FakeCandidate(names)]
+        self.usage_metadata = None
+
+    def __str__(self):
+        return "tool response"
+
+
+def test_vertexai_emits_agent_decision_for_tool_selection(tmp_path, monkeypatch):
+    """提示ツール集合と応答の function_call がある呼び出しで agent.decision を送出する。"""
+    _install_fake_vertexai(monkeypatch)
+    from vertexai.generative_models import GenerativeModel
+
+    path = tmp_path / "events.jsonl"
+    register(
+        project="test-vertexai-steer",
+        exporters=[{"type": "jsonl", "path": str(path)}],
+        auto_instrument=True,
+        instrument_openai=False,
+        instrument_anthropic=False,
+        instrument_litellm=False,
+        instrument_ollama=False,
+        instrument_bedrock=False,
+        instrument_mcp=False,
+        instrument_argus_sdk=False,
+        instrument_openai_agents=False,
+        capture_prompt=False,
+        capture_response=False,
+    )
+    model = GenerativeModel("gemini-fake", response=_FakeToolResponse(["danger_exec"]))
+    model.generate_content(
+        contents=[],
+        tools=[{"function_declarations": [{"name": "safe_lookup"}, {"name": "danger_exec"}]}],
+    )
+    shutdown()
+    decisions = [event for event in _read_events(path) if event["event_type"] == "agent.decision"]
+    assert len(decisions) == 1
+    assert decisions[0]["data"]["selected_tool"] == "danger_exec"
+    assert [alt["name"] for alt in decisions[0]["data"]["alternatives"]] == ["safe_lookup", "danger_exec"]

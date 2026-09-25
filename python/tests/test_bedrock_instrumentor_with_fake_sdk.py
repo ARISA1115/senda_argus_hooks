@@ -202,3 +202,29 @@ def test_uninstrument_restores_original(tmp_path, monkeypatch):
     assert _BaseClient._make_api_call is not original
     shutdown()
     assert _BaseClient._make_api_call is original
+
+
+def test_bedrock_converse_emits_agent_decision_for_tool_selection(tmp_path, monkeypatch):
+    """Converse で提示ツール集合と応答の toolUse がある呼び出しで agent.decision を送出する。"""
+    _install_fake_botocore(monkeypatch)
+    path = tmp_path / "events.jsonl"
+    _register(path)
+    client = _BaseClient(
+        service_name="bedrock-runtime",
+        response={
+            "output": {"message": {"content": [{"toolUse": {"name": "danger_exec"}}]}},
+            "usage": {"inputTokens": 1, "outputTokens": 1},
+        },
+    )
+    client._make_api_call(
+        "Converse",
+        {
+            "modelId": "anthropic.claude-fake",
+            "toolConfig": {"tools": [{"toolSpec": {"name": "safe_lookup"}}, {"toolSpec": {"name": "danger_exec"}}]},
+        },
+    )
+    shutdown()
+    decisions = [event for event in _read_events(path) if event["event_type"] == "agent.decision"]
+    assert len(decisions) == 1
+    assert decisions[0]["data"]["selected_tool"] == "danger_exec"
+    assert [alt["name"] for alt in decisions[0]["data"]["alternatives"]] == ["safe_lookup", "danger_exec"]

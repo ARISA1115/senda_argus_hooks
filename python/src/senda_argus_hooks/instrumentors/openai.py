@@ -76,6 +76,21 @@ class OpenAIInstrumentor(BaseInstrumentor):
                     status="success",
                     latency_ms=latency_ms,
                 )
+                offered = _offered_tool_names(kwargs)
+                selected = _selected_tool_names(response)
+                if offered and selected:
+                    alternatives = [{"name": name} for name in offered]
+                    for selected_tool in selected:
+                        emit_event(
+                            "agent.decision",
+                            source={"component": "instrumentor", "sdk": "openai", "provider": "openai", "operation": operation},
+                            data={
+                                "alternatives": alternatives,
+                                "selected_tool": selected_tool,
+                            },
+                            status="success",
+                            latency_ms=latency_ms,
+                        )
                 return response
             except Exception as exc:
                 latency_ms = int((time.perf_counter() - start) * 1000)
@@ -154,6 +169,65 @@ def _extract_messages(args, kwargs) -> list[Any] | None:
     if isinstance(messages, tuple):
         messages = list(messages)
     return messages if isinstance(messages, list) else None
+
+def _offered_tool_names(kwargs) -> list[str]:
+    """LLM 呼び出しに渡された提示ツール集合の名前を取り出す。
+
+    chat.completions は tools=[{"type":"function","function":{"name":...}}]、
+    responses API は tools=[{"type":"function","name":...}] の形をとる。
+    どちらの形からも関数名を拾う。
+    """
+    tools = kwargs.get("tools")
+    names: list[str] = []
+    if isinstance(tools, (list, tuple)):
+        for tool in tools:
+            name = ""
+            if isinstance(tool, dict):
+                fn = tool.get("function")
+                if isinstance(fn, dict):
+                    name = str(fn.get("name") or "")
+                if not name:
+                    name = str(tool.get("name") or "")
+            if name:
+                names.append(name)
+    return names
+
+
+def _selected_tool_names(response: Any) -> list[str]:
+    """LLM 応答でモデルが選択したツール名を順序を保って全て取り出す。
+
+    並列ツール呼び出しでは応答に複数の選択が入る。最初の 1 件で打ち切ると
+    後続の選択が監査から漏れるため、全て収集する。
+    chat.completions は choices[].message.tool_calls[].function.name、
+    responses API は output[].name (type=function_call) を参照する。
+    """
+    resp = _safe_response(response)
+    if not isinstance(resp, dict):
+        return []
+    names: list[str] = []
+    choices = resp.get("choices")
+    if isinstance(choices, list):
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+            message = choice.get("message")
+            tool_calls = message.get("tool_calls") if isinstance(message, dict) else None
+            if isinstance(tool_calls, list):
+                for call in tool_calls:
+                    if isinstance(call, dict):
+                        fn = call.get("function")
+                        name = str(fn.get("name") or "") if isinstance(fn, dict) else ""
+                        if name:
+                            names.append(name)
+    output = resp.get("output")
+    if isinstance(output, list):
+        for item in output:
+            if isinstance(item, dict) and item.get("type") in ("function_call", "tool_call"):
+                name = str(item.get("name") or "")
+                if name:
+                    names.append(name)
+    return names
+
 
 def _safe_response(response: Any) -> Any:
     for attr in ("model_dump", "dict"):

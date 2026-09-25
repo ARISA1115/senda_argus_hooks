@@ -82,6 +82,18 @@ class BedrockInstrumentor(BaseInstrumentor):
                     status="success",
                     latency_ms=latency_ms,
                 )
+                offered = _offered_tool_names(api_params)
+                selected = _selected_tool_names(operation_name, response)
+                if offered and selected:
+                    alternatives = [{"name": name} for name in offered]
+                    for selected_tool in selected:
+                        emit_event(
+                            "agent.decision",
+                            source={"component": "instrumentor", "sdk": "bedrock", "provider": "bedrock", "operation": operation_name},
+                            data={"alternatives": alternatives, "selected_tool": selected_tool},
+                            status="success",
+                            latency_ms=latency_ms,
+                        )
                 return response
             except Exception as exc:
                 latency_ms = int((time.perf_counter() - start) * 1000)
@@ -102,6 +114,43 @@ class BedrockInstrumentor(BaseInstrumentor):
             setattr(target, method_name, original)
         self._patches = []
         return True
+
+
+def _offered_tool_names(api_params: Any) -> list[str]:
+    """Bedrock Converse に渡された提示ツール集合の名前を取り出す。
+
+    Converse は toolConfig={"tools":[{"toolSpec":{"name":...}}]} の形をとる。
+    """
+    names: list[str] = []
+    if isinstance(api_params, dict):
+        tool_config = api_params.get("toolConfig")
+        tools = tool_config.get("tools") if isinstance(tool_config, dict) else None
+        if isinstance(tools, list):
+            for tool in tools:
+                spec = tool.get("toolSpec") if isinstance(tool, dict) else None
+                name = str(spec.get("name") or "") if isinstance(spec, dict) else ""
+                if name:
+                    names.append(name)
+    return names
+
+
+def _selected_tool_names(operation_name: Any, response: Any) -> list[str]:
+    """Bedrock Converse 応答でモデルが選択したツール名を順序を保って全て取り出す。
+
+    Converse は output.message.content[] に toolUse ブロックを載せる。並列選択を漏らさず収集する。
+    """
+    names: list[str] = []
+    if operation_name == "Converse" and isinstance(response, dict):
+        output = response.get("output")
+        message = output.get("message") if isinstance(output, dict) else None
+        content = message.get("content") if isinstance(message, dict) else None
+        if isinstance(content, list):
+            for block in content:
+                tool_use = block.get("toolUse") if isinstance(block, dict) else None
+                name = str(tool_use.get("name") or "") if isinstance(tool_use, dict) else ""
+                if name:
+                    names.append(name)
+    return names
 
 
 def _service_name(client: Any) -> str:

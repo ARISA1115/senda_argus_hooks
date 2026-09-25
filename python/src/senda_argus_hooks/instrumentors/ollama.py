@@ -94,6 +94,21 @@ class OllamaInstrumentor(BaseInstrumentor):
                     status="success",
                     latency_ms=latency_ms,
                 )
+                offered = _offered_tool_names(kwargs)
+                selected = _selected_tool_names(response)
+                if offered and selected:
+                    alternatives = [{"name": name} for name in offered]
+                    for selected_tool in selected:
+                        emit_event(
+                            "agent.decision",
+                            source={"component": "instrumentor", "sdk": "ollama", "provider": "ollama", "operation": operation},
+                            data={
+                                "alternatives": alternatives,
+                                "selected_tool": selected_tool,
+                            },
+                            status="success",
+                            latency_ms=latency_ms,
+                        )
                 return response
             except Exception as exc:
                 latency_ms = int((time.perf_counter() - start) * 1000)
@@ -184,6 +199,48 @@ def _llm_input_hash_metadata(args, kwargs, messages) -> dict[str, Any]:
             }
         )
     return metadata
+
+
+def _offered_tool_names(kwargs) -> list[str]:
+    """ollama.chat に渡された提示ツール集合の名前を取り出す。
+
+    ollama は OpenAI 互換の tools=[{"type":"function","function":{"name":...}}] を受け取る。
+    """
+    tools = kwargs.get("tools")
+    names: list[str] = []
+    if isinstance(tools, (list, tuple)):
+        for tool in tools:
+            name = ""
+            if isinstance(tool, dict):
+                fn = tool.get("function")
+                if isinstance(fn, dict):
+                    name = str(fn.get("name") or "")
+                if not name:
+                    name = str(tool.get("name") or "")
+            if name:
+                names.append(name)
+    return names
+
+
+def _selected_tool_names(response: Any) -> list[str]:
+    """ollama 応答でモデルが選択したツール名を順序を保って全て取り出す。
+
+    ollama は message.tool_calls[].function.name に選択を載せる。並列選択を漏らさず全て収集する。
+    """
+    resp = _safe_response(response)
+    if not isinstance(resp, dict):
+        return []
+    names: list[str] = []
+    message = resp.get("message")
+    tool_calls = message.get("tool_calls") if isinstance(message, dict) else None
+    if isinstance(tool_calls, list):
+        for call in tool_calls:
+            if isinstance(call, dict):
+                fn = call.get("function")
+                name = str(fn.get("name") or "") if isinstance(fn, dict) else ""
+                if name:
+                    names.append(name)
+    return names
 
 
 def _safe_response(response: Any) -> Any:
