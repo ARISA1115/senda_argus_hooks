@@ -8,7 +8,7 @@ from senda_argus_hooks.core.hashing import sha256_value
 from senda_argus_hooks.core.model_identity import models_correspond
 from senda_argus_hooks.core.runtime import emit_event, get_config
 
-from .base import BaseInstrumentor
+from .base import BaseInstrumentor, audit_guard
 
 
 class VertexAIInstrumentor(BaseInstrumentor):
@@ -65,7 +65,9 @@ class VertexAIInstrumentor(BaseInstrumentor):
                 raise
             if kwargs.get("stream") and hasattr(response, "__iter__"):
                 return _wrap_stream(model, args, kwargs, response, start)
-            _emit_request(model, args, kwargs, response, start)
+            # 観測の後処理は本来の呼び出しから隔離する。ここで失敗しても応答は返す。
+            with audit_guard("vertexai.generate_content"):
+                _emit_request(model, args, kwargs, response, start)
             return response
 
         return wrapper
@@ -80,7 +82,9 @@ class VertexAIInstrumentor(BaseInstrumentor):
                 raise
             if kwargs.get("stream") and hasattr(response, "__aiter__"):
                 return _wrap_stream_async(model, args, kwargs, response, start)
-            _emit_request(model, args, kwargs, response, start)
+            # 観測の後処理は本来の呼び出しから隔離する。ここで失敗しても応答は返す。
+            with audit_guard("vertexai.generate_content_async"):
+                _emit_request(model, args, kwargs, response, start)
             return response
 
         return wrapper

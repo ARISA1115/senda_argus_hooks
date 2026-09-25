@@ -6,7 +6,7 @@ from typing import Any, Callable
 from senda_argus_hooks.core.hashing import sha256_value
 from senda_argus_hooks.core.identity import data_source_hash, derive_mcp_profile_id, derive_purpose_id, mcp_data_source_profile, normalize_url
 from senda_argus_hooks.core.runtime import emit_event, get_config
-from .base import BaseInstrumentor
+from .base import BaseInstrumentor, audit_guard
 
 
 class MCPPythonInstrumentor(BaseInstrumentor):
@@ -62,6 +62,21 @@ class MCPPythonInstrumentor(BaseInstrumentor):
             )
         try:
             response = await original_result
+        except Exception as exc:
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            emit_event(
+                "mcp.tool_call.failed" if operation == "call_tool" else f"mcp.{operation}.failed",
+                source={"component": "instrumentor", "sdk": "mcp_python", "operation": operation},
+                data={"mcp": meta},
+                status="error",
+                latency_ms=latency_ms,
+                error={"type": exc.__class__.__name__, "message": str(exc)},
+                purpose_id=purpose_id,
+            )
+            raise
+
+        # 観測の後処理は本来の呼び出しから隔離する。ここで失敗しても応答は返す。
+        with audit_guard(operation):
             latency_ms = int((time.perf_counter() - started) * 1000)
             result_payload = _safe_response(response)
             data = {"mcp": {**meta}}
@@ -76,19 +91,7 @@ class MCPPythonInstrumentor(BaseInstrumentor):
                 latency_ms=latency_ms,
                 purpose_id=purpose_id,
             )
-            return response
-        except Exception as exc:
-            latency_ms = int((time.perf_counter() - started) * 1000)
-            emit_event(
-                "mcp.tool_call.failed" if operation == "call_tool" else f"mcp.{operation}.failed",
-                source={"component": "instrumentor", "sdk": "mcp_python", "operation": operation},
-                data={"mcp": meta},
-                status="error",
-                latency_ms=latency_ms,
-                error={"type": exc.__class__.__name__, "message": str(exc)},
-                purpose_id=purpose_id,
-            )
-            raise
+        return response
 
     def uninstrument(self) -> bool:
         for cls, method_name, original in self._patches:
