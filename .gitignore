@@ -150,6 +150,9 @@ coverage/
 # TypeScript incremental build
 *.tsbuildinfo
 
+# JS test build output
+js/dist-test/
+
 # ------------------------------------------------------------
 # Browser / frontend generated output
 # ------------------------------------------------------------
