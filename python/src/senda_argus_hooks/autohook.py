@@ -90,6 +90,11 @@ def bootstrap() -> dict[str, Any] | None:
     fail-open: errors in observability never block the target Agent process.
     """
     global _BOOTSTRAPPED, _BOOTSTRAP_RESULT
+    try:
+        from senda_argus_hooks.config import load_config_files
+        load_config_files()
+    except Exception:
+        pass
     if _BOOTSTRAPPED or not _bool("SENDA_ARGUS_ENABLED", True):
         return _BOOTSTRAP_RESULT
 

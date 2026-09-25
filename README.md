@@ -1447,3 +1447,20 @@ senda-hooks autohook uninstall
 ```
 
 See `PYTHON_AUTOHOOK.md` for deployment details, service environment examples, scopes, limitations, and privacy defaults.
+
+## Python Zero-code deployment (v0.8.0)
+
+Existing Python Agent applications can be instrumented without source changes. The deployment tool discovers Python/venv environments, installs the bundled wheel, writes the managed `.pth` startup hook, and reports running Agent PIDs that require restart.
+
+```bash
+python3 tools/senda_argus_zero_install.py scan
+
+sudo python3 tools/senda_argus_zero_install.py install \
+  --python /opt/my-agent/.venv/bin/python \
+  --endpoint https://argus.example.local \
+  --project my-agent \
+  --environment prod \
+  --exporters argus
+```
+
+See `ZERO_CODE_PYTHON.md` for discovery, bulk deployment, configuration, status, rollback, and offline installation details.

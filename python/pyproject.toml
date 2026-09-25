@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "senda-argus-hooks"
-version = "0.6.0"
+version = "0.8.0"
 description = "Hook-only observability SDK for LLM, MCP, Agent, and RAG runtime audit events."
 readme = "README.md"
 requires-python = ">=3.10"
