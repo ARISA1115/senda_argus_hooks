@@ -1,7 +1,7 @@
 import { performance } from "node:perf_hooks";
 import { sha256Value } from "../core/hashing.js";
 import { newTraceId, runWithContext } from "../core/context.js";
-import { emitEvent } from "../runtime.js";
+import { emitEvent, observe } from "../runtime.js";
 
 const patched = Symbol.for("senda.argus.langgraph.patched");
 
@@ -10,14 +10,15 @@ export async function invokeWithArgus(graph: any, input: any, config?: any) {
   return runWithContext({ traceId }, async () => {
     const started = performance.now();
     emitEvent("agent.run.started", { source: { component: "integration", framework: "langgraph", sdk: "langgraph", operation: "invoke" }, data: { agent: { input_hash: sha256Value(input) } }, status: "started" });
+    let result: any;
     try {
-      const result = await graph.invoke(input, config);
-      emitEvent("agent.run.completed", { source: { component: "integration", framework: "langgraph", sdk: "langgraph", operation: "invoke" }, data: { agent: { output_hash: sha256Value(result) } }, status: "success", latencyMs: Math.round(performance.now() - started) });
-      return result;
+      result = await graph.invoke(input, config);
     } catch (error: any) {
-      emitEvent("agent.run.failed", { source: { component: "integration", framework: "langgraph", sdk: "langgraph", operation: "invoke" }, status: "error", latencyMs: Math.round(performance.now() - started), error: { type: error?.constructor?.name ?? "Error", message: String(error?.message ?? error) } });
+      observe(() => emitEvent("agent.run.failed", { source: { component: "integration", framework: "langgraph", sdk: "langgraph", operation: "invoke" }, status: "error", latencyMs: Math.round(performance.now() - started), error: { type: error?.constructor?.name ?? "Error", message: String(error?.message ?? error) } }));
       throw error;
     }
+    observe(() => emitEvent("agent.run.completed", { source: { component: "integration", framework: "langgraph", sdk: "langgraph", operation: "invoke" }, data: { agent: { output_hash: sha256Value(result) } }, status: "success", latencyMs: Math.round(performance.now() - started) }));
+    return result;
   });
 }
 

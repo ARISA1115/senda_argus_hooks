@@ -2,7 +2,7 @@ import { performance } from "node:perf_hooks";
 import { sha256Value } from "../core/hashing.js";
 import { newTraceId, runWithContext } from "../core/context.js";
 import { dataSourceHash, deriveMcpProfileId, derivePurposeId, mcpDataSourceProfile, normalizeUrl } from "../core/identity.js";
-import { emitEvent, getConfig } from "../runtime.js";
+import { emitEvent, getConfig, observe } from "../runtime.js";
 
 const patched = Symbol.for("senda.argus.mcp.patched");
 
@@ -28,16 +28,19 @@ export function instrumentMCP(client: any, metadata: { serverName?: string; serv
       };
       if (cfg.captureArguments) meta.arguments = request;
       emitEvent("mcp.tool_call.requested", { source: { component: "instrumentor", sdk: "mcp_js", operation: "callTool" }, data: { mcp: meta }, status: "start", purposeId });
+      let result: any;
       try {
-        const result = await original.call(this, request, ...rest);
+        result = await original.call(this, request, ...rest);
+      } catch (error: any) {
+        observe(() => emitEvent("mcp.tool_call.failed", { source: { component: "instrumentor", sdk: "mcp_js", operation: "callTool" }, data: { mcp: meta }, status: "error", latencyMs: Math.round(performance.now() - started), purposeId, error: { type: error?.constructor?.name ?? "Error", message: String(error?.message ?? error) } }));
+        throw error;
+      }
+      observe(() => {
         const completed = { ...meta, result_hash: sha256Value(result) } as Record<string, unknown>;
         if (cfg.captureResult) completed.result = result;
         emitEvent("mcp.tool_call.completed", { source: { component: "instrumentor", sdk: "mcp_js", operation: "callTool" }, data: { mcp: completed }, status: "success", latencyMs: Math.round(performance.now() - started), purposeId });
-        return result;
-      } catch (error: any) {
-        emitEvent("mcp.tool_call.failed", { source: { component: "instrumentor", sdk: "mcp_js", operation: "callTool" }, data: { mcp: meta }, status: "error", latencyMs: Math.round(performance.now() - started), purposeId, error: { type: error?.constructor?.name ?? "Error", message: String(error?.message ?? error) } });
-        throw error;
-      }
+      });
+      return result;
     });
   } as any;
   wrapped[patched] = true;

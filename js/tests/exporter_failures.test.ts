@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { register } from "../src/register.js";
 import { emitEvent, flush, shutdown } from "../src/runtime.js";
+import { invokeWithArgus } from "../src/integrations/langgraph.js";
 import type { EventRecord, Exporter } from "../src/core/types.js";
 
 class MemoryExporter implements Exporter {
@@ -88,6 +89,52 @@ test("a deeply nested MCP result does not fail the tool call", async () => {
   const result = await client.callTool({ name: "lookup", arguments: {} });
   assert.equal(result.structuredContent, deep);
   assert.deepEqual(sink.events.map((event) => event.event_type), ["mcp.tool_call.requested", "mcp.tool_call.completed"]);
+  const completed = sink.events[1];
+  const mcp = completed.data.mcp as Record<string, any>;
+  assert.equal(completed.security.observation_failed, undefined);
+  assert.equal(mcp.tool, "lookup");
+  assert.match(String(mcp.result_hash), /^[0-9a-f]{64}$/);
+  assert.ok(JSON.stringify(mcp.result).includes("[MaxDepth]"));
+});
+
+test("undefined results from instrumented calls are returned unchanged", async () => {
+  const sink = new MemoryExporter();
+  const openai = {
+    responses: { create: async () => undefined },
+    chat: { completions: { create: async () => undefined } },
+    embeddings: { create: async () => undefined }
+  };
+  const mcp = { callTool: async (_request: unknown) => undefined };
+  register({ project: "undefined-results", exporters: [sink] }, { openai, mcp, mcpMetadata: { serverName: "demo" } });
+  assert.equal(await openai.responses.create(), undefined);
+  assert.equal(await mcp.callTool({ name: "lookup", arguments: {} }), undefined);
+  const graph = { invoke: async () => undefined };
+  assert.equal(await invokeWithArgus(graph, { question: "q" }), undefined);
+  assert.deepEqual(
+    sink.events.map((event) => event.event_type),
+    ["llm.request", "mcp.tool_call.requested", "mcp.tool_call.completed", "agent.run.started", "agent.run.completed"]
+  );
+  assert.ok(sink.events.every((event) => event.security.observation_failed === undefined));
+});
+
+test("shared references are kept while cycles are folded", async () => {
+  const sink = new MemoryExporter();
+  register({ project: "shared-refs", exporters: [sink] }, {});
+  const x = { value: 1 };
+  const y = { value: 2 };
+  const event = emitEvent("custom.event", { data: { a: x, b: x, list: [y, y] } });
+  assert.deepEqual(event.data, { a: { value: 1 }, b: { value: 1 }, list: [{ value: 2 }, { value: 2 }] });
+});
+
+test("circular data is folded even when redaction is disabled", async () => {
+  const lines: string[] = [];
+  const jsonSink: Exporter = { emit(event: EventRecord) { lines.push(JSON.stringify(event)); } };
+  register({ project: "no-redact", exporters: [jsonSink], redact: false }, {});
+  const payload: Record<string, unknown> = { name: "loop" };
+  payload.self = payload;
+  emitEvent("custom.event", { data: payload });
+  assert.equal(lines.length, 1);
+  assert.equal(JSON.parse(lines[0]).data.self, "[Circular]");
 });
 
 test("circular data is folded instead of failing the event", async () => {
@@ -96,7 +143,7 @@ test("circular data is folded instead of failing the event", async () => {
   const payload: Record<string, unknown> = { name: "loop" };
   payload.self = payload;
   const event = emitEvent("custom.event", { data: payload });
-  assert.equal(event?.data.self, "[Circular]");
+  assert.equal(event.data.self, "[Circular]");
   assert.equal(sink.events.length, 1);
 });
 
@@ -104,9 +151,12 @@ test("data that cannot be read still leaves an event marked as failed observatio
   const sink = new MemoryExporter();
   register({ project: "unreadable-data", exporters: [sink] }, {});
   const data = { get secret(): string { throw new Error("getter failed"); } };
-  const event = emitEvent("custom.event", { data, status: "success" });
-  assert.equal(event?.security.observation_failed, true);
-  assert.deepEqual(event?.data, {});
+  const event = emitEvent("custom.event", { data, status: "success", source: { sdk: "custom-sdk" }, agentId: "agent-1" });
+  assert.equal(event.security.observation_failed, true);
+  assert.deepEqual(event.data, {});
+  assert.equal(event.source.sdk, "custom-sdk");
+  assert.equal(event.agent_id, "agent-1");
+  assert.equal(event.status, "success");
   assert.equal(sink.events.length, 1);
 });
 

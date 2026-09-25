@@ -1,6 +1,6 @@
 import { performance } from "node:perf_hooks";
 import { sha256Value } from "../core/hashing.js";
-import { emitEvent, getConfig } from "../runtime.js";
+import { emitEvent, getConfig, observe } from "../runtime.js";
 import { safeValue } from "../instrumentors/common.js";
 
 function llmData(params: any, model: any, result?: any) {
@@ -19,25 +19,27 @@ export function sendaArgusLanguageModelMiddleware(): any {
     specificationVersion: "v3",
     wrapGenerate: async ({ doGenerate, params, model }: any) => {
       const started = performance.now();
+      let result: any;
       try {
-        const result = await doGenerate();
-        emitEvent("llm.request", { source: { component: "integration", framework: "vercel-ai-sdk", sdk: "ai", provider: model?.provider, operation: "doGenerate" }, data: { llm: llmData(params, model, result) }, status: "success", latencyMs: Math.round(performance.now() - started) });
-        return result;
+        result = await doGenerate();
       } catch (error: any) {
-        emitEvent("llm.error", { source: { component: "integration", framework: "vercel-ai-sdk", sdk: "ai", provider: model?.provider, operation: "doGenerate" }, data: { llm: llmData(params, model) }, status: "error", latencyMs: Math.round(performance.now() - started), error: { type: error?.constructor?.name ?? "Error", message: String(error?.message ?? error) } });
+        observe(() => emitEvent("llm.error", { source: { component: "integration", framework: "vercel-ai-sdk", sdk: "ai", provider: model?.provider, operation: "doGenerate" }, data: { llm: llmData(params, model) }, status: "error", latencyMs: Math.round(performance.now() - started), error: { type: error?.constructor?.name ?? "Error", message: String(error?.message ?? error) } }));
         throw error;
       }
+      observe(() => emitEvent("llm.request", { source: { component: "integration", framework: "vercel-ai-sdk", sdk: "ai", provider: model?.provider, operation: "doGenerate" }, data: { llm: llmData(params, model, result) }, status: "success", latencyMs: Math.round(performance.now() - started) }));
+      return result;
     },
     wrapStream: async ({ doStream, params, model }: any) => {
       const started = performance.now();
+      let result: any;
       try {
-        const result = await doStream();
-        emitEvent("llm.request", { source: { component: "integration", framework: "vercel-ai-sdk", sdk: "ai", provider: model?.provider, operation: "doStream" }, data: { llm: llmData(params, model, { streaming: true }) }, status: "success", latencyMs: Math.round(performance.now() - started) });
-        return result;
+        result = await doStream();
       } catch (error: any) {
-        emitEvent("llm.error", { source: { component: "integration", framework: "vercel-ai-sdk", sdk: "ai", provider: model?.provider, operation: "doStream" }, data: { llm: llmData(params, model) }, status: "error", latencyMs: Math.round(performance.now() - started), error: { type: error?.constructor?.name ?? "Error", message: String(error?.message ?? error) } });
+        observe(() => emitEvent("llm.error", { source: { component: "integration", framework: "vercel-ai-sdk", sdk: "ai", provider: model?.provider, operation: "doStream" }, data: { llm: llmData(params, model) }, status: "error", latencyMs: Math.round(performance.now() - started), error: { type: error?.constructor?.name ?? "Error", message: String(error?.message ?? error) } }));
         throw error;
       }
+      observe(() => emitEvent("llm.request", { source: { component: "integration", framework: "vercel-ai-sdk", sdk: "ai", provider: model?.provider, operation: "doStream" }, data: { llm: llmData(params, model, { streaming: true }) }, status: "success", latencyMs: Math.round(performance.now() - started) }));
+      return result;
     }
   };
 }
