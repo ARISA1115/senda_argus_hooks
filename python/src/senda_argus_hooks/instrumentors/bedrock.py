@@ -7,6 +7,7 @@ import time
 from typing import Any, Callable
 
 from senda_argus_hooks.core.hashing import sha256_value
+from senda_argus_hooks.core.model_identity import models_correspond
 from senda_argus_hooks.core.response_meta import extract_response_model as _extract_response_model
 from senda_argus_hooks.core.runtime import emit_event, get_config
 
@@ -65,7 +66,7 @@ class BedrockInstrumentor(BaseInstrumentor):
                     # Bedrock 修飾 ID とネイティブ ID の表記差は偽陽性源のため、
                     # 正規化して同一モデルと判定できる場合は response_model を送出しない。
                     response_model = _extract_response_model(parsed)
-                    if response_model and not _models_correspond(model, response_model):
+                    if response_model and not models_correspond(model, response_model, _model_core):
                         llm_data["response_model"] = response_model
                     llm_data["output"] = {"response_hash": sha256_value(raw)} if not cfg.capture_response else {"response": parsed}
                 elif operation_name == "Converse" and isinstance(response, dict):
@@ -121,17 +122,6 @@ def _model_core(identifier: str) -> str:
     core = identifier.strip().lower().split(".")[-1]
     core = core.split(":")[0]
     return re.sub(r"-v\d+$", "", core)
-
-
-def _models_correspond(model_id: str, response_model: str) -> bool:
-    """リクエストの modelId とレスポンス自己申告モデルが同一モデルを指すか判定する。"""
-    if not model_id or not response_model:
-        return False
-    a = _model_core(model_id)
-    b = _model_core(response_model)
-    if not a or not b:
-        return False
-    return a == b or a.startswith(b) or b.startswith(a)
 
 
 def _read_and_rewrap_body(response: dict[str, Any]) -> bytes | None:
