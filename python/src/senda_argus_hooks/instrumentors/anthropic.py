@@ -51,6 +51,9 @@ class AnthropicInstrumentor(BaseInstrumentor):
                 usage = _extract_usage(response)
                 if usage:
                     llm_data["usage"] = usage
+                response_model = _extract_response_model(response)
+                if response_model:
+                    llm_data["response_model"] = response_model
                 emit_event(
                     "llm.request",
                     source={"component": "instrumentor", "sdk": "anthropic", "provider": "anthropic", "operation": operation},
@@ -158,3 +161,17 @@ def _extract_usage(response: Any) -> dict[str, int] | None:
     if output_tokens is not None:
         result["output_tokens"] = int(output_tokens)
     return result or None
+
+
+def _extract_response_model(response: Any) -> str | None:
+    """レスポンスが自己申告する実モデル識別子を抽出する。
+
+    リクエストで指定した model との不一致を Argus 側の ModelSwapRule が
+    検知できるよう、response_model として別フィールドで送出する。
+    """
+    model = getattr(response, "model", None)
+    if model is None and isinstance(response, dict):
+        model = response.get("model")
+    if isinstance(model, str) and model.strip():
+        return model
+    return None
