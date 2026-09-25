@@ -1421,3 +1421,29 @@ clang --version
 ## License
 
 Apache License 2.0. See [LICENSE](./LICENSE).
+
+## Existing Python environment auto-hook
+
+Existing Python Agents can be instrumented without modifying Agent source code. Install this package into the exact Python environment used by the Agent, then enable the startup hook:
+
+```bash
+python -m pip install ./python
+senda-hooks autohook install
+senda-hooks autohook status
+```
+
+At Python startup, `senda_argus_autohook.pth` automatically calls `senda_argus_hooks.autohook.bootstrap()` and enables supported instrumentors with `register(auto_instrument=True)`.
+
+Runtime configuration is supplied with `SENDA_ARGUS_*` environment variables. To temporarily disable instrumentation without uninstalling the hook:
+
+```bash
+export SENDA_ARGUS_ENABLED=false
+```
+
+Remove the startup hook with:
+
+```bash
+senda-hooks autohook uninstall
+```
+
+See `PYTHON_AUTOHOOK.md` for deployment details, service environment examples, scopes, limitations, and privacy defaults.

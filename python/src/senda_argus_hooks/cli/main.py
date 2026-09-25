@@ -264,6 +264,28 @@ def _brief_event(event: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+
+def cmd_autohook_install(args) -> int:
+    from senda_argus_hooks.autoinstall import install, print_json
+
+    print_json(install(scope=args.scope, target=args.target, force=args.force))
+    return 0
+
+
+def cmd_autohook_status(args) -> int:
+    from senda_argus_hooks.autoinstall import print_json, status
+
+    result = status(target=args.target)
+    print_json(result)
+    return 0 if result.get("installed") else 1
+
+
+def cmd_autohook_uninstall(args) -> int:
+    from senda_argus_hooks.autoinstall import print_json, uninstall
+
+    print_json(uninstall(target=args.target, force=args.force))
+    return 0
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="senda-hooks", description="Inspect, validate, and convert Senda-Argus hook event files.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -304,6 +326,24 @@ def build_parser() -> argparse.ArgumentParser:
     stats_p = sub.add_parser("stats", help="Summarize events, agents, and purposes")
     stats_p.add_argument("path")
     stats_p.set_defaults(func=cmd_stats)
+
+    autohook_p = sub.add_parser("autohook", help="Install or manage zero-code Python startup hooks")
+    autohook_sub = autohook_p.add_subparsers(dest="autohook_command", required=True)
+
+    autohook_install_p = autohook_sub.add_parser("install", help="Enable auto-hook for this Python environment")
+    autohook_install_p.add_argument("--scope", choices=["auto", "user", "system"], default="auto")
+    autohook_install_p.add_argument("--target", help="Explicit site-packages directory")
+    autohook_install_p.add_argument("--force", action="store_true")
+    autohook_install_p.set_defaults(func=cmd_autohook_install)
+
+    autohook_status_p = autohook_sub.add_parser("status", help="Show auto-hook installation status")
+    autohook_status_p.add_argument("--target", help="Explicit site-packages directory")
+    autohook_status_p.set_defaults(func=cmd_autohook_status)
+
+    autohook_uninstall_p = autohook_sub.add_parser("uninstall", help="Disable auto-hook for this Python environment")
+    autohook_uninstall_p.add_argument("--target", help="Explicit site-packages directory")
+    autohook_uninstall_p.add_argument("--force", action="store_true")
+    autohook_uninstall_p.set_defaults(func=cmd_autohook_uninstall)
 
     return parser
 
