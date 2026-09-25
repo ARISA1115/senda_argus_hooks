@@ -1,7 +1,9 @@
 from __future__ import annotations
 import json, sqlite3, threading
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+
 
 class EventStore:
     def __init__(self, path: str):
@@ -73,3 +75,56 @@ class EventStore:
                 GROUP BY trace_id, run_id ORDER BY last_timestamp DESC LIMIT ?
             """,(agent_id,limit)).fetchall()
         return [dict(r) for r in rs]
+
+    @staticmethod
+    def _dig(event: dict[str, Any], *keys: str):
+        scopes = [event]
+        for name in ('attributes', 'metadata', 'request', 'response', 'data', 'details'):
+            v = event.get(name)
+            if isinstance(v, dict):
+                scopes.append(v)
+        for scope in scopes:
+            for key in keys:
+                value = scope.get(key)
+                if value not in (None, '', [], {}):
+                    return value
+        return None
+
+    @staticmethod
+    def _timestamp_ms(value: Any) -> float | None:
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(str(value).replace('Z', '+00:00')).timestamp() * 1000
+        except Exception:
+            return None
+
+    def trace_detail(self, trace_id:str|None=None, run_id:str|None=None, agent_id:str|None=None, limit:int=500):
+        events = self.trace(trace_id, run_id, agent_id, limit)
+        model = prompt = response = None
+        latency_ms = None
+        for ev in events:
+            model = model or self._dig(ev, 'model', 'model_name')
+            if prompt is None:
+                prompt = self._dig(ev, 'prompt', 'input', 'messages', 'request_body')
+            if response is None:
+                response = self._dig(ev, 'response', 'output', 'content', 'text', 'result')
+            if latency_ms is None:
+                latency_ms = self._dig(ev, 'latency_ms', 'duration_ms', 'elapsed_ms')
+        if latency_ms is None and len(events) > 1:
+            start = self._timestamp_ms(events[0].get('timestamp'))
+            end = self._timestamp_ms(events[-1].get('timestamp'))
+            if start is not None and end is not None and end >= start:
+                latency_ms = round(end - start, 3)
+        summary = {
+            'agent_id': agent_id or (events[0].get('agent_id') if events else None),
+            'trace_id': trace_id or (events[0].get('trace_id') if events else None),
+            'run_id': run_id or (events[0].get('run_id') if events else None),
+            'model': model,
+            'prompt': prompt,
+            'response': response,
+            'latency_ms': latency_ms,
+            'event_count': len(events),
+            'status': next((e.get('status') for e in reversed(events) if e.get('status')), None),
+        }
+        return {'summary': summary, 'events': events}

@@ -1,71 +1,149 @@
-# Senda Agent Studio MVP
+# Senda Agent Studio
 
-Minimal WebUI for Senda-Argus managed Agent containers.
+Senda Agent Studio is a Docker management and observability UI dedicated to **Senda Agent Runtime** containers.
 
-## MVP functions
+## Runtime model
 
-1. Agent list
-2. Docker start / stop / restart
-3. Agent creation/deploy
-4. Real-time Hook event display (SSE)
-5. Agent detail trace
-
-## Architecture
-
-- FastAPI management API + static WebUI
-- Docker Engine via `/var/run/docker.sock`
-- Hook ingest endpoint compatible with existing SDK: `POST /v1/agent-runs/ingest`
-- SQLite event store at `/data/studio.db`
-- SSE at `/api/events/stream`
-
-## Start
+Agent-specific Docker images are not required. Build the shared Hook-enabled Python Runtime once:
 
 ```bash
-docker compose -f agent-studio/compose.yml up -d --build
+docker build -f docker/python/Dockerfile -t senda/python-agent:0.8 .
 ```
 
-Open: `http://HOST:8080`
-
-The Studio container and managed Agent containers should share `senda-agent-net`.
-When creating an Agent in the UI, use this default Hook endpoint:
+Keep an existing Agent on the host, for example:
 
 ```text
-http://senda-agent-studio:8080
+/Users/you/agents/soc-agent/
+├── agent.py
+└── requirements.txt
 ```
 
-The managed container receives:
+In Agent Studio create a Runtime with:
 
 ```text
-SENDA_ARGUS_ENABLED=true
-SENDA_ARGUS_EXPORTER=argus
-SENDA_ARGUS_EXPORTERS=argus
-SENDA_ARGUS_ENDPOINT=http://senda-agent-studio:8080
-SENDA_ARGUS_AGENT_ID=<agent id>
-SENDA_ARGUS_PROJECT=<project>
-SENDA_ARGUS_ENVIRONMENT=<environment>
+Runtime Image:      senda/python-agent:0.8
+Host Agent Path:    /Users/you/agents/soc-agent
+Container Path:     /workspace
+Entrypoint:         agent.py
+Install deps:       enabled
 ```
 
-## Managed container labels
+Agent Studio asks the host Docker Engine to create the equivalent of:
 
-Only containers with `com.senda.agent.managed=true` appear in the Agent list.
+```bash
+docker run \
+  -v /Users/you/agents/soc-agent:/workspace:rw \
+  -w /workspace \
+  senda/python-agent:0.8 \
+  python agent.py
+```
 
-## Security note
+The Runtime image already contains Senda Argus Hooks, so the Agent source does not need to import or register the Hook package.
 
-This MVP mounts the Docker socket for simplicity. Access to the Docker socket is effectively host-level control. In production, place Studio behind authentication and replace direct socket access with a restricted Docker API proxy or dedicated runtime controller.
+If `/workspace/requirements.txt` exists and dependency installation is enabled, the Runtime installs it before launching the Agent. A SHA-256 marker avoids reinstalling unchanged requirements on container restart.
 
-Environment values submitted at Agent creation are passed to Docker and can include secrets. For production, replace this with Docker/Kubernetes secrets or an external secret manager.
+## Start Agent Studio
 
-## Existing Senda Hook runtime
+```bash
+cd agent-studio
+docker compose up -d --build
+```
 
-Use the Hooked Python/Node images produced in the previous phases as the `Image` field. The Agent application itself does not need a Senda-specific import when the image/runtime auto-hook is active.
-
-## Optional upstream Senda-Argus forwarding
-
-Studio can retain events for the UI and also forward the same payload to a central Senda-Argus instance:
+Open:
 
 ```text
-SENDA_STUDIO_ARGUS_UPSTREAM=https://argus.example.local
-SENDA_STUDIO_ARGUS_API_KEY=...
+http://localhost:8080
 ```
 
-Forwarding is fail-open and does not block Agent execution if the upstream is unavailable.
+## macOS / Docker Desktop
+
+Use an absolute macOS host path such as `/Users/you/agents/my-agent`. The bind source is resolved by Docker Desktop's host Docker Engine.
+
+The Agent source directory must be shared/accessible to Docker Desktop. Paths under `/Users` normally work with the standard Docker Desktop configuration.
+
+## Management boundary
+
+New Runtime containers are labeled:
+
+```text
+com.senda.agent-runtime=true
+com.senda.agent.id=<agent_id>
+com.senda.agent.runtime=python|node
+```
+
+Agent Studio lists and operates only Senda Agent Runtime containers. Start/Stop/Restart also inspect the target container and reject non-Senda containers.
+
+## Stop/Restart behavior
+
+Stop uses Docker's 3-second graceful shutdown timeout and allows up to 15 seconds for the Docker API response. Restart allows up to 20 seconds. This prevents a successful stop from being shown as a Docker socket timeout on Docker Desktop.
+
+### Runtime deletion
+
+The Agents list includes a **Delete** button. Agent Studio only removes containers that are verified as Senda Agent Runtimes (`com.senda.agent-runtime=true`). If the runtime is running, Studio stops it first. Deletion does **not** remove the common Runtime image or the host Agent source directory mounted into `/workspace`.
+
+## Trace observability (v0.2.0)
+
+Agent Studio renders a trace as a flow instead of only a flat event table. Supported event families include:
+
+```text
+Agent -> LLM Request -> Response
+Agent -> LLM Request -> MCP -> Tool Result -> LLM Request -> Response
+```
+
+The Trace Detail view extracts and displays the following fields when they are present in Hook event payloads:
+
+- model / model_name
+- prompt / input / messages
+- response / output / content / text / result
+- latency_ms / duration_ms / elapsed_ms
+- status
+- trace_id / run_id
+
+If explicit latency is not present and a trace has multiple events, Studio derives elapsed time from the first and last timestamps.
+
+### Response-side events
+
+Studio recognizes `llm.response`, `llm.completed`, and `llm.completion`. It intentionally does not invent a response event from an `llm.request` event. If the current Hook instrumentor emits only `llm.request`, update the Hook SDK/runtime instrumentor to emit a response-side event as well.
+
+## Docker logs
+
+Each Senda Agent Runtime has a **Logs** action. Studio retrieves only logs for containers that pass the Senda Runtime label check.
+
+API:
+
+```text
+GET /api/agents/{container_id}/logs?tail=300
+```
+
+The common Runtime image and host Agent source are not modified by log viewing.
+
+## Runtime workspace UI (v0.3.0)
+
+The WebUI separates registration from runtime operations:
+
+```text
+Runtimes
+  - Runtime list
+  - Start / Stop / Restart / Delete
+  - Per-Runtime Trace accordion
+  - Per-Runtime Docker Logs accordion
+  - Global Live Hook Events
+
+Register Runtime
+  - Runtime image
+  - Host Agent Path
+  - Container Path / Entrypoint
+  - Project / Environment
+  - Environment JSON
+```
+
+Trace and Docker Logs are intentionally displayed inside the selected Runtime card rather than in global panels at the bottom of the page. This makes the owning Agent/Runtime explicit when multiple Runtimes are registered.
+
+Use the top navigation or these hashes directly:
+
+```text
+http://localhost:8080/#runtimes
+http://localhost:8080/#register
+```
+
+When validating a Hook change, restart or re-run the Agent Runtime so a new execution generates new Hook events and a new trace. Historical traces are not rewritten by a UI or Hook SDK update.

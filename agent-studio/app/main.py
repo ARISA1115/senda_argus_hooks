@@ -1,7 +1,6 @@
 from __future__ import annotations
 import asyncio, json, os
 from pathlib import Path
-from typing import Any
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -13,7 +12,7 @@ BASE=Path(__file__).resolve().parent
 DB=os.getenv('SENDA_STUDIO_DB','/data/studio.db')
 store=EventStore(DB)
 subscribers:set[asyncio.Queue]=set()
-app=FastAPI(title='Senda Agent Studio', version='0.1.0')
+app=FastAPI(title='Senda Agent Studio', version='0.3.0')
 app.mount('/static', StaticFiles(directory=BASE/'static'), name='static')
 _runtime=None
 
@@ -27,6 +26,10 @@ class AgentCreate(BaseModel):
     image:str
     runtime:str='python'
     command:str|None=None
+    host_path:str|None=None
+    container_path:str='/workspace'
+    entrypoint:str|None=None
+    install_dependencies:bool=True
     agent_id:str|None=None
     project:str='default'
     environment:str='prod'
@@ -39,7 +42,7 @@ class AgentCreate(BaseModel):
 def index(): return FileResponse(BASE/'static'/'index.html')
 
 @app.get('/api/health')
-def health(): return {'ok':True,'version':'0.1.0'}
+def health(): return {'ok':True,'version':'0.3.0'}
 
 @app.get('/api/agents')
 def agents():
@@ -60,6 +63,21 @@ def agent_action(ident:str, action:str):
     except KeyError: raise HTTPException(404,'agent not found')
     except Exception as e: raise HTTPException(400,str(e))
 
+@app.delete('/api/agents/{ident}')
+def delete_agent(ident:str):
+    try:
+        runtime().remove(ident)
+        return {'ok':True,'action':'delete'}
+    except KeyError: raise HTTPException(404,'agent not found')
+    except Exception as e: raise HTTPException(400,str(e))
+
+@app.get('/api/agents/{ident}/logs')
+def agent_logs(ident:str, tail:int=200):
+    try:
+        return {'logs': runtime().logs(ident, tail=tail), 'tail': max(1,min(tail,2000))}
+    except KeyError: raise HTTPException(404,'agent not found')
+    except Exception as e: raise HTTPException(400,str(e))
+
 @app.get('/api/events')
 def events(agent_id:str|None=None, limit:int=100): return {'events':store.recent(agent_id,limit)}
 
@@ -69,6 +87,10 @@ def trace_groups(agent_id:str, limit:int=30): return {'traces':store.trace_group
 @app.get('/api/traces')
 def traces(trace_id:str|None=None, run_id:str|None=None, agent_id:str|None=None, limit:int=500):
     return {'events':store.trace(trace_id,run_id,agent_id,limit)}
+
+@app.get('/api/traces/detail')
+def trace_detail(trace_id:str|None=None, run_id:str|None=None, agent_id:str|None=None, limit:int=500):
+    return store.trace_detail(trace_id,run_id,agent_id,limit)
 
 @app.post('/v1/agent-runs/ingest')
 async def ingest(req:Request):
@@ -84,8 +106,8 @@ async def ingest(req:Request):
             import urllib.request
             payload=json.dumps({'events':evs},ensure_ascii=False,default=str).encode()
             def _forward():
-                req=urllib.request.Request(upstream+'/v1/agent-runs/ingest',data=payload,method='POST',headers=headers)
-                with urllib.request.urlopen(req,timeout=5): pass
+                fwd=urllib.request.Request(upstream+'/v1/agent-runs/ingest',data=payload,method='POST',headers=headers)
+                with urllib.request.urlopen(fwd,timeout=5): pass
             await asyncio.to_thread(_forward)
         except Exception:
             pass

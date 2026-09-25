@@ -16,3 +16,16 @@ def test_trace_groups(tmp_path):
     ])
     g=s.trace_groups('a')[0]
     assert g['trace_id']=='t' and g['event_count']==2
+
+def test_trace_detail_extracts_model_prompt_response_and_latency(tmp_path):
+    s=EventStore(str(tmp_path/'detail.db'))
+    s.add_many([
+      {'event_id':'d1','timestamp':'2026-01-01T00:00:00Z','agent_id':'a','run_id':'r','trace_id':'t','event_type':'llm.request','status':'success','model':'llama3.1','prompt':'hello'},
+      {'event_id':'d2','timestamp':'2026-01-01T00:00:01Z','agent_id':'a','run_id':'r','trace_id':'t','event_type':'llm.response','status':'success','response':'world'},
+    ])
+    d=s.trace_detail(trace_id='t')
+    assert d['summary']['model']=='llama3.1'
+    assert d['summary']['prompt']=='hello'
+    assert d['summary']['response']=='world'
+    assert d['summary']['latency_ms']==1000.0
+    assert d['summary']['event_count']==2

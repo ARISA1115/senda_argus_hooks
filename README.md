@@ -1492,3 +1492,8 @@ The installer injects the Senda preload through `NODE_OPTIONS=--import=...` and 
 - Agent trace view
 
 See `agent-studio/README.md`.
+
+## Agent Studio generic Runtime deployment
+
+Agent Studio can run an existing host-side Python Agent without building an Agent-specific image. Build `senda/python-agent:0.8` once, then provide the host Agent directory, container path, and entrypoint in Agent Studio. The directory is bind-mounted into the Hook-enabled Runtime and executed there. See `agent-studio/README.md`.
+
