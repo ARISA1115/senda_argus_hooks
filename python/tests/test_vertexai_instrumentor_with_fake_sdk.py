@@ -199,6 +199,83 @@ def test_public_generate_content_emits_single_event(tmp_path, monkeypatch):
     assert len([e for e in events if e["event_type"] == "llm.request"]) == 1
 
 
+def test_stream_emits_event_after_consumption_with_final_chunk_metadata(tmp_path, monkeypatch):
+    _install_fake_vertexai(monkeypatch)
+    path = tmp_path / "events.jsonl"
+    _register(path)
+
+    # usage と自己申告モデルは最終チャンクにしか載らない
+    chunks = [
+        _FakeResponse(text="chunk-1"),
+        _FakeResponse(text="chunk-2", usage=_UsageMetadata(30, 12), model_version="gemini-1.5-flash-002"),
+    ]
+    model = _GenerativeModel("publishers/google/models/gemini-1.5-pro", chunks)
+    stream = model.generate_content("prompt", stream=True)
+    consumed = list(stream)
+    assert [c.text for c in consumed] == ["chunk-1", "chunk-2"]
+    shutdown()
+
+    events = _read_events(path)
+    llm_event = next(e for e in events if e["event_type"] == "llm.request")
+    assert llm_event["data"]["llm"]["usage"] == {"input_tokens": 30, "output_tokens": 12}
+    assert llm_event["data"]["llm"]["response_model"] == "gemini-1.5-flash-002"
+    assert llm_event["data"]["llm"]["stream"] is True
+    assert llm_event["data"]["llm"]["chunk_count"] == 2
+    assert "response_hash" in llm_event["data"]["llm"]["output"]
+
+
+def test_stream_abandoned_midway_still_emits_partial_observation(tmp_path, monkeypatch):
+    _install_fake_vertexai(monkeypatch)
+    path = tmp_path / "events.jsonl"
+    _register(path)
+
+    chunks = [_FakeResponse(text="chunk-1"), _FakeResponse(text="chunk-2", usage=_UsageMetadata(9, 4))]
+    model = _GenerativeModel("publishers/google/models/gemini-1.5-pro", chunks)
+    stream = model.generate_content("prompt", stream=True)
+    next(stream)
+    stream.close()
+    shutdown()
+
+    events = _read_events(path)
+    llm_event = next(e for e in events if e["event_type"] == "llm.request")
+    assert llm_event["data"]["llm"]["chunk_count"] == 1
+    assert "usage" not in llm_event["data"]["llm"]
+
+
+def test_async_stream_emits_event_after_consumption(tmp_path, monkeypatch):
+    _install_fake_vertexai(monkeypatch)
+    path = tmp_path / "events.jsonl"
+    _register(path)
+
+    chunks = [_FakeResponse(text="c1"), _FakeResponse(text="c2", usage=_UsageMetadata(5, 3))]
+
+    class _AsyncChunks:
+        def __init__(self, items):
+            self._items = list(items)
+
+        def __aiter__(self):
+            async def _iter():
+                for item in self._items:
+                    yield item
+
+            return _iter()
+
+    model = _GenerativeModel("publishers/google/models/gemini-1.5-pro", _AsyncChunks(chunks))
+
+    async def _consume():
+        stream = await model.generate_content_async("prompt", stream=True)
+        return [chunk async for chunk in stream]
+
+    consumed = asyncio.run(_consume())
+    assert len(consumed) == 2
+    shutdown()
+
+    events = _read_events(path)
+    llm_event = next(e for e in events if e["event_type"] == "llm.request")
+    assert llm_event["data"]["llm"]["usage"] == {"input_tokens": 5, "output_tokens": 3}
+    assert llm_event["data"]["llm"]["chunk_count"] == 2
+
+
 def test_uninstrument_restores_original(tmp_path, monkeypatch):
     _install_fake_vertexai(monkeypatch)
     original_sync = _GenerativeModel._generate_content

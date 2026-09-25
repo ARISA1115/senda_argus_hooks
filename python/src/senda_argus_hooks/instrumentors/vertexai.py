@@ -19,6 +19,8 @@ class VertexAIInstrumentor(BaseInstrumentor):
     公開の generate_content も ChatSession.send_message もこの私有メソッドに
     委譲するため、直接呼び出しとチャットセッションの両方が観測される。
     SDK の実装差に備え、私有メソッドが無い場合は公開メソッドに退避する。
+    stream=True の応答はイテレータをラップし、消費完了後に最終チャンクの
+    usage_metadata と自己申告モデルでイベントを送出する。
     """
 
     name = "vertexai"
@@ -61,6 +63,8 @@ class VertexAIInstrumentor(BaseInstrumentor):
             except Exception as exc:
                 _emit_error(model, args, kwargs, exc, start)
                 raise
+            if kwargs.get("stream") and hasattr(response, "__iter__"):
+                return _wrap_stream(model, args, kwargs, response, start)
             _emit_request(model, args, kwargs, response, start)
             return response
 
@@ -74,6 +78,8 @@ class VertexAIInstrumentor(BaseInstrumentor):
             except Exception as exc:
                 _emit_error(model, args, kwargs, exc, start)
                 raise
+            if kwargs.get("stream") and hasattr(response, "__aiter__"):
+                return _wrap_stream_async(model, args, kwargs, response, start)
             _emit_request(model, args, kwargs, response, start)
             return response
 
@@ -134,8 +140,32 @@ def _input_payload(model: Any, args: tuple, kwargs: dict[str, Any]) -> dict[str,
     return {"contents_hash": sha256_value(str(contents))}
 
 
-def _emit_request(model: Any, args: tuple, kwargs: dict[str, Any], response: Any, start: float) -> None:
-    cfg = get_config()
+def _response_model_of(response: Any) -> str | None:
+    """レスポンスが自己申告する実モデル名を取り出す。
+
+    SDK バージョンによって wrapper が model_version を公開しない場合は
+    raw proto から取る。
+    """
+    response_model = getattr(response, "model_version", None)
+    if isinstance(response_model, str) and response_model.strip():
+        return response_model
+    response_model = getattr(getattr(response, "_raw_response", None), "model_version", None)
+    if isinstance(response_model, str) and response_model.strip():
+        return response_model
+    return None
+
+
+def _emit_llm_request(
+    model: Any,
+    args: tuple,
+    kwargs: dict[str, Any],
+    start: float,
+    usage: dict[str, int] | None,
+    response_model: str | None,
+    output: dict[str, Any],
+    extra: dict[str, Any] | None = None,
+) -> None:
+    """非 stream と stream の両経路で共有する llm.request イベントの組み立てと送出。"""
     name = _model_name(model)
     llm_data: dict[str, Any] = {
         "provider": "vertex_ai",
@@ -143,21 +173,15 @@ def _emit_request(model: Any, args: tuple, kwargs: dict[str, Any], response: Any
         "model": name,
         "input": _input_payload(model, args, kwargs),
     }
-    usage = _usage(response)
     if usage:
         llm_data["usage"] = usage
     # リソースパスと安定版 ID の表記差は偽陽性源のため、正規化して同一モデルと
-    # 判定できる場合は response_model を送出しない。SDK バージョンによって wrapper が
-    # model_version を公開しない場合は raw proto から取る。
-    response_model = getattr(response, "model_version", None)
-    if not isinstance(response_model, str) or not response_model.strip():
-        response_model = getattr(getattr(response, "_raw_response", None), "model_version", None)
-    if isinstance(response_model, str) and response_model.strip() and not models_correspond(name, response_model, _model_core):
+    # 判定できる場合は response_model を送出しない。
+    if response_model and not models_correspond(name, response_model, _model_core):
         llm_data["response_model"] = response_model
-    if cfg.capture_response:
-        llm_data["output"] = {"response": str(response)}
-    else:
-        llm_data["output"] = {"response_hash": sha256_value(str(response))}
+    llm_data["output"] = output
+    if extra:
+        llm_data.update(extra)
     emit_event(
         "llm.request",
         source={"component": "instrumentor", "sdk": "vertexai", "provider": "vertex_ai", "operation": "generate_content"},
@@ -165,6 +189,91 @@ def _emit_request(model: Any, args: tuple, kwargs: dict[str, Any], response: Any
         status="success",
         latency_ms=int((time.perf_counter() - start) * 1000),
     )
+
+
+def _emit_request(model: Any, args: tuple, kwargs: dict[str, Any], response: Any, start: float) -> None:
+    cfg = get_config()
+    if cfg.capture_response:
+        output: dict[str, Any] = {"response": str(response)}
+    else:
+        output = {"response_hash": sha256_value(str(response))}
+    _emit_llm_request(model, args, kwargs, start, _usage(response), _response_model_of(response), output)
+
+
+def _new_stream_state() -> dict[str, Any]:
+    return {"usage": {}, "response_model": None, "chunk_texts": []}
+
+
+def _absorb_stream_chunk(state: dict[str, Any], chunk: Any) -> None:
+    """stream チャンクから観測値を集約する。usage と自己申告モデルは最終チャンクに
+    載るため、後に現れた値で上書きする。"""
+    usage = _usage(chunk)
+    if usage:
+        state["usage"].update(usage)
+    response_model = _response_model_of(chunk)
+    if response_model:
+        state["response_model"] = response_model
+    state["chunk_texts"].append(str(chunk))
+
+
+def _emit_stream(model: Any, args: tuple, kwargs: dict[str, Any], state: dict[str, Any], start: float) -> None:
+    try:
+        cfg = get_config()
+        if cfg.capture_response:
+            output: dict[str, Any] = {"response": state["chunk_texts"]}
+        else:
+            output = {"response_hash": sha256_value(state["chunk_texts"])}
+        _emit_llm_request(
+            model,
+            args,
+            kwargs,
+            start,
+            state["usage"] or None,
+            state["response_model"],
+            output,
+            extra={"stream": True, "chunk_count": len(state["chunk_texts"])},
+        )
+    except Exception:
+        pass
+
+
+def _wrap_stream(model: Any, args: tuple, kwargs: dict[str, Any], iterator: Any, start: float) -> Any:
+    """stream=True の応答イテレータをラップし、消費完了後にイベントを送出する。
+
+    消費前に観測すると usage もモデルも欠落したイベントになる。途中で消費が
+    中断された場合もそこまでの観測値で送出する。
+    """
+    state = _new_stream_state()
+
+    def _gen():
+        try:
+            for chunk in iterator:
+                try:
+                    _absorb_stream_chunk(state, chunk)
+                except Exception:
+                    pass
+                yield chunk
+        finally:
+            _emit_stream(model, args, kwargs, state, start)
+
+    return _gen()
+
+
+def _wrap_stream_async(model: Any, args: tuple, kwargs: dict[str, Any], iterator: Any, start: float) -> Any:
+    state = _new_stream_state()
+
+    async def _gen():
+        try:
+            async for chunk in iterator:
+                try:
+                    _absorb_stream_chunk(state, chunk)
+                except Exception:
+                    pass
+                yield chunk
+        finally:
+            _emit_stream(model, args, kwargs, state, start)
+
+    return _gen()
 
 
 def _emit_error(model: Any, args: tuple, kwargs: dict[str, Any], exc: Exception, start: float) -> None:
