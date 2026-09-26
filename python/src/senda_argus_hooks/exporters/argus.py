@@ -4,6 +4,7 @@ import atexit
 import contextlib
 import json
 import logging
+import sys
 import queue
 import threading
 import time
@@ -51,6 +52,7 @@ class ArgusExporter(BaseExporter):
         self._api_key: str = config.get("api_key", "")
         self._run_id: str | None = config.get("run_id")
         self._timeout: int = int(config.get("timeout", 10))
+        self._log_http: bool = bool(config.get("log_http", False))
         self._queue: queue.Queue = queue.Queue(maxsize=_SEND_QUEUE_MAX)
         self._worker: threading.Thread | None = None
         self._worker_lock = threading.Lock()
@@ -82,15 +84,42 @@ class ArgusExporter(BaseExporter):
         with self._drop_lock:
             return self._dropped_events_count
 
+    def _http_log(self, message: str) -> None:
+        """Write transport-only diagnostics to stderr when explicitly enabled.
+
+        The message never includes request headers, API keys, or event bodies.  This
+        makes the output safe to surface in Agent Studio's Docker Logs panel while
+        keeping normal production runtimes quiet unless SENDA_ARGUS_HTTP_LOG=true.
+        """
+        if not self._log_http:
+            return
+        print(f"[senda-argus-http] {message}", file=sys.stderr, flush=True)
+
+    @staticmethod
+    def _event_count(payload: bytes) -> int | None:
+        try:
+            body = json.loads(payload.decode("utf-8"))
+            events = body.get("events") if isinstance(body, dict) else None
+            return len(events) if isinstance(events, list) else None
+        except Exception:
+            return None
+
     def _send(self, payload: bytes, headers: dict[str, str]) -> None:
         req = urllib.request.Request(
             self._url, data=payload, method="POST", headers=headers
         )
+        count = self._event_count(payload) if self._log_http else None
+        suffix = f" events={count}" if count is not None else ""
+        self._http_log(f"POST {self._url}{suffix} bytes={len(payload)}")
         try:
-            with urllib.request.urlopen(req, timeout=self._timeout):
-                pass
-        except (urllib.error.URLError, OSError):
-            pass
+            with urllib.request.urlopen(req, timeout=self._timeout) as response:
+                status = getattr(response, "status", None) or response.getcode()
+            self._http_log(f"POST completed status={status} url={self._url}{suffix}")
+        except urllib.error.HTTPError as exc:
+            self._http_log(f"POST failed status={exc.code} url={self._url}{suffix} error={exc.reason}")
+        except (urllib.error.URLError, OSError) as exc:
+            reason = getattr(exc, "reason", exc)
+            self._http_log(f"POST failed url={self._url}{suffix} error={reason}")
 
     def _worker_loop(self) -> None:
         while True:
