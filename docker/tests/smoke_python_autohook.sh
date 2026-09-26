@@ -28,10 +28,8 @@ class Embeddings:
     def create(self, *args, **kwargs):
         return {"ok": True}
 PY
-cat > "$TMP/sitepkgs/senda_argus_autohook.pth" <<PTH
-$ROOT/docker/python
-import senda_argus_bootstrap; senda_argus_bootstrap.bootstrap()
-PTH
+# Write the .pth hook with the SDK installer, as the Docker image does.
+PYTHONPATH="$ROOT/python/src" python3 -c "from senda_argus_hooks.autoinstall import install; install(target='$TMP/sitepkgs')" >/dev/null
 PYTHONPATH="$ROOT/python/src:$TMP" \
 SENDA_ARGUS_ENABLED=true \
 SENDA_ARGUS_EXPORTER=jsonl \

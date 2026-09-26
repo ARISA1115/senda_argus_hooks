@@ -6,7 +6,7 @@ The main design goal is to reduce SI work: application teams should not have to 
 
 ## 1. Python runtime - recommended first target
 
-`docker/python/Dockerfile` installs `senda-argus-hooks` and adds a small `.pth` startup hook to Python site-packages. The `.pth` file imports `senda_argus_bootstrap` during interpreter startup, so Senda-Argus is registered before the Agent application starts. A `sitecustomize.py` fallback is also included, but the `.pth` mechanism is primary because it can coexist with an application that already has its own `sitecustomize.py`.
+`docker/python/Dockerfile` installs `senda-argus-hooks` and writes the SDK's `.pth` startup hook to Python site-packages with `senda_argus_hooks.autoinstall`, the same hook the zero-code installer writes. The `.pth` file calls `senda_argus_hooks.autohook.bootstrap()` during interpreter startup, so Senda-Argus is registered before the Agent application starts. A `.pth` hook coexists with an application that already has its own `sitecustomize.py`.
 
 Build:
 
@@ -28,16 +28,16 @@ No Senda-specific import is required in the Agent source for the SDKs supported 
 
 ### Important build order
 
-Install the customer's Agent dependencies in the child image. At runtime, `sitecustomize` can then import and patch installed OpenAI / Anthropic / LiteLLM / Ollama / MCP / OpenAI Agents packages before application code runs.
+Install the customer's Agent dependencies in the child image. At runtime, the `.pth` hook can then import and patch installed OpenAI / Anthropic / LiteLLM / Ollama / MCP / OpenAI Agents packages before application code runs.
 
 ## 2. Node runtime - base/preload stage
 
-`docker/node/Dockerfile` installs the JS package and injects a preload with `NODE_OPTIONS=--import=/opt/senda/auto-hook.mjs`.
-The preload automatically configures the Senda runtime and exporters.
+`docker/node/Dockerfile` installs the JS package and loads the SDK's zero-code preload with `NODE_OPTIONS=--import=/opt/senda/argus-hooks/dist/zerocode/preload.js`.
+The Runtime therefore uses the same preload as the Node zero-code installer. It configures the Senda runtime and exporters from `SENDA_ARGUS_EXPORTER` / `SENDA_ARGUS_EXPORTERS`, including `argus` with `SENDA_ARGUS_ENDPOINT`, `SENDA_ARGUS_API_KEY` and `SENDA_ARGUS_RUN_ID`, and flushes pending events before the process exits.
 
-The current JS SDK instruments concrete client instances (`instrumentOpenAI(client)`, `instrumentAnthropic(client)`, `instrumentMCP(client)`). Therefore this Docker revision does **not** claim complete zero-code interception of arbitrary Node client instances yet. Global client discovery / constructor or loader instrumentation belongs to the next "existing Agent auto-hook" phase.
+The preload instruments clients created from the `openai`, `@anthropic-ai/sdk`, `ollama`, `@modelcontextprotocol/sdk/client/index.js` and `@openai/agents` modules when the Agent loads them, for both CommonJS and ES modules. Clients from other modules still need the explicit `instrument*` calls.
 
-This distinction is intentional so deployment documentation does not overstate Node coverage.
+When `SENDA_AGENT_INSTALL_DEPS=true` and the mounted workspace has a `package.json`, the entrypoint installs the Agent's dependencies inside the container, with `npm ci` when a lockfile exists and `npm install` otherwise. They are placed under `/opt/senda/node-deps` and exposed as `/node_modules`, which Node searches after the Agent's own `node_modules`, so the host Agent directory is not modified. A SHA-256 marker avoids reinstalling unchanged dependencies on container restart.
 
 ## 3. Environment variables
 
@@ -48,10 +48,11 @@ This distinction is intentional so deployment documentation does not overstate N
 | `SENDA_ARGUS_ENVIRONMENT` | `prod` | Environment |
 | `SENDA_ARGUS_AGENT_ID` | empty | Fixed Agent ID |
 | `SENDA_ARGUS_TENANT_ID` | empty | Tenant ID |
-| `SENDA_ARGUS_EXPORTER(S)` | `jsonl` | Python: `jsonl`, `stdout`, `argus`, `null`, comma-separated allowed. Node currently supports `jsonl`, `stdout`, `null` |
+| `SENDA_ARGUS_EXPORTER(S)` | `jsonl` | `jsonl`, `stdout`, `argus`, `null`, comma-separated allowed |
 | `SENDA_ARGUS_JSONL_PATH` | `/var/log/senda-argus/events.jsonl` | JSONL output |
-| `SENDA_ARGUS_ENDPOINT` | `http://senda-argus:8000` | Python Argus exporter endpoint |
-| `SENDA_ARGUS_API_KEY` | empty | Python Argus exporter API key |
+| `SENDA_ARGUS_ENDPOINT` | `http://senda-argus:8000` | Argus exporter endpoint |
+| `SENDA_ARGUS_API_KEY` | empty | Argus exporter API key |
+| `SENDA_AGENT_INSTALL_DEPS` | `false` | Install the mounted workspace's `requirements.txt` or `package.json` before starting the Agent |
 | `SENDA_ARGUS_CAPTURE_PROMPT` | `false` | Store prompt body |
 | `SENDA_ARGUS_CAPTURE_RESPONSE` | `false` | Store response body |
 | `SENDA_ARGUS_CAPTURE_ARGUMENTS` | `false` | Store tool arguments |
@@ -64,7 +65,7 @@ Prompt, response, tool arguments and tool results remain disabled by default. Ha
 
 ## 4. Sending events to Senda-Argus
 
-Python can send directly to the existing Argus exporter:
+Both runtimes can send directly to the Argus exporter:
 
 ```bash
 docker run --rm \
@@ -102,13 +103,8 @@ The bootstrap intentionally catches initialization errors. Observability failure
 ./docker/tests/smoke_python_autohook.sh
 ```
 
-This creates a fake OpenAI package, starts a fresh Python interpreter, verifies that `sitecustomize` automatically patches it, invokes `Completions.create()`, and confirms that an `llm.request` event was written.
+This creates a fake OpenAI package, starts a fresh Python interpreter, writes the `.pth` hook with the SDK installer, verifies that the hook automatically patches it, invokes `Completions.create()`, and confirms that an `llm.request` event was written.
 
 ## 8. Recommended next phase
 
-Use the Python Docker bootstrap as the reference implementation for the standalone "existing Agent auto-hook" installer:
-
-1. Package the `.pth` startup hook + `senda_argus_bootstrap.py` outside Docker (with `sitecustomize.py` only as a fallback).
-2. Add installer/uninstaller and configuration file support.
-3. Add Kubernetes injection (initContainer / mutating webhook or admission-based environment injection).
-4. For Node, implement global SDK/client interception rather than instance-only instrumentation.
+Both runtimes now use the SDK's zero-code startup code, so the Docker images and the standalone installers load the same hook. The remaining step is Kubernetes injection, through an initContainer, a mutating webhook or admission-based environment injection.
