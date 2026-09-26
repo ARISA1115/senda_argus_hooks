@@ -55,6 +55,10 @@ Open:
 http://localhost:8080
 ```
 
+The Compose file publishes Studio on `127.0.0.1` only. The Studio API has no authentication, accepts any image and host path for a Runtime, and drives the host Docker Engine through the mounted socket, so anyone who can reach the port can run containers with host directories mounted. Set `SENDA_STUDIO_BIND` to another address only behind a proxy that authenticates users. `SENDA_STUDIO_PORT` changes the host port, for example when another service already uses 8080.
+
+Studio forwards the Hook events it receives to Argus when `SENDA_STUDIO_ARGUS_UPSTREAM` is set to the Argus API base URL. Set `SENDA_STUDIO_ARGUS_API_KEY` to an Argus collection key; the Compose file passes both variables to the container. Without them, events stay in Studio.
+
 ## Web UI language / i18n (v0.5.1)
 
 The Web UI supports Japanese and English from the language selector in the header. On the first visit, Studio uses the browser language (`ja` -> Japanese, otherwise English) and stores the selected language in browser `localStorage`.
