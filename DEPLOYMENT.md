@@ -1,26 +1,18 @@
 # Senda-Argus Deployment Guide
 
-This document consolidates Docker Runtime, existing Python Auto-Hook, Python Zero-code, and Node.js Zero-code deployment guidance.
+This guide covers the current deployment patterns for Senda-Argus Hooks and Senda Arugus Agent Studio.
 
 ## Deployment modes
 
-Senda-Argus Hooks supports three main deployment patterns:
-
 ```text
-1. Hook-enabled Docker Runtime
+1. Hook-enabled Docker Runtime managed by Agent Studio
 2. Existing Python Agent zero-code / auto-hook
 3. Existing Node.js Agent zero-code preload
 ```
 
-Senda Agent Studio provides a WebUI for managing Hook-enabled Docker Runtimes.
+For new Agent Studio and Multi-Agent Workflow evaluation, use the Docker Runtime path first.
 
----
-
-## Quick installer scripts
-
-The repository includes small Docker helper scripts for initial setup and local evaluation. They do not modify host Agent source code.
-
-### Install
+## Quick install
 
 From the repository root:
 
@@ -28,61 +20,29 @@ From the repository root:
 ./scripts/install.sh
 ```
 
-This verifies Docker, builds `senda/python-agent:0.8`, and starts Agent Studio. To build the Node Runtime as well:
+This verifies Docker, builds `senda/python-agent:0.8`, and starts Agent Studio.
+
+Build the Node Runtime too:
 
 ```bash
 ./scripts/install.sh --with-node
 ```
 
-Build runtime images without starting Agent Studio:
-
-```bash
-./scripts/install.sh --no-studio
-```
-
-### Create a Runtime from an existing host Agent
-
-```bash
-./scripts/runtime-create.sh \
-  --name test-python-agent \
-  --host-path /absolute/path/to/test-agent
-```
-
-The script creates a container labeled `com.senda.agent-runtime=true`, bind-mounts the Agent directory into `/workspace`, enables dependency installation from `requirements.txt`, and connects the Runtime to Agent Studio.
-
-Useful options:
-
-```bash
-./scripts/runtime-create.sh --help
-```
-
-### Status
+Status:
 
 ```bash
 ./scripts/status.sh
 ```
 
-### Uninstall Agent Studio
+Uninstall Agent Studio while preserving Runtime containers/images by default:
 
 ```bash
 ./scripts/uninstall.sh
 ```
 
-By default, Runtime containers and common Runtime images are preserved. Explicit destructive cleanup requires flags:
+## Hook-enabled Docker Runtime
 
-```bash
-./scripts/uninstall.sh --remove-runtimes --yes --remove-images
-```
-
-Host Agent source directories are never deleted by these scripts.
-
----
-
-## 1. Hook-enabled Docker Runtime
-
-### Python Runtime
-
-Build from the repository root:
+Build the common Python Runtime:
 
 ```bash
 docker build \
@@ -91,17 +51,9 @@ docker build \
   .
 ```
 
-The Python image includes:
+The image includes Senda-Argus Hooks, startup bootstrap, environment-based configuration, and fail-open behavior.
 
-- Senda-Argus Hooks
-- `.pth`-based startup bootstrap
-- automatic supported SDK instrumentation
-- environment-variable configuration
-- fail-open startup behavior
-
-### Generic host-Agent mount
-
-Instead of building an Agent-specific image, mount an existing Agent directory into the common Runtime:
+A host Agent can be mounted without building an Agent-specific image:
 
 ```bash
 docker run --rm \
@@ -114,39 +66,14 @@ docker run --rm \
   python agent.py
 ```
 
-When `SENDA_AGENT_INSTALL_DEPS=true`, the runtime installs `/workspace/requirements.txt` when present.
+When `SENDA_AGENT_INSTALL_DEPS=true`, `/workspace/requirements.txt` is installed when present.
 
-### Node Runtime
+## Senda Arugus Agent Studio
 
-The Node Docker image preloads the Senda runtime configuration through `NODE_OPTIONS=--import=...`.
-
-Build using:
+Start from the Agent Studio directory:
 
 ```bash
-docker build \
-  -f docker/node/Dockerfile \
-  -t senda/node-agent:0.9 \
-  .
-```
-
----
-
-## 2. Senda Agent Studio
-
-Agent Studio is intended to manage **Senda Agent Runtime** containers only.
-
-Typical capabilities:
-
-- Register Runtime
-- Start / Stop / Restart / Delete
-- Mount a host Agent directory into a common Hook-enabled image
-- Live Hook events
-- Agent Trace
-- Docker logs
-
-Start Agent Studio from its directory:
-
-```bash
+cd agent-studio
 docker compose up -d --build
 ```
 
@@ -156,25 +83,167 @@ Open:
 http://localhost:8080
 ```
 
-For Docker-based control, Agent Studio needs access to the Docker Engine. In the MVP this is typically provided by mounting the Docker socket.
+Agent Studio needs access to the Docker Engine. In the current MVP this is typically provided by mounting the Docker socket into the Studio container.
 
-Only containers labeled as Senda Agent Runtime should be listed and managed by Agent Studio.
+Only containers labeled as Senda Agent Runtime are intended to be managed.
 
----
+### Runtime registration
 
-## 3. Existing Python Environment Auto-Hook
+The WebUI separates Runtime list/operations from Runtime registration.
 
-Existing Python Agents can be instrumented without changing Agent source code.
+Runtime registration supports:
 
-Install the package into the same Python environment that runs the Agent:
+```text
+Register only
+Register & Run
+```
+
+Recommended restart policy:
+
+```text
+long-running Agent: unless-stopped
+one-shot / test Agent: no
+failure retry: on-failure
+```
+
+`Maximum Retry Count` is used only with `on-failure`.
+
+### Runtime operations
+
+Registered Runtimes support:
+
+```text
+Start
+Stop
+Restart
+Trace
+Logs
+Delete
+```
+
+Trace and Docker Logs are shown inside the selected Runtime card.
+
+### Multi-Agent Workflow registration
+
+The WebUI separates **Workflows** and **Workflow registration**.
+
+Workflow registration supports:
+
+```text
+Register only
+Register & Run
+```
+
+A Workflow definition includes:
+
+```text
+Goal
+Allowed Agents
+Initial Input JSON
+Max Steps
+Supervisor Mode
+Supervisor Model / Base URL where applicable
+Jev Confidence Threshold / Fallback where applicable
+```
+
+`Allowed Agents` is a candidate set. Its order is not an execution order.
+
+The built-in `senda-supervisor` selects the next worker Agent using one of:
+
+```text
+llm
+jev
+deterministic
+```
+
+The advanced first-worker override should normally remain empty so the Supervisor chooses the first worker.
+
+### Workflow operations
+
+Registered Workflows support:
+
+```text
+Start
+Stop
+Trace
+Logs
+Delete
+Approve     # only when approval is required
+```
+
+Starting an existing Workflow resets its current Steps and Final Result while keeping its registered definition.
+
+Stopping a Workflow cancels the Supervisor task and attempts to stop the currently running one-shot Agent container.
+
+The Workflow list includes an **Execution Details** accordion containing Steps and Final Result. Trace and Logs are shown inside the selected Workflow card in the same style as Runtime cards.
+
+### One-shot child Agent execution
+
+A registered Runtime acts as the execution template. Workflow execution creates a one-shot child container and forces:
+
+```text
+restart=no
+```
+
+The child receives execution context such as:
+
+```text
+SENDA_AGENT_INPUT
+SENDA_AGENT_RUN_ID
+SENDA_ARGUS_RUN_ID
+SENDA_WORKFLOW_RUN_ID
+SENDA_PARENT_AGENT_ID
+```
+
+A worker Agent can return a structured result with:
+
+```text
+[senda-agent-result] {"key":"value"}
+```
+
+### Jev / TypeSafe configuration
+
+Jev is optional and runs from the Agent Studio container through `typesafe-sdk`.
+
+Worker Runtime images do not need the TypeSafe SDK.
+
+Example environment:
+
+```bash
+export TYPESAFE_API_KEY='...'
+export TYPESAFE_BASE_URL='https://api.typesafe.ai'   # optional
+export TYPESAFE_DEFAULT_MODEL='jev-latest'           # optional
+
+docker compose up -d --build
+```
+
+Optional Studio settings include Jev timeout, confidence threshold, and fallback behavior.
+
+Jev decision telemetry can include selected Agent, probabilities, confidence, model, request ID, latency, and usage when supplied by the backend.
+
+### Forward Studio events to Senda-Argus
+
+When `SENDA_STUDIO_ARGUS_UPSTREAM` is configured, Agent Studio forwards Studio-generated events, including Supervisor / Workflow / Jev events, to the upstream Senda-Argus endpoint.
+
+Runtime Hook event ingestion endpoint:
+
+```text
+/v1/agent-runs/ingest
+```
+
+For transport troubleshooting, enable or inspect:
+
+```text
+[senda-argus-http]
+[senda-studio-argus]
+```
+
+## Existing Python Agent auto-hook
+
+Install the Python package into the same environment as the existing Agent:
 
 ```bash
 python -m pip install ./python
-```
-
-Enable startup instrumentation:
-
-```bash
 senda-hooks autohook install
 ```
 
@@ -184,210 +253,28 @@ Status:
 senda-hooks autohook status
 ```
 
-Uninstall the startup hook:
+Uninstall:
 
 ```bash
 senda-hooks autohook uninstall
 ```
 
-The installer creates a managed startup file:
+No Agent source import or `register(...)` change is required.
+
+## Existing Node.js Agent zero-code preload
+
+Recommended Node versions:
 
 ```text
-senda_argus_autohook.pth
+Node 20 / 22 LTS
+Node 18.19+ for the ESM loader path
 ```
 
-Python startup invokes:
+Use the Node zero-code installer documented under `tools/` to scan, install, inspect status, and uninstall the managed preload.
 
-```python
-senda_argus_hooks.autohook.bootstrap()
-```
+Supported zero-code interception includes supported OpenAI, Anthropic, Ollama, MCP, and OpenAI Agents provider layers.
 
-No `import senda_argus_hooks` or `register(...)` change is required in Agent source.
-
-### Scopes
-
-```bash
-senda-hooks autohook install --scope user
-sudo senda-hooks autohook install --scope system
-senda-hooks autohook install --target /path/to/site-packages
-```
-
-Inside a virtual environment, the default `auto` scope installs into that environment.
-
----
-
-## 4. Python Zero-code Deployment Tool
-
-For host-wide discovery and managed installation, use:
-
-```bash
-python3 tools/senda_argus_zero_install.py scan
-```
-
-The scanner can detect:
-
-- Python on `PATH`
-- Linux `/proc` Python processes
-- `VIRTUAL_ENV`
-- common venv locations under `/opt`, `/srv`, `/app`, `/var/www`, `/home`
-
-Install into one Agent environment:
-
-```bash
-sudo python3 tools/senda_argus_zero_install.py install \
-  --python /opt/my-agent/.venv/bin/python \
-  --endpoint https://argus.example.local \
-  --project my-agent \
-  --environment prod \
-  --exporters argus
-```
-
-Prefer an API-key file instead of putting secrets directly on the command line:
-
-```bash
-sudo python3 tools/senda_argus_zero_install.py install \
-  --python /opt/my-agent/.venv/bin/python \
-  --endpoint https://argus.example.local \
-  --api-key-file /root/argus-api-key \
-  --project my-agent \
-  --environment prod \
-  --exporters argus
-```
-
-Bulk install:
-
-```bash
-sudo python3 tools/senda_argus_zero_install.py install \
-  --all --yes \
-  --scan-root /opt \
-  --scan-root /srv \
-  --endpoint https://argus.example.local \
-  --api-key-file /root/argus-api-key \
-  --project production-agents \
-  --environment prod \
-  --exporters argus
-```
-
-Status:
-
-```bash
-python3 tools/senda_argus_zero_install.py status \
-  --python /opt/my-agent/.venv/bin/python
-```
-
-Uninstall:
-
-```bash
-sudo python3 tools/senda_argus_zero_install.py uninstall \
-  --python /opt/my-agent/.venv/bin/python
-```
-
-Add `--remove-sdk` to remove the installed SDK package as well.
-
-### Configuration file
-
-Root deployments normally use:
-
-```text
-/etc/senda-argus/hooks.env
-```
-
-User deployments normally use:
-
-```text
-~/.config/senda-argus/hooks.env
-```
-
-Already-running Python processes must be restarted before the `.pth` startup hook becomes active.
-
----
-
-## 5. Node.js Zero-code Deployment
-
-Node.js Agents can be instrumented without adding Senda imports or `register()` calls to the application source.
-
-Recommended runtime:
-
-- Node.js 20 / 22 LTS
-- Node.js 18.19+ supported for the ESM loader path
-- Linux is the primary target for process discovery and systemd injection
-
-### Supported automatic interception
-
-- OpenAI SDK: ESM and CommonJS
-- Anthropic SDK: ESM and CommonJS
-- Ollama JS: ESM and CommonJS
-- MCP JS `Client`: ESM and CommonJS
-- OpenAI Agents JS tracing: ESM and CommonJS
-
-Framework-specific object/callback instrumentation is not claimed as fully automatic for LangChain, LangGraph, LlamaIndex, and Vercel AI SDK; underlying supported provider / MCP calls remain observable when they pass through supported SDKs.
-
-### Discover Agents
-
-```bash
-node tools/senda_argus_zero_install_node.mjs scan
-```
-
-### Install into a systemd-managed Agent
-
-```bash
-sudo node tools/senda_argus_zero_install_node.mjs install \
-  --service my-agent.service \
-  --exporter argus \
-  --endpoint https://argus.example.local \
-  --api-key-file /root/senda-argus-api-key \
-  --project my-agent \
-  --environment prod
-```
-
-The installer:
-
-1. installs the Node SDK runtime under `/opt/senda-argus/node`;
-2. writes a protected environment file;
-3. creates a systemd drop-in;
-4. injects `NODE_OPTIONS=--import=...`;
-5. keeps application source unchanged.
-
-### Install by PID
-
-```bash
-sudo node tools/senda_argus_zero_install_node.mjs install \
-  --pid 12345 \
-  --exporter argus \
-  --endpoint https://argus.example.local
-```
-
-### Shell-started Agents
-
-```bash
-node tools/senda_argus_zero_install_node.mjs install \
-  --profile \
-  --exporter jsonl \
-  --jsonl-path /var/log/senda-argus/events.jsonl
-```
-
-### Status and removal
-
-```bash
-node tools/senda_argus_zero_install_node.mjs status
-sudo node tools/senda_argus_zero_install_node.mjs uninstall
-```
-
-Full removal:
-
-```bash
-sudo node tools/senda_argus_zero_install_node.mjs uninstall \
-  --remove-runtime \
-  --remove-config
-```
-
-A running Node process must be restarted before an injected preload becomes active.
-
----
-
-## 6. Common runtime configuration
-
-Typical configuration:
+## Common runtime configuration
 
 ```text
 SENDA_ARGUS_ENABLED=true
@@ -404,53 +291,11 @@ SENDA_ARGUS_CAPTURE_HASH=true
 SENDA_ARGUS_REDACT=true
 ```
 
-The Argus HTTP exporter posts normalized events to:
+## Security notes
 
-```text
-<endpoint>/v1/agent-runs/ingest
-```
-
-with optional `X-API-Key` and fail-open delivery behavior.
-
----
-
-## 7. Security notes
-
-- Keep raw prompt/response capture disabled unless required.
+- Keep raw prompt / response capture disabled unless required.
 - Keep redaction enabled.
 - Store API keys in protected files or secret-management systems.
-- Treat exported traces and runtime logs as security-sensitive data.
-- Do not commit runtime logs or credentials to Git.
-- Access to Docker Engine control is highly privileged; restrict Agent Studio deployment accordingly.
-
----
-
-## 8. Troubleshooting
-
-### Python Auto-Hook does not load
-
-Check:
-
-- the exact Python environment used by the Agent
-- `.pth` presence via `senda-hooks autohook status`
-- whether Python is started with `-S`
-- whether an embedded runtime disables `site`
-
-### Ollama package missing inside Docker Runtime
-
-Ensure the mounted Agent directory contains:
-
-```text
-requirements.txt
-```
-
-and the Runtime has:
-
-```text
-SENDA_AGENT_INSTALL_DEPS=true
-```
-
-### Node preload does not appear active
-
-Confirm the process was restarted after installation and that `NODE_OPTIONS` contains the managed Senda preload.
-
+- Treat traces, Workflow results, and Docker logs as security-sensitive.
+- Docker Engine control is highly privileged; restrict access to Agent Studio accordingly.
+- The Supervisor does not receive direct Docker access. It selects registered Agent IDs and Agent Studio validates/executes the choice.

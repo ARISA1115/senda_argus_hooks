@@ -1,158 +1,155 @@
 # Changelog
 
-This file consolidates the previous root-level release-note documents.
+This file keeps the consolidated release history. Detailed component behavior belongs in the component README files rather than being duplicated here.
 
-## Node Zero-code v0.9.0
+## Senda Arugus Agent Studio v0.5.4
 
-### Added
+### Added / changed
 
-- Node Zero-code bootstrap and ESM loader
-- Automatic ESM interception for OpenAI, Anthropic, Ollama, MCP Client, and OpenAI Agents
-- CommonJS eager preload/cache interception for the same provider layer
-- Linux `/proc` Node process discovery
-- systemd service discovery from cgroups
-- Node binary and AI project discovery
-- systemd `NODE_OPTIONS --import` drop-in installer
-- shell-profile injection mode
-- install / scan / status / uninstall workflow
-- centralized Node SDK runtime installation
-- protected external configuration support
-- direct Argus HTTP exporter (`/v1/agent-runs/ingest`)
-- fail-open network delivery
-- exporter flush on normal process exit
-
-### Compatibility
-
-- Node 20 / 22 LTS recommended
-- Node 18.19+ supported for the ESM loader path
+- Workflow list cards now use the same visual style as Runtime cards.
+- Added per-Workflow **Trace** and **Logs** actions.
+- Workflow Trace can be inspected per Workflow Step using the recorded `agent_run_id` when available.
+- Workflow Logs can be inspected for the Agent Runtimes used by the Workflow.
+- Added accordion-style **Execution Details** for Steps and Final Result.
+- Added Japanese / English i18n strings for Workflow Trace, Logs, and Execution Details.
 
 ### Verification
 
-- existing JS test suite: 10/10 passed
-- ESM zero-code OpenAI interception: passed
-- CommonJS zero-code OpenAI interception: passed
-- packed npm package installation into a clean central runtime: passed
-- installer install -> status -> uninstall: passed
-- local Argus HTTP exporter test: 2/2 events delivered
+- Agent Studio test suite: 29 passed.
 
 ---
 
-## Python Zero-code v0.8.0
+## Senda Arugus Agent Studio v0.5.3
 
-### Added
-
-- Existing Python/venv discovery from PATH, Linux `/proc`, `VIRTUAL_ENV`, and configurable scan roots
-- Offline wheel-based installation into detected Agent environments
-- Automatic `.pth` startup hook installation without Agent source changes
-- Global/user `hooks.env` configuration loaded at Python startup
-- bulk `--all --yes` install/uninstall mode
-- running PID reporting for restart-required Agents
-- status and rollback/uninstall support
-- API-key file input
-- fail-open bootstrap retained
-
-### Compatibility
-
-- Python 3.10+
+- Split Workflow list and Workflow registration into separate WebUI views.
+- Added dedicated **Workflows** and **Workflow registration** navigation.
+- Workflow list focuses on registered definitions, lifecycle controls, and latest execution state.
+- Workflow registration retains **Register only** and **Register & Run**.
+- After registration, the UI returns to the Workflow list.
+- Added Japanese / English i18n for the new navigation and views.
 
 ---
 
-## Existing Python Auto-Hook
+## Senda Arugus Agent Studio v0.5.2
 
 ### Added
 
-- reusable `senda_argus_hooks.autohook.bootstrap()`
-- `.pth`-based Python startup injection
-- `senda-hooks autohook install`
-- `senda-hooks autohook status`
-- `senda-hooks autohook uninstall`
-- virtualenv-aware automatic installation scope
-- explicit `--scope user|system` and `--target` modes
-- fail-open bootstrap behavior
-- environment-variable runtime configuration
-- safe user-writable default JSONL location
-- install/status/uninstall and startup bootstrap tests
+- Runtime registration: **Register only** / **Register & Run**.
+- Workflow registration: **Register only** / **Register & Run**.
+- Workflow Start / Stop / Delete and existing Approval controls.
+- Re-run existing registered Workflow definitions.
+- Workflow start resets current execution Steps / Result while preserving the definition.
+- Workflow stop cancels the Supervisor task and stops the active one-shot Agent when possible.
+- MCP control surface additions: `register_workflow`, `run_workflow`, `stop_workflow`, `delete_workflow`.
 
----
+### API
 
-## Docker Runtime Addition
-
-### Added
-
-- `docker/python/Dockerfile`
-  - Senda-Argus Hooks preinstalled
-  - `.pth`-based Python startup bootstrap
-  - automatic Python SDK instrumentation without Agent startup `register()` changes
-  - environment-variable exporter and capture-policy configuration
-  - fail-open startup behavior
-- `docker/node/Dockerfile`
-  - prebuilt Senda-Argus JS SDK
-  - `NODE_OPTIONS=--import=...` preload
-- Docker Compose example
-- Python Agent example
-- auto-hook smoke test
-
-### Validation
-
-- Python auto-hook smoke test: PASS
-- Python tests: 61 passed, 2 skipped
-- Node tests: 10 passed
-- shell entrypoint syntax: PASS
-- Node preload syntax: PASS
-
----
-
-## v0.7.0
-
-### Summary
-
-Expanded the Node.js / TypeScript package from provider SDK hooks into agent-framework and AI-runtime integrations while preserving `schema_version = 0.2`.
-
-### Added
-
-- LangChain JS callback handler and lifecycle normalization
-- LangGraph invoke / stream wrappers and best-effort graph instrumentation
-- LlamaIndex TS retriever, embedding, and query-engine instrumentation
-- Vercel AI SDK middleware instrumentation
-- OpenAI Agents SDK JS/TS trace processor integration
-
-### Final fixes
-
-- OpenAI Agents processor updated to current trace/span lifecycle
-- stable `trace_id` preservation across MCP, LangChain, LangGraph, and LlamaIndex operations
-- Python-style exporter configuration accepted by JS `register()`
-- MCP optional peer dependency aligned with tested package
+```text
+POST   /api/agents                          # start_immediately=true|false
+POST   /api/workflows                       # start_immediately=true|false
+POST   /api/workflows/{workflow_id}/start
+POST   /api/workflows/{workflow_id}/stop
+DELETE /api/workflows/{workflow_id}
+```
 
 ### Verification
 
-- TypeScript compilation passed
-- JavaScript tests: 10 passed, 0 failed
-- packed-package install/import smoke test passed
-- Python regression tests: 61 passed, 2 skipped
+- Agent Studio test suite: 29 passed.
 
 ---
 
-## v0.6.0
+## Senda Arugus Agent Studio v0.5.1
 
 ### Added
 
-Senda-Argus Hooks JS v0.1 with:
+- Japanese / English language selector.
+- Browser language detection on first visit.
+- Language persistence in browser `localStorage`.
+- Lightweight catalog in `app/static/i18n.js`.
+- Localization for UI actions, help text, validation, confirmations, Workflow messages, Trace, and Logs.
 
-- AsyncLocalStorage context
-- event schema 0.2
-- SHA-256 hashing
-- redaction
-- JSONL and stdout exporters
-- OpenAI hooks: `responses.create`, `chat.completions.create`, `embeddings.create`
-- Anthropic hook: `messages.create`
-- Ollama hook: `chat`
-- MCP hook: `Client.callTool`
+### Translation policy
 
-### Repository restructure
+- Senda product names remain in English.
+- Common technical terms such as Agent, Runtime, Hook, Workflow, Supervisor, Goal, LLM, MCP, RAG, Jev, Docker, JSON, API, Trace, and Logs remain in English where clearer.
 
-- Existing Python implementation moved under `python/`
-- Node.js / TypeScript hooks added under `js/`
-- Browser package preserved at repository root
-- Python import remained `senda_argus_hooks`
-- CLI entry points remained `senda-hooks` and `senda-argus`
+---
 
+## Senda Arugus Agent Studio v0.5.0
+
+### Added
+
+- Built-in `senda-supervisor` control-plane identity.
+- Supervisor backends: `llm`, `jev`, `deterministic`.
+- TypeSafe Jev / System One routing via `typesafe-sdk`.
+- Jev Agent choice over callable Agent IDs plus a `finish` outcome.
+- Jev telemetry: selected Agent, probabilities, confidence, model, request ID, latency, and usage when available.
+- Supervisor-generated events published through the Studio event bus and forwarded upstream when configured.
+- Event families:
+  - `supervisor.decision.*`
+  - `orchestrator.jev.*`
+  - `orchestrator.llm.*`
+  - existing `orchestrator.plan.*` retained for compatibility
+- Optional Jev confidence threshold and LLM fallback.
+
+### Workflow model
+
+- `Goal` is the Supervisor prompt.
+- `Allowed Agents` is a candidate set only; order does not define execution order.
+- The Supervisor normally chooses the first worker.
+- `entry_agent_id` remains only as an advanced first-worker override for tests / backward compatibility.
+
+---
+
+## Senda Arugus Agent Studio v0.4.0
+
+### Added
+
+- Agent Registry metadata for routing: description, capabilities, tags, input/output schema, risk, approval, allowed callers.
+- One-shot child Agent execution from registered Runtime templates.
+- `SENDA_AGENT_INPUT`, Workflow identity, and Argus run correlation environment injection.
+- Structured Agent result marker: `[senda-agent-result] {...}`.
+- Persistent Workflow / Workflow Step state.
+- LLM Supervisor loop with `max_steps`, Allowed Agent validation, and structured decisions.
+- Human approval gate.
+- Workflow UI and `workflow.*` / `orchestrator.*` trace events.
+- stdio MCP control server for Agent and Workflow operations.
+- Deterministic local planner and demo workers for offline tests.
+
+### Control boundary
+
+The LLM does not receive Docker access. It selects only registered Agent IDs; Agent Studio validates and executes the selection through the managed Runtime boundary.
+
+---
+
+## Earlier Hook / Runtime releases
+
+### Node Zero-code v0.9.0
+
+- Node zero-code bootstrap and ESM loader.
+- Automatic supported provider / MCP interception for ESM and CommonJS.
+- Linux process / systemd discovery and installation workflow.
+- Direct Argus HTTP exporter with fail-open behavior.
+
+### Python Zero-code v0.8.0
+
+- Python / venv discovery.
+- Offline wheel installation.
+- `.pth` startup hook without Agent source changes.
+- Global / user `hooks.env` configuration.
+- Bulk install/uninstall, status, rollback, and restart-required PID reporting.
+
+### Docker Runtime
+
+- Shared Python and Node Hook-enabled Runtime images.
+- Python `.pth` bootstrap and Node `NODE_OPTIONS` preload.
+- Docker Compose examples and smoke tests.
+
+### v0.7.0
+
+- LangChain JS, LangGraph, LlamaIndex TS, Vercel AI SDK, and OpenAI Agents SDK integrations.
+- Stable `trace_id` handling improvements.
+
+### v0.6.0
+
+- Initial Senda-Argus Hooks JS support with event schema 0.2, redaction, exporters, and provider / MCP hooks.

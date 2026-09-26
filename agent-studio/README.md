@@ -55,6 +55,45 @@ Open:
 http://localhost:8080
 ```
 
+## Web UI language / i18n (v0.5.1)
+
+The Web UI supports Japanese and English from the language selector in the header. On the first visit, Studio uses the browser language (`ja` -> Japanese, otherwise English) and stores the selected language in browser `localStorage`.
+
+The translation catalog is intentionally lightweight and lives in:
+
+```text
+app/static/i18n.js
+```
+
+Translation policy: Senda product names and common engineering terms such as Agent, Runtime, Hook, Workflow, Supervisor, Goal, LLM, MCP, RAG, Jev, Docker, JSON, API, Trace, and Logs remain in English when that is clearer for Japanese operators. Descriptions, actions, help text, validation messages, and confirmations are localized.
+
+To add a language later, add a catalog entry in `i18n.js`, add its code to `SUPPORTED`, and add an option to `#languageSelect` in `index.html`.
+
+
+## Registration and execution lifecycle (v0.5.2)
+
+Runtime and Workflow registration are now separate from execution. The Web UI provides two actions when creating either resource:
+
+```text
+Register only
+Register & Run
+```
+
+A Runtime registered without execution creates the managed Docker template container but leaves it stopped/created. It can later be started with the existing Runtime **Start** action.
+
+A Workflow registered without execution is stored with status `registered`. Registered Workflows can be started/re-run, stopped, approved when required, or deleted from the Workflows view. Starting an existing Workflow resets its current steps/result and begins a new execution using the same registered definition.
+
+Workflow lifecycle API:
+
+```text
+POST   /api/workflows                         # start_immediately=true|false
+POST   /api/workflows/{workflow_id}/start
+POST   /api/workflows/{workflow_id}/stop
+DELETE /api/workflows/{workflow_id}
+```
+
+Runtime registration accepts `start_immediately=true|false` on `POST /api/agents`. Existing API clients remain compatible because the default is `true`.
+
 ## macOS / Docker Desktop
 
 Use an absolute macOS host path such as `/Users/you/agents/my-agent`. The bind source is resolved by Docker Desktop's host Docker Engine.
@@ -156,3 +195,177 @@ When validating a Hook change, restart or re-run the Agent Runtime so a new exec
 Runtime registration lets you select the Docker restart policy from the Web UI. The default remains `unless-stopped` for backward compatibility.
 
 Use `no` for one-shot/test workloads such as `test-mcp-agent` and `test-rag-agent`; use `unless-stopped` for long-running service Agents. `Maximum Retry Count` is sent to Docker only when `on-failure` is selected.
+
+## Multi-Agent orchestration (v0.4.0)
+
+Agent Studio can now act as the control plane for multi-Agent execution. The design keeps LLM planning separate from Docker control:
+
+```text
+User / Trigger
+    -> LLM Supervisor
+    -> Agent Registry metadata
+    -> validated Agent Studio run API
+    -> one-shot child Agent container
+    -> result
+    -> LLM Supervisor selects the next Agent
+```
+
+The LLM never receives direct Docker access. It selects only from registered `agent_id` values and Agent Studio performs the actual execution.
+
+### Agent Registry metadata
+
+Runtime registration now supports orchestration metadata:
+
+- Description
+- Capabilities
+- Tags
+- Input / Output JSON Schema
+- Risk level (`low`, `medium`, `high`)
+- Human approval requirement
+- Allowed callers
+
+This metadata is stored in Studio SQLite rather than Docker labels so JSON schemas do not need to be compressed into labels.
+
+### One-shot Agent execution contract
+
+A registered Runtime acts as the execution template. `POST /api/agents/{agent_id}/run` creates a one-shot child container with the same image, mount, command and network, but forces:
+
+```text
+restart=no
+```
+
+The child receives:
+
+```text
+SENDA_AGENT_INPUT=<JSON>
+SENDA_AGENT_RUN_ID=<agent run id>
+SENDA_ARGUS_RUN_ID=<same agent run id>
+SENDA_WORKFLOW_RUN_ID=<workflow id>       # when part of a workflow
+SENDA_PARENT_AGENT_ID=senda-orchestrator  # when supervisor initiated
+```
+
+An Agent may return a structured result by printing one line:
+
+```text
+[senda-agent-result] {"key":"value"}
+```
+
+If no result marker is emitted, Studio returns the run logs as `result_text`.
+
+Useful APIs:
+
+```text
+POST   /api/agents/{agent_id}/run
+GET    /api/runs/{run_id}
+POST   /api/runs/{run_id}/wait
+GET    /api/runs/{run_id}/result
+DELETE /api/runs/{run_id}
+```
+
+### Supervisor workflow
+
+The **Workflows** view starts an orchestration run. `senda-supervisor` is a Studio control-plane component, not a worker Runtime. It receives the Goal, Initial Input, callable Agent Registry metadata, and previous results, then chooses the next worker or `finish`:
+
+```text
+Goal + Agent Registry + workflow state
+        -> senda-supervisor
+        -> decision backend (llm / jev / deterministic)
+        -> run selected worker Agent
+        -> collect structured result
+        -> senda-supervisor
+        -> ...
+        -> finish
+```
+
+`Allowed Agents` limits the candidate set only; its order is not the execution order. The legacy `entry_agent_id` field is retained as a **First Worker Override** for tests/backward compatibility. Normal workflows should leave it empty so the Supervisor chooses the first worker as well.
+
+The supervisor is bounded by `max_steps` and `allowed_agents`. An Agent with `requires_approval=true` causes the workflow to enter `pending_approval` until the user presses **Approve** or calls the approval API.
+
+Workflow APIs:
+
+```text
+POST /api/workflows
+GET  /api/workflows
+GET  /api/workflows/{workflow_id}
+POST /api/workflows/{workflow_id}/approve
+```
+
+### Supervisor backends
+
+`llm` uses an OpenAI-compatible `/v1/chat/completions` endpoint:
+
+```bash
+export SENDA_STUDIO_LLM_BASE_URL='http://your-llm-endpoint:port'
+export SENDA_STUDIO_LLM_MODEL='your-model-name'
+export SENDA_STUDIO_LLM_API_KEY='optional-key'
+```
+
+`jev` uses TypeSafe System One through the official Python SDK installed in the Agent Studio image:
+
+```bash
+export TYPESAFE_API_KEY='...'
+export TYPESAFE_BASE_URL='https://api.typesafe.ai'   # optional
+export TYPESAFE_DEFAULT_MODEL='jev-latest'           # optional
+export SENDA_STUDIO_JEV_CONFIDENCE_THRESHOLD='0'     # 0 disables gating
+export SENDA_STUDIO_JEV_FALLBACK='none'              # or llm
+```
+
+For Jev routing, Studio creates one `Choice` question whose options are the callable Agent IDs plus `__finish__`. The selected choice, probabilities, confidence, model, request ID and latency are attached to `orchestrator.jev.completed` and `supervisor.decision.completed` events. These internal events use the Studio event bus and are forwarded to the upstream Argus ingest API when `SENDA_STUDIO_ARGUS_UPSTREAM` is configured.
+
+For an offline control-plane smoke test, select `deterministic` Supervisor mode. This verifies Agent execution, result passing and workflow state without an external model.
+
+Rebuild after enabling Jev because `typesafe-sdk` is installed in the Studio image:
+
+```bash
+docker compose up -d --build
+```
+
+### Agent Studio MCP server
+
+Agent Studio exposes the same control-plane operations through a stdio MCP server:
+
+```bash
+docker exec -i \
+  -e SENDA_STUDIO_URL=http://127.0.0.1:8080 \
+  senda-agent-studio \
+  python -m app.mcp_server
+```
+
+MCP tools:
+
+```text
+list_agents
+get_agent
+run_agent
+get_run
+wait_run
+get_run_result
+start_workflow
+get_workflow
+approve_workflow
+```
+
+The MCP server delegates to the Studio HTTP API and does not manipulate Docker directly.
+
+### Demo workers
+
+`demo-agents/` contains three deterministic workers for local workflow testing. See `demo-agents/README.md`.
+
+### One-command multi-Agent smoke test
+
+After rebuilding Agent Studio and the shared Python Runtime, run from the repository root:
+
+```bash
+python3 scripts/multi-agent-smoke.py
+```
+
+The script registers the three `demo-agents/` workers if needed, starts a deterministic workflow, and polls until `success` or `failed`. It exercises Agent Registry metadata, one-shot child containers, input/result passing, workflow persistence and supervisor routing without an external LLM.
+## Workflow list and registration UI (v0.5.3)
+
+The Web UI separates Workflow lifecycle management from Workflow registration, matching the Runtime UI model:
+
+- **Workflows**: list registered Workflows, inspect status/steps/results, and Start/Stop/Delete them.
+- **Workflow登録 / Register Workflow**: configure a new Workflow and choose **登録のみ / Register only** or **登録 & 実行 / Register & Run**.
+
+After a Workflow is registered successfully, the UI returns to the Workflows list.
+

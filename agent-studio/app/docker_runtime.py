@@ -11,6 +11,10 @@ SOCKET_PATH = '/var/run/docker.sock'
 MANAGED_LABEL = 'com.senda.agent-runtime'
 LEGACY_MANAGED_LABEL = 'com.senda.agent.managed'
 RESTART_POLICIES = {'no', 'on-failure', 'always', 'unless-stopped'}
+RUNTIME_KIND_LABEL = 'com.senda.agent.runtime-kind'
+RUN_ID_LABEL = 'com.senda.agent.run-id'
+WORKFLOW_ID_LABEL = 'com.senda.agent.workflow-id'
+PARENT_AGENT_LABEL = 'com.senda.agent.parent-agent-id'
 
 
 class DockerAPIError(RuntimeError):
@@ -108,6 +112,8 @@ class DockerRuntime:
         for c in by_id.values():
             labels = c.get('Labels') or {}
             if not self._is_managed(labels):
+                continue
+            if labels.get(RUNTIME_KIND_LABEL) == 'run':
                 continue
             state = c.get('State') or 'unknown'
             mounts = c.get('Mounts') or []
@@ -241,6 +247,7 @@ class DockerRuntime:
             'com.senda.agent.entrypoint': entrypoint,
             'com.senda.agent.restart-policy': restart_policy,
             'com.senda.agent.maximum-retry-count': str(maximum_retry_count if restart_policy == 'on-failure' else 0),
+            RUNTIME_KIND_LABEL: 'template',
         }
 
         docker_restart_policy: dict[str, Any] = {'Name': restart_policy}
@@ -273,5 +280,209 @@ class DockerRuntime:
 
         created = self._request('POST', '/containers/create?' + urlencode({'name': name}), body, ok=(201,)) or {}
         cid = created.get('Id', '')
+        if spec.get('start_immediately', True):
+            self.start(cid)
+        return {'id': cid[:12], 'container_id': cid, 'name': name, 'agent_id': agent_id, 'started': bool(spec.get('start_immediately', True))}
+
+
+    def _find_registered_agent(self, agent_id: str) -> dict[str, Any]:
+        for agent in self.list_agents():
+            if agent.get('agent_id') == agent_id or agent.get('name') == agent_id or agent.get('container_id') == agent_id:
+                return agent
+        raise KeyError(agent_id)
+
+    @staticmethod
+    def _env_list_to_dict(items: list[str] | None) -> dict[str, str]:
+        out: dict[str, str] = {}
+        for item in items or []:
+            if '=' in item:
+                k, v = item.split('=', 1)
+                out[k] = v
+        return out
+
+    def run_agent(
+        self,
+        agent_id: str,
+        run_id: str,
+        input_data: Any = None,
+        workflow_id: str | None = None,
+        parent_agent_id: str | None = None,
+        extra_env: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Run a registered Agent as a one-shot child container.
+
+        The registered Runtime is treated as a template.  A child container is
+        created with the same image, bind mounts, command and network, but with
+        restart=no and run/workflow identity injected into the environment.
+        """
+        template = self._find_registered_agent(agent_id)
+        info = self._inspect_managed(template['container_id'])
+        cfg = info.get('Config') or {}
+        host_cfg = info.get('HostConfig') or {}
+        labels = dict(cfg.get('Labels') or {})
+        labels[MANAGED_LABEL] = 'true'
+        labels[RUNTIME_KIND_LABEL] = 'run'
+        labels[RUN_ID_LABEL] = run_id
+        labels['com.senda.agent.template-id'] = str(template.get('agent_id') or agent_id)
+        if workflow_id:
+            labels[WORKFLOW_ID_LABEL] = workflow_id
+        if parent_agent_id:
+            labels[PARENT_AGENT_LABEL] = parent_agent_id
+
+        env = self._env_list_to_dict(cfg.get('Env'))
+        env['SENDA_ARGUS_AGENT_ID'] = str(template.get('agent_id') or agent_id)
+        env['SENDA_ARGUS_RUN_ID'] = run_id
+        env['SENDA_AGENT_RUN_ID'] = run_id
+        env['SENDA_AGENT_INPUT'] = json.dumps(input_data if input_data is not None else {}, ensure_ascii=False, default=str)
+        if workflow_id:
+            env['SENDA_WORKFLOW_RUN_ID'] = workflow_id
+        if parent_agent_id:
+            env['SENDA_PARENT_AGENT_ID'] = parent_agent_id
+        env.update(extra_env or {})
+
+        run_host_config: dict[str, Any] = {
+            'RestartPolicy': {'Name': 'no'},
+            'NetworkMode': host_cfg.get('NetworkMode') or 'senda-agent-net',
+        }
+        # Preserve the settings relevant to a normal mounted Agent runtime.
+        for key in ('Binds', 'Mounts', 'ReadonlyRootfs', 'Dns', 'ExtraHosts', 'SecurityOpt'):
+            if host_cfg.get(key):
+                run_host_config[key] = host_cfg[key]
+
+        body: dict[str, Any] = {
+            'Image': cfg.get('Image') or template.get('image'),
+            'Env': [f'{k}={v}' for k, v in env.items()],
+            'Labels': labels,
+            'HostConfig': run_host_config,
+            'WorkingDir': cfg.get('WorkingDir') or template.get('container_path') or '/workspace',
+            'Cmd': cfg.get('Cmd'),
+        }
+        if cfg.get('Entrypoint'):
+            body['Entrypoint'] = cfg.get('Entrypoint')
+        # Docker rejects explicit null Cmd in a few versions.
+        if body.get('Cmd') is None:
+            body.pop('Cmd', None)
+
+        safe_agent = ''.join(ch if ch.isalnum() or ch in '_.-' else '-' for ch in str(template.get('agent_id') or agent_id))[:40]
+        safe_run = ''.join(ch if ch.isalnum() or ch in '_.-' else '-' for ch in run_id)[-20:]
+        name = f'{safe_agent}-run-{safe_run}'[:63]
+        created = self._request('POST', '/containers/create?' + urlencode({'name': name}), body, ok=(201,)) or {}
+        cid = created.get('Id', '')
         self.start(cid)
-        return {'id': cid[:12], 'container_id': cid, 'name': name, 'agent_id': agent_id}
+        return {
+            'run_id': run_id,
+            'container_id': cid,
+            'id': cid[:12],
+            'name': name,
+            'agent_id': template.get('agent_id') or agent_id,
+            'workflow_id': workflow_id,
+            'status': 'running',
+        }
+
+    def _find_run_container(self, run_id: str) -> dict[str, Any]:
+        filters = json.dumps({'label': [f'{RUN_ID_LABEL}={run_id}', f'{RUNTIME_KIND_LABEL}=run']})
+        rows = self._request('GET', '/containers/json?' + urlencode({'all': '1', 'filters': filters})) or []
+        if not rows:
+            raise KeyError(run_id)
+        return rows[0]
+
+    def get_run(self, run_id: str) -> dict[str, Any]:
+        c = self._find_run_container(run_id)
+        info = self._request('GET', f'/containers/{quote(c.get("Id", ""), safe="")}/json') or {}
+        labels = ((info.get('Config') or {}).get('Labels') or {})
+        state = info.get('State') or {}
+        status = state.get('Status') or c.get('State') or 'unknown'
+        exit_code = state.get('ExitCode')
+        return {
+            'run_id': run_id,
+            'container_id': c.get('Id', ''),
+            'id': str(c.get('Id', ''))[:12],
+            'name': (c.get('Names') or ['/unknown'])[0].lstrip('/'),
+            'agent_id': labels.get('com.senda.agent.template-id') or labels.get('com.senda.agent.id'),
+            'workflow_id': labels.get(WORKFLOW_ID_LABEL),
+            'parent_agent_id': labels.get(PARENT_AGENT_LABEL),
+            'status': status,
+            'running': bool(state.get('Running')),
+            'exit_code': exit_code,
+            'started_at': state.get('StartedAt'),
+            'finished_at': state.get('FinishedAt'),
+        }
+
+    def list_runs(self, workflow_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        label_filters = [f'{RUNTIME_KIND_LABEL}=run']
+        if workflow_id:
+            label_filters.append(f'{WORKFLOW_ID_LABEL}={workflow_id}')
+        filters = json.dumps({'label': label_filters})
+        rows = self._request('GET', '/containers/json?' + urlencode({'all': '1', 'filters': filters})) or []
+        out: list[dict[str, Any]] = []
+        for c in rows[:max(1, min(int(limit), 500))]:
+            labels = c.get('Labels') or {}
+            out.append({
+                'run_id': labels.get(RUN_ID_LABEL),
+                'container_id': c.get('Id', ''),
+                'id': str(c.get('Id', ''))[:12],
+                'name': (c.get('Names') or ['/unknown'])[0].lstrip('/'),
+                'agent_id': labels.get('com.senda.agent.template-id') or labels.get('com.senda.agent.id'),
+                'workflow_id': labels.get(WORKFLOW_ID_LABEL),
+                'status': c.get('State') or 'unknown',
+            })
+        return out
+
+    def wait_run(self, run_id: str, timeout: float = 300) -> dict[str, Any]:
+        c = self._find_run_container(run_id)
+        cid = c.get('Id', '')
+        self._request(
+            'POST',
+            f'/containers/{quote(cid, safe="")}/wait?condition=not-running',
+            ok=(200,),
+            timeout=max(1.0, float(timeout)),
+        )
+        return self.get_run(run_id)
+
+    def run_logs(self, run_id: str, tail: int = 1000) -> str:
+        c = self._find_run_container(run_id)
+        return self.logs(c.get('Id', ''), tail=tail)
+
+    @staticmethod
+    def parse_result_from_logs(logs: str) -> Any:
+        """Extract a structured result when an Agent follows the result marker contract.
+
+        Supported line forms:
+          [senda-agent-result] {"key":"value"}
+          SENDA_AGENT_RESULT={"key":"value"}
+        Otherwise the full logs are returned as result_text.
+        """
+        for line in reversed((logs or '').splitlines()):
+            payload = None
+            if '[senda-agent-result]' in line:
+                payload = line.split('[senda-agent-result]', 1)[1].strip()
+            elif 'SENDA_AGENT_RESULT=' in line:
+                payload = line.split('SENDA_AGENT_RESULT=', 1)[1].strip()
+            if payload:
+                try:
+                    return json.loads(payload)
+                except Exception:
+                    return payload
+        return {'result_text': logs}
+
+    def run_result(self, run_id: str) -> dict[str, Any]:
+        state = self.get_run(run_id)
+        logs = self.run_logs(run_id)
+        return {**state, 'logs': logs, 'result': self.parse_result_from_logs(logs)}
+
+    def stop_run(self, run_id: str) -> None:
+        c = self._find_run_container(run_id)
+        cid = c.get('Id', '')
+        info = self._request('GET', f'/containers/{quote(cid, safe="")}/json') or {}
+        if (info.get('State') or {}).get('Running'):
+            self._request('POST', f'/containers/{quote(cid, safe="")}/stop?t=3', ok=(204, 304), timeout=15)
+
+    def remove_run(self, run_id: str, force: bool = True) -> None:
+        c = self._find_run_container(run_id)
+        cid = c.get('Id', '')
+        self._request(
+            'DELETE',
+            f'/containers/{quote(cid, safe="")}?v=0&force={1 if force else 0}',
+            ok=(204,),
+            timeout=15,
+        )

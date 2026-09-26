@@ -1,28 +1,24 @@
 # Senda-Argus Hooks
 
-Senda-Argus Hooks is a hook-based observability SDK for AI agents, LLM SDKs, MCP, agent frameworks, and RAG workflows.
+Senda-Argus Hooks is a hook-based observability SDK for AI Agents, LLM SDKs, MCP, agent frameworks, and RAG workflows.
 
-It collects normalized execution events from runtime hooks, monkey patches, callback integrations, and framework wrappers without requiring application-level `audit.event()` calls or business-logic changes in agent applications.
-
-The collected events are intended for downstream analysis, correlation, risk scoring, alerting, and visualization by systems such as Senda-Argus.
+It collects normalized execution events from runtime hooks, monkey patches, callback integrations, and framework wrappers without requiring application-level audit calls or business-logic changes in Agent applications. The events can be exported to Senda-Argus for analysis, correlation, risk scoring, alerting, and visualization.
 
 > **Patent Notice**  
-> Certain concepts and techniques related to Senda-Argus, including AI agent execution trace collection, decision trace reconstruction, and runtime audit event correlation, are patent pending in Japan. This notice does not change the Apache License 2.0 terms applicable to this repository.
+> Certain concepts and techniques related to Senda-Argus, including AI Agent execution trace collection, decision trace reconstruction, and runtime audit event correlation, are patent pending in Japan. This notice does not change the Apache License 2.0 terms applicable to this repository.
 
 ## Highlights
 
-- Hook-only observability; no required application audit calls
-- Python and Node.js / TypeScript support
-- Existing Python Agent auto-hook without source changes
-- Existing Node Agent zero-code preload without source changes
+- Python and Node.js / TypeScript Hook support
+- Existing Python Agent auto-hook / zero-code deployment
+- Existing Node Agent zero-code preload
 - Hook-enabled Docker Runtime images
-- Senda Agent Studio for Docker-based Agent Runtime management and trace visualization
 - OpenAI / Anthropic / LiteLLM / Ollama hooks
-- MCP request / completion / failure lifecycle events
+- MCP lifecycle hooks
 - OpenAI Agents, LangChain, LangGraph, LlamaIndex / RAG integrations
 - JSONL / stdout / Parquet / Argus exporters
 - Redaction and capture controls
-- Stable correlation identifiers such as `agent_id`, `purpose_id`, and `mcp_profile_id`
+- Senda Arugus Agent Studio for Runtime, Trace, Logs, and Multi-Agent Workflow management
 
 ## Repository layout
 
@@ -32,7 +28,7 @@ senda-argus-hooks/
 ├─ js/              # Node.js / TypeScript SDK and integrations
 ├─ browser/         # Browser hook package
 ├─ docker/          # Hook-enabled Python / Node runtimes
-├─ agent-studio/    # Senda Agent Studio WebUI
+├─ agent-studio/    # Senda Arugus Agent Studio WebUI / control plane
 ├─ tools/           # Zero-code deployment tools
 ├─ scripts/         # Docker install / status / runtime-create helpers
 ├─ README.md
@@ -55,28 +51,29 @@ senda-argus-hooks/
 | LangGraph | Experimental | `agent.run.*`, `agent.step.*` |
 | LlamaIndex / RAG | Experimental | `retrieval.*`, `embedding.*`, `rag.query.*` |
 | Node.js provider / MCP hooks | Experimental | `llm.*`, `mcp.tool_call.*` |
-| Langflow integration | Example | `llm.*`, `tool_call.*`, `mcp.tool_call.*`, `retrieval.*` |
 
 ## Event model
 
-Common event fields include:
+Common fields include:
 
-- `schema_version`
-- `event_id`
-- `trace_id`
-- `span_id`
-- `parent_span_id`
-- `timestamp`
-- `project`
-- `environment`
-- `event_type`
-- `source`
-- `actor`
-- `data`
-- `security`
-- `status`
-- `latency_ms`
-- `error`
+```text
+schema_version
+ event_id
+ trace_id
+ span_id
+ parent_span_id
+ timestamp
+ project
+ environment
+ event_type
+ source
+ actor
+ data
+ security
+ status
+ latency_ms
+ error
+```
 
 Typical event families:
 
@@ -90,88 +87,95 @@ agent.decision
 retrieval.*
 embedding.*
 rag.query.*
+workflow.*
+supervisor.*
+orchestrator.*
 ```
 
-## Quick start: Python SDK
+## Senda Arugus Agent Studio
 
-```bash
-cd python
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -e .
-```
+`agent-studio/` provides the Docker-based control plane and observability UI.
 
-Basic registration:
+Current capabilities through **v0.5.4**:
 
-```python
-from senda_argus_hooks import register, shutdown
+### Runtime management
 
-register(
-    project="example-agent",
-    environment="dev",
-    auto_instrument=True,
-    exporters=[{"type": "jsonl", "path": "./logs/events.jsonl"}],
-    capture_prompt=False,
-    capture_response=False,
-    capture_arguments=True,
-    capture_result=False,
-    redact=True,
-)
-
-# Run the normal Agent / LLM / MCP application.
-
-shutdown()
-```
-
-For existing Python Agents, use the zero-code deployment path documented in [DEPLOYMENT.md](./DEPLOYMENT.md).
-
-## Quick start: Node.js / TypeScript
-
-```bash
-cd js
-npm install
-npm test
-```
-
-Node zero-code deployment can intercept supported provider and MCP layers through `NODE_OPTIONS=--import=...` without adding imports or `register()` calls to the application source. See [DEPLOYMENT.md](./DEPLOYMENT.md).
-
-## Senda Agent Studio
-
-`agent-studio/` provides a WebUI for managing **Senda Agent Runtime** containers and visualizing Hook events.
-
-Current capabilities include:
-
-- Runtime list
+- Runtime list and dedicated Runtime registration view
+- **Register only** / **Register & Run** lifecycle
 - Start / Stop / Restart / Delete
-- Runtime registration
-- Generic host Agent directory mount into a Hook-enabled Runtime
-- Live Hook events
-- Agent trace visualization
-- Docker logs per Runtime
+- Docker restart policy selection: `no`, `on-failure`, `always`, `unless-stopped`
+- Maximum retry count for `on-failure`
+- Generic host Agent directory mount into a shared Hook-enabled Runtime
+- Per-Runtime Trace accordion
+- Per-Runtime Docker Logs accordion
+- Global Live Hook Events
 
-A typical deployment uses a common Runtime image such as:
+### Multi-Agent Workflow control plane
+
+- Built-in `senda-supervisor`
+- Supervisor modes: `llm`, `jev`, `deterministic`
+- Agent Registry metadata for routing:
+  - Description
+  - Capabilities
+  - Tags
+  - Input / Output JSON Schema
+  - Risk level
+  - Approval requirement
+  - Allowed callers
+- Goal-based Agent selection
+- `Allowed Agents` as a candidate set; list order does not define execution order
+- One-shot child Agent execution with `restart=no`
+- Structured Agent result contract using `[senda-agent-result] {...}`
+- Persistent Workflow and Step state
+- Human approval gate
+- Workflow Start / Stop / Delete / re-run
+- Workflow **Register only** / **Register & Run** lifecycle
+- Separate **Workflows** and **Workflow registration** views
+- Per-Workflow Trace and Logs panels
+- Step-based Workflow Trace selection
+- Workflow Execution Details accordion for Steps and Final Result
+
+### Jev / TypeSafe integration
+
+Jev is available as an optional Supervisor decision backend in Agent Studio.
+
+- `typesafe-sdk` is installed only in Agent Studio, not in worker Agent images
+- Agent choice, confidence, and choice probabilities are recorded when available
+- Jev telemetry can be forwarded to Senda-Argus together with other Studio events
+- Optional confidence threshold and LLM fallback
+
+Relevant event families include:
 
 ```text
-senda/python-agent:0.8
+supervisor.decision.*
+orchestrator.jev.*
+orchestrator.llm.*
+workflow.*
 ```
 
-and mounts an existing host-side Agent directory into `/workspace`, avoiding an Agent-specific image build.
+### i18n
 
-## One-command Docker setup
+The WebUI supports Japanese and English.
 
-For a quick local deployment with Docker Desktop or Docker Engine:
+Technical terms and Senda product names remain in English when translating them would reduce clarity. The selected language is stored in browser `localStorage`.
+
+See [`agent-studio/README.md`](./agent-studio/README.md) for detailed usage and control-plane behavior.
+
+## Quick setup
 
 ```bash
 ./scripts/install.sh
 ```
 
-This builds the common Python Hook Runtime and starts Senda Agent Studio. Build the Node Runtime too with:
+This builds the common Python Hook Runtime and starts Agent Studio.
+
+To build the Node Runtime too:
 
 ```bash
 ./scripts/install.sh --with-node
 ```
 
-Create a Runtime directly from an existing host Agent directory without using the WebUI:
+Create a Runtime from an existing host Agent directory:
 
 ```bash
 ./scripts/runtime-create.sh \
@@ -179,21 +183,11 @@ Create a Runtime directly from an existing host Agent directory without using th
   --host-path /path/to/my-agent
 ```
 
-Check the installation with `./scripts/status.sh`. See [DEPLOYMENT.md](./DEPLOYMENT.md) for removal and advanced options.
-
-## Docker Runtime
-
-The Docker runtime preinstalls Senda-Argus Hooks and supports automatic startup instrumentation.
-
-Python uses a startup bootstrap based on `.pth`; Node uses a preload path through `NODE_OPTIONS`.
-
-See [DEPLOYMENT.md](./DEPLOYMENT.md) for build, runtime, and Agent Studio deployment instructions.
+See [DEPLOYMENT.md](./DEPLOYMENT.md) for deployment and operational details.
 
 ## Privacy and security defaults
 
 Production deployments should keep raw content capture disabled unless explicitly required.
-
-Recommended defaults:
 
 ```text
 SENDA_ARGUS_CAPTURE_PROMPT=false
@@ -204,25 +198,7 @@ SENDA_ARGUS_CAPTURE_HASH=true
 SENDA_ARGUS_REDACT=true
 ```
 
-Exported events are security-relevant audit data. Do not commit runtime logs, API keys, or sensitive exported payloads to public repositories.
-
-## Development
-
-Python:
-
-```bash
-cd python
-python -m pip install -e "[dev]"
-pytest -q -rs
-```
-
-Node.js:
-
-```bash
-cd js
-npm install
-npm test
-```
+Exported events, Workflow traces, and Runtime logs are security-sensitive data. Do not commit credentials or sensitive outputs to Git.
 
 ## Documentation
 
@@ -232,6 +208,7 @@ npm test
 - `js/README.md` — Node.js / TypeScript SDK details
 - `agent-studio/README.md` — Agent Studio usage
 - `docker/README.md` — Runtime image details
+- `TEST_AGENTS.md` — deterministic MCP / RAG validation workloads
 
 ## License
 

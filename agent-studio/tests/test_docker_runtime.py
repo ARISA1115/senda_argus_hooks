@@ -130,3 +130,55 @@ def test_reject_unsupported_restart_policy():
         assert 'Unsupported restart policy' in str(e)
     else:
         raise AssertionError('expected DockerAPIError')
+
+
+def test_parse_structured_agent_result_marker():
+    logs='line one\n[senda-agent-result] {"ok": true, "value": 7}\n'
+    assert DockerRuntime.parse_result_from_logs(logs)=={'ok':True,'value':7}
+
+
+def test_run_agent_clones_template_and_injects_orchestration_env():
+    class RunRuntime(CaptureRuntime):
+        def list_agents(self):
+            return [{
+                'agent_id':'worker','name':'worker','container_id':'template123','image':'img',
+                'container_path':'/workspace','runtime':'python'
+            }]
+        def _request(self, method, path, body=None, ok=(200,201,204), timeout=10):
+            self.calls.append((method,path,body,ok,timeout))
+            if method=='GET' and path=='/containers/template123/json':
+                return {
+                    'Config': {
+                        'Labels': {MANAGED_LABEL:'true'}, 'Image':'img',
+                        'Env':['SENDA_ARGUS_ENABLED=true'], 'WorkingDir':'/workspace',
+                        'Cmd':['python','agent.py'],
+                    },
+                    'HostConfig': {'NetworkMode':'senda-agent-net','Binds':['/host/worker:/workspace:rw']},
+                    'State': {'Running':False},
+                }
+            if method=='POST' and path.startswith('/containers/create?'):
+                return {'Id':'run123456789'}
+            if method=='GET' and path=='/containers/run123456789/json':
+                return {'Config': {'Labels': {MANAGED_LABEL:'true'}}, 'State': {'Running':False}}
+            return None
+    r=RunRuntime()
+    out=r.run_agent('worker','ar_123',{'target':'demo'},'wf_1','senda-orchestrator')
+    create=[c for c in r.calls if c[0]=='POST' and c[1].startswith('/containers/create?')][0]
+    body=create[2]
+    assert body['HostConfig']['RestartPolicy']=={'Name':'no'}
+    assert 'SENDA_ARGUS_RUN_ID=ar_123' in body['Env']
+    assert 'SENDA_WORKFLOW_RUN_ID=wf_1' in body['Env']
+    assert any(x.startswith('SENDA_AGENT_INPUT=') for x in body['Env'])
+    assert out['run_id']=='ar_123'
+
+
+def test_create_can_register_without_starting():
+    r=CaptureRuntime()
+    out=r.create({
+        'name':'registered-agent', 'image':'senda/python-agent:0.8', 'runtime':'python',
+        'host_path':'/Users/demo/agents/registered-agent', 'studio_endpoint':'http://studio:8080',
+        'restart_policy':'no', 'start_immediately':False,
+    })
+    starts=[c for c in r.calls if c[0]=='POST' and '/start' in c[1]]
+    assert starts==[]
+    assert out['started'] is False
