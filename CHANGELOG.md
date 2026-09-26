@@ -2,7 +2,7 @@
 
 This file keeps the consolidated release history. Detailed component behavior belongs in the component README files rather than being duplicated here.
 
-## Senda Arugus Agent Studio v0.5.4
+## Senda Argus Agent Studio v0.5.4
 
 ### Added / changed
 
@@ -19,7 +19,7 @@ This file keeps the consolidated release history. Detailed component behavior be
 
 ---
 
-## Senda Arugus Agent Studio v0.5.3
+## Senda Argus Agent Studio v0.5.3
 
 - Split Workflow list and Workflow registration into separate WebUI views.
 - Added dedicated **Workflows** and **Workflow registration** navigation.
@@ -30,7 +30,7 @@ This file keeps the consolidated release history. Detailed component behavior be
 
 ---
 
-## Senda Arugus Agent Studio v0.5.2
+## Senda Argus Agent Studio v0.5.2
 
 ### Added
 
@@ -58,7 +58,7 @@ DELETE /api/workflows/{workflow_id}
 
 ---
 
-## Senda Arugus Agent Studio v0.5.1
+## Senda Argus Agent Studio v0.5.1
 
 ### Added
 
@@ -75,7 +75,7 @@ DELETE /api/workflows/{workflow_id}
 
 ---
 
-## Senda Arugus Agent Studio v0.5.0
+## Senda Argus Agent Studio v0.5.0
 
 ### Added
 
@@ -101,7 +101,7 @@ DELETE /api/workflows/{workflow_id}
 
 ---
 
-## Senda Arugus Agent Studio v0.4.0
+## Senda Argus Agent Studio v0.4.0
 
 ### Added
 

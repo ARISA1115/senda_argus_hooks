@@ -18,7 +18,7 @@ It collects normalized execution events from runtime hooks, monkey patches, call
 - OpenAI Agents, LangChain, LangGraph, LlamaIndex / RAG integrations
 - JSONL / stdout / Parquet / Argus exporters
 - Redaction and capture controls
-- Senda Arugus Agent Studio for Runtime, Trace, Logs, and Multi-Agent Workflow management
+- Senda Argus Agent Studio for Runtime, Trace, Logs, and Multi-Agent Workflow management
 
 ## Repository layout
 
@@ -28,7 +28,7 @@ senda-argus-hooks/
 ├─ js/              # Node.js / TypeScript SDK and integrations
 ├─ browser/         # Browser hook package
 ├─ docker/          # Hook-enabled Python / Node runtimes
-├─ agent-studio/    # Senda Arugus Agent Studio WebUI / control plane
+├─ agent-studio/    # Senda Argus Agent Studio WebUI / control plane
 ├─ tools/           # Zero-code deployment tools
 ├─ scripts/         # Docker install / status / runtime-create helpers
 ├─ README.md
@@ -92,7 +92,7 @@ supervisor.*
 orchestrator.*
 ```
 
-## Senda Arugus Agent Studio
+## Senda Argus Agent Studio
 
 `agent-studio/` provides the Docker-based control plane and observability UI.
 

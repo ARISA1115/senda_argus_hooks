@@ -22,7 +22,7 @@ BASE = Path(__file__).resolve().parent
 DB = os.getenv('SENDA_STUDIO_DB', '/data/studio.db')
 store = EventStore(DB)
 event_bus = EventBus(store)
-app = FastAPI(title='Senda Arugus Agent Studio', version='0.5.4')
+app = FastAPI(title='Senda Argus Agent Studio', version='0.5.4')
 logger = logging.getLogger('uvicorn.error')
 app.mount('/static', StaticFiles(directory=BASE / 'static'), name='static')
 _runtime = None

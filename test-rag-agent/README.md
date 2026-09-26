@@ -1,6 +1,6 @@
 # test-rag-agent
 
-A deterministic, dependency-free RAG test runtime for Senda Arugus Agent Studio.
+A deterministic, dependency-free RAG test runtime for Senda Argus Agent Studio.
 
 The Agent uses local embedded documents and calls normal component methods after `instrument_rag(...)` patches the supplied instances.
 

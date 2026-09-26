@@ -1,6 +1,6 @@
 # Senda-Argus Deployment Guide
 
-This guide covers the current deployment patterns for Senda-Argus Hooks and Senda Arugus Agent Studio.
+This guide covers the current deployment patterns for Senda-Argus Hooks and Senda Argus Agent Studio.
 
 ## Deployment modes
 
@@ -68,7 +68,7 @@ docker run --rm \
 
 When `SENDA_AGENT_INSTALL_DEPS=true`, `/workspace/requirements.txt` is installed when present.
 
-## Senda Arugus Agent Studio
+## Senda Argus Agent Studio
 
 Start from the Agent Studio directory:
 

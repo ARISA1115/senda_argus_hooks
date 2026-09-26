@@ -1,4 +1,4 @@
-"""MCP control surface for Senda Arugus Agent Studio.
+"""MCP control surface for Senda Argus Agent Studio.
 
 Run as a stdio MCP server:
     SENDA_STUDIO_URL=http://senda-agent-studio:8080 python -m app.mcp_server

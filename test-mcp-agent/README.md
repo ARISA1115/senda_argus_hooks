@@ -1,6 +1,6 @@
 # test-mcp-agent
 
-A deterministic, local-only MCP test runtime for Senda Arugus Agent Studio.
+A deterministic, local-only MCP test runtime for Senda Argus Agent Studio.
 
 It starts a stdio MCP server and calls three tools through the real Python MCP `ClientSession`:
 
