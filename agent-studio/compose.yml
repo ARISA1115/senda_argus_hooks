@@ -1,0 +1,33 @@
+services:
+  senda-agent-studio:
+    build: .
+    container_name: senda-agent-studio
+    restart: unless-stopped
+    # The Studio API has no authentication and controls the host Docker Engine through the
+    # mounted socket. Publish it on the loopback interface only; set SENDA_STUDIO_BIND to
+    # another address only behind an authenticating proxy.
+    ports:
+      - "${SENDA_STUDIO_BIND:-127.0.0.1}:${SENDA_STUDIO_PORT:-8080}:8080"
+    environment:
+      SENDA_STUDIO_ORCHESTRATOR_MODE: ${SENDA_STUDIO_ORCHESTRATOR_MODE:-llm}
+      SENDA_STUDIO_LLM_BASE_URL: ${SENDA_STUDIO_LLM_BASE_URL:-}
+      SENDA_STUDIO_LLM_MODEL: ${SENDA_STUDIO_LLM_MODEL:-}
+      SENDA_STUDIO_LLM_API_KEY: ${SENDA_STUDIO_LLM_API_KEY:-}
+      TYPESAFE_API_KEY: ${TYPESAFE_API_KEY:-}
+      TYPESAFE_BASE_URL: ${TYPESAFE_BASE_URL:-}
+      TYPESAFE_DEFAULT_MODEL: ${TYPESAFE_DEFAULT_MODEL:-jev-latest}
+      SENDA_STUDIO_JEV_TIMEOUT: ${SENDA_STUDIO_JEV_TIMEOUT:-10}
+      SENDA_STUDIO_JEV_CONFIDENCE_THRESHOLD: ${SENDA_STUDIO_JEV_CONFIDENCE_THRESHOLD:-0}
+      SENDA_STUDIO_JEV_FALLBACK: ${SENDA_STUDIO_JEV_FALLBACK:-none}
+      SENDA_STUDIO_ARGUS_UPSTREAM: ${SENDA_STUDIO_ARGUS_UPSTREAM:-}
+      SENDA_STUDIO_ARGUS_API_KEY: ${SENDA_STUDIO_ARGUS_API_KEY:-}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - studio-data:/data
+    networks:
+      - senda-agent-net
+volumes:
+  studio-data:
+networks:
+  senda-agent-net:
+    name: senda-agent-net
