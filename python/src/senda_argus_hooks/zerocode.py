@@ -4,7 +4,6 @@ import json
 import os
 import shlex
 import shutil
-import site
 import subprocess
 import sys
 from dataclasses import asdict, dataclass
