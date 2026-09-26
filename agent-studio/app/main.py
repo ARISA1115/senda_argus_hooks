@@ -1,10 +1,11 @@
 from __future__ import annotations
-import asyncio, json, os
+import asyncio, json, logging, os
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from typing import Literal
 from .store import EventStore
 from .docker_runtime import DockerRuntime
 
@@ -13,6 +14,7 @@ DB=os.getenv('SENDA_STUDIO_DB','/data/studio.db')
 store=EventStore(DB)
 subscribers:set[asyncio.Queue]=set()
 app=FastAPI(title='Senda Arugus Agent Studio', version='0.3.0')
+logger=logging.getLogger('uvicorn.error')
 app.mount('/static', StaticFiles(directory=BASE/'static'), name='static')
 _runtime=None
 
@@ -35,7 +37,8 @@ class AgentCreate(BaseModel):
     environment:str='prod'
     studio_endpoint:str='http://senda-agent-studio:8080'
     env:dict[str,str]=Field(default_factory=dict)
-    restart_policy:str='unless-stopped'
+    restart_policy:Literal['no','on-failure','always','unless-stopped']='unless-stopped'
+    maximum_retry_count:int=Field(default=0, ge=0, le=1000)
     network:str='senda-agent-net'
 
 @app.get('/')
@@ -105,12 +108,16 @@ async def ingest(req:Request):
         try:
             import urllib.request
             payload=json.dumps({'events':evs},ensure_ascii=False,default=str).encode()
+            upstream_url=upstream+'/v1/agent-runs/ingest'
+            logger.info('[senda-studio-argus] POST %s events=%d bytes=%d', upstream_url, len(evs), len(payload))
             def _forward():
-                fwd=urllib.request.Request(upstream+'/v1/agent-runs/ingest',data=payload,method='POST',headers=headers)
-                with urllib.request.urlopen(fwd,timeout=5): pass
-            await asyncio.to_thread(_forward)
-        except Exception:
-            pass
+                fwd=urllib.request.Request(upstream_url,data=payload,method='POST',headers=headers)
+                with urllib.request.urlopen(fwd,timeout=5) as response:
+                    return getattr(response,'status',None) or response.getcode()
+            status=await asyncio.to_thread(_forward)
+            logger.info('[senda-studio-argus] POST completed status=%s url=%s events=%d', status, upstream_url, len(evs))
+        except Exception as exc:
+            logger.warning('[senda-studio-argus] POST failed url=%s events=%d error=%s', upstream+'/v1/agent-runs/ingest', len(evs), exc)
     for e in evs:
         for q in list(subscribers):
             try: q.put_nowait(e)

@@ -10,6 +10,7 @@ from urllib.parse import quote, urlencode
 SOCKET_PATH = '/var/run/docker.sock'
 MANAGED_LABEL = 'com.senda.agent-runtime'
 LEGACY_MANAGED_LABEL = 'com.senda.agent.managed'
+RESTART_POLICIES = {'no', 'on-failure', 'always', 'unless-stopped'}
 
 
 class DockerAPIError(RuntimeError):
@@ -111,6 +112,15 @@ class DockerRuntime:
             state = c.get('State') or 'unknown'
             mounts = c.get('Mounts') or []
             source_mount = next((m for m in mounts if m.get('Destination') == labels.get('com.senda.agent.container-path', '/workspace')), None)
+            restart_policy = labels.get('com.senda.agent.restart-policy', 'unknown')
+            maximum_retry_count = int(labels.get('com.senda.agent.maximum-retry-count', '0') or 0)
+            try:
+                inspected = self._request('GET', f'/containers/{quote(c.get("Id", ""), safe="")}/json') or {}
+                rp = ((inspected.get('HostConfig') or {}).get('RestartPolicy') or {})
+                restart_policy = rp.get('Name') or restart_policy
+                maximum_retry_count = int(rp.get('MaximumRetryCount') or 0)
+            except DockerAPIError:
+                pass
             out.append({
                 'id': str(c.get('Id', ''))[:12],
                 'container_id': c.get('Id', ''),
@@ -125,6 +135,8 @@ class DockerRuntime:
                 'host_path': labels.get('com.senda.agent.host-path') or (source_mount or {}).get('Source'),
                 'container_path': labels.get('com.senda.agent.container-path', '/workspace'),
                 'entrypoint': labels.get('com.senda.agent.entrypoint', ''),
+                'restart_policy': restart_policy,
+                'maximum_retry_count': maximum_retry_count,
             })
         return sorted(out, key=lambda x: x['name'])
 
@@ -188,7 +200,13 @@ class DockerRuntime:
         host_path = (spec.get('host_path') or '').strip()
         container_path = (spec.get('container_path') or '/workspace').strip()
         entrypoint = (spec.get('entrypoint') or '').strip()
+        restart_policy = (spec.get('restart_policy') or 'unless-stopped').strip()
+        maximum_retry_count = int(spec.get('maximum_retry_count') or 0)
 
+        if restart_policy not in RESTART_POLICIES:
+            raise DockerAPIError(f'Unsupported restart policy: {restart_policy}')
+        if maximum_retry_count < 0:
+            raise DockerAPIError('Maximum Retry Count must be 0 or greater')
         if runtime == 'python' and not entrypoint:
             entrypoint = 'agent.py'
         if host_path and not host_path.startswith('/'):
@@ -206,6 +224,7 @@ class DockerRuntime:
             'SENDA_ARGUS_AGENT_ID': agent_id,
             'SENDA_ARGUS_PROJECT': spec.get('project', 'default'),
             'SENDA_ARGUS_ENVIRONMENT': spec.get('environment', 'prod'),
+            'SENDA_ARGUS_HTTP_LOG': 'true',
             'SENDA_AGENT_INSTALL_DEPS': 'true' if spec.get('install_dependencies', True) else 'false',
             'SENDA_AGENT_WORKSPACE': container_path,
         }
@@ -220,10 +239,16 @@ class DockerRuntime:
             'com.senda.agent.host-path': host_path,
             'com.senda.agent.container-path': container_path,
             'com.senda.agent.entrypoint': entrypoint,
+            'com.senda.agent.restart-policy': restart_policy,
+            'com.senda.agent.maximum-retry-count': str(maximum_retry_count if restart_policy == 'on-failure' else 0),
         }
 
+        docker_restart_policy: dict[str, Any] = {'Name': restart_policy}
+        if restart_policy == 'on-failure':
+            docker_restart_policy['MaximumRetryCount'] = maximum_retry_count
+
         host_config: dict[str, Any] = {
-            'RestartPolicy': {'Name': spec.get('restart_policy', 'unless-stopped')},
+            'RestartPolicy': docker_restart_policy,
             'NetworkMode': network,
         }
         if host_path:

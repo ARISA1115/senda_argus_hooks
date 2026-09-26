@@ -134,6 +134,8 @@ Register Runtime
   - Host Agent Path
   - Container Path / Entrypoint
   - Project / Environment
+  - Restart Policy (`no`, `on-failure`, `always`, `unless-stopped`)
+  - Maximum Retry Count (`on-failure` のみ)
   - Environment JSON
 ```
 
@@ -147,3 +149,10 @@ http://localhost:8080/#register
 ```
 
 When validating a Hook change, restart or re-run the Agent Runtime so a new execution generates new Hook events and a new trace. Historical traces are not rewritten by a UI or Hook SDK update.
+
+
+## Restart policy
+
+Runtime registration lets you select the Docker restart policy from the Web UI. The default remains `unless-stopped` for backward compatibility.
+
+Use `no` for one-shot/test workloads such as `test-mcp-agent` and `test-rag-agent`; use `unless-stopped` for long-running service Agents. `Maximum Retry Count` is sent to Docker only when `on-failure` is selected.

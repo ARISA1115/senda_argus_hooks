@@ -42,3 +42,9 @@ def test_trace_detail_api_and_logs_api():
     c.post('/v1/agent-runs/ingest',json={'events':[e1,e2]})
     d=c.get('/api/traces/detail?trace_id=td').json()
     assert d['summary']['model']=='m' and d['summary']['response']=='r'
+
+
+def test_restart_policy_validation():
+    assert c.post('/api/agents',json={'name':'valid-no','image':'img','restart_policy':'no'}).status_code==200
+    assert c.post('/api/agents',json={'name':'valid-retry','image':'img','restart_policy':'on-failure','maximum_retry_count':3}).status_code==200
+    assert c.post('/api/agents',json={'name':'bad-policy','image':'img','restart_policy':'sometimes'}).status_code==422

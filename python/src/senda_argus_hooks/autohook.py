@@ -79,6 +79,7 @@ def _exporters() -> list[dict[str, Any]]:
                 "api_key": os.getenv("SENDA_ARGUS_API_KEY", ""),
                 "run_id": _optional("SENDA_ARGUS_RUN_ID"),
                 "timeout": _int("SENDA_ARGUS_TIMEOUT", 10),
+                "log_http": _bool("SENDA_ARGUS_HTTP_LOG", False),
             })
     return result or [{"type": "jsonl", "path": _default_jsonl_path()}]
 
