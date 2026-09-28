@@ -3,11 +3,46 @@ import { sha256Value } from "../core/hashing.js";
 import { newTraceId, runWithContext } from "../core/context.js";
 import { dataSourceHash, deriveMcpProfileId, derivePurposeId, mcpDataSourceProfile, normalizeUrl } from "../core/identity.js";
 import { emitEvent, getConfig, observe } from "../runtime.js";
+import { getMcpToolDirectory, toolNamesOf, UNNAMED_MCP_SERVER } from "../core/mcp_tools.js";
 
 const patched = Symbol.for("senda.argus.mcp.patched");
 
-export function instrumentMCP(client: any, metadata: { serverName?: string; serverUrl?: string; capability?: string } = {}): boolean {
-  if (!client || typeof client.callTool !== "function" || client.callTool[patched]) return false;
+type McpMetadata = { serverName?: string; serverUrl?: string; capability?: string };
+
+// サーバ名の読み方は 1 つにする。呼び出しと一覧で読み方が違うと、同じサーバの一覧と呼び出しが別の
+// サーバとして記録され、候補の帰属と承認したサーバが一致しなくなる。明示の名前が無いときは、SDK の
+// Client が初期化で受けたサーバの名乗り (getServerVersion) を読む。
+export function resolveMcpServerName(client: any, metadata: McpMetadata = {}): string {
+  const candidates = [metadata.serverName, client?.serverName, client?.name];
+  for (const value of candidates) if (typeof value === "string" && value) return value;
+  try {
+    const info = typeof client?.getServerVersion === "function" ? client.getServerVersion() : undefined;
+    const announced = typeof info?.name === "string" ? info.name.trim() : "";
+    // 名乗りはサーバが決める値である。別のクライアントが同じ名前を名乗っていれば使わない。
+    if (announced && client && typeof client === "object" && getMcpToolDirectory().claim(announced, client)) return announced;
+  } catch {
+    // 名乗りが読めなくても呼び出しは止めない
+  }
+  return UNNAMED_MCP_SERVER;
+}
+
+function instrumentListTools(client: any, metadata: McpMetadata): boolean {
+  if (!client || typeof client.listTools !== "function" || client.listTools[patched]) return false;
+  const original = client.listTools;
+  const wrapped = async function(this: unknown, ...args: any[]) {
+    const result = await original.apply(this, args);
+    // 一覧に出たツールをサーバごとに控える。LLM に差し出した候補のサーバはここから引く。
+    observe(() => getMcpToolDirectory().record(resolveMcpServerName(client, metadata), toolNamesOf(result), client));
+    return result;
+  } as any;
+  wrapped[patched] = true;
+  client.listTools = wrapped;
+  return true;
+}
+
+export function instrumentMCP(client: any, metadata: McpMetadata = {}): boolean {
+  const listed = instrumentListTools(client, metadata);
+  if (!client || typeof client.callTool !== "function" || client.callTool[patched]) return listed;
   const original = client.callTool;
   const wrapped = async function(this: unknown, request: any, ...rest: any[]) {
     const traceId = newTraceId();
@@ -15,7 +50,7 @@ export function instrumentMCP(client: any, metadata: { serverName?: string; serv
       const started = performance.now();
       const cfg = getConfig();
       const toolName = request?.name ?? "unknown";
-      const serverName = metadata.serverName ?? client.serverName ?? client.name ?? "unknown";
+      const serverName = resolveMcpServerName(client, metadata);
       const serverUrl = metadata.serverUrl ?? client.serverUrl ?? client.url ?? client.baseUrl ?? null;
       const capability = metadata.capability ?? client.capability;
       const purposeProfile = mcpDataSourceProfile(serverName, serverUrl, toolName, capability);

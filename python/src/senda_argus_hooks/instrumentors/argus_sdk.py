@@ -21,6 +21,7 @@ from senda_argus_hooks.core.instruction_files import (
     system_prompt_line_digests,
     system_prompt_pair_digests,
 )
+from senda_argus_hooks.core.mcp_tools import offered_alternatives
 from senda_argus_hooks.core.purpose_registry import (
     register_mcp_tool_source,
     selected_tool_purpose,
@@ -117,7 +118,7 @@ class ArgusSDKInstrumentor(BaseInstrumentor):
                         # (report) は上の consistency 判定にのみ使い、観測でない値を誘導判定へ流さない。
                         observed_offered = _offered_tool_names(kwargs)
                         if observed_offered:
-                            proposed_data["alternatives"] = [{"name": n} for n in observed_offered]
+                            proposed_data["alternatives"] = offered_alternatives(observed_offered)
                         if actual_names:
                             proposed_data["selected_tool"] = actual_names[0]
                         emit_event(

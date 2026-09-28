@@ -12,6 +12,7 @@ from senda_argus_hooks.core.instruction_files import (
     system_prompt_line_digests,
     system_prompt_pair_digests,
 )
+from senda_argus_hooks.core.mcp_tools import offered_alternatives
 from senda_argus_hooks.core.model_identity import models_correspond
 from senda_argus_hooks.core.runtime import emit_event, get_config
 
@@ -273,7 +274,7 @@ def _emit_request(model: Any, args: tuple, kwargs: dict[str, Any], response: Any
     offered = _offered_tool_names(model, kwargs)
     selected = _selected_tool_names(response)
     if offered and selected:
-        alternatives = [{"name": name} for name in offered]
+        alternatives = offered_alternatives(offered)
         latency_ms = int((time.perf_counter() - start) * 1000)
         for selected_tool in selected:
             emit_event(

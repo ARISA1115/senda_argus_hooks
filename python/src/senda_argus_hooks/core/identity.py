@@ -21,6 +21,10 @@ def stable_hash(value: Any, *, prefix: str, length: int = 16) -> str:
 # 承認の候補にも出さない。承認すると、名前を持たない全てのセッションのツールが承認済みになるため。
 UNNAMED_MCP_SERVER = "unknown"
 
+# MCP の SDK のセッションは、初期化の応答が名乗ったサーバ名を保持しない。計装が初期化の応答から読んで
+# セッションへ控える属性。明示の名前が無いときにだけ使う。
+SERVER_INFO_NAME_ATTR = "_senda_argus_server_info_name"
+
 
 def resolve_mcp_server_name(obj: Any) -> Any:
     """MCP クライアントのオブジェクトからサーバ名を読む。
@@ -28,7 +32,7 @@ def resolve_mcp_server_name(obj: Any) -> Any:
     計装ごとに読み方を変えない。読む属性が違うと、同じセッションが計装によって別のサーバ名で
     記録され、承認したサーバと観測したサーバが一致しなくなる。空の値は持たないものとして扱う。
     """
-    for attr in ("server", "server_name", "name"):
+    for attr in ("server", "server_name", "name", SERVER_INFO_NAME_ATTR):
         value = getattr(obj, attr, None)
         if value:
             return value
