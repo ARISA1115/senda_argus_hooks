@@ -1,4 +1,5 @@
 import type { EventRecord, Exporter } from "../core/types.js";
+import { fallbackRunId } from "../core/event.js";
 
 export class ArgusExporter implements Exporter {
   private readonly url: string;
@@ -7,6 +8,9 @@ export class ArgusExporter implements Exporter {
   private readonly timeoutMs: number;
   private readonly pending = new Set<Promise<void>>();
 
+  get ingestUrl(): string { return this.url; }
+  get key(): string { return this.apiKey; }
+
   constructor(endpoint = "http://localhost:8000", apiKey = "", runId?: string, timeoutMs = 10000) {
     this.url = `${endpoint.replace(/\/$/, "")}/v1/agent-runs/ingest`;
     this.apiKey = apiKey;
@@ -14,15 +18,23 @@ export class ArgusExporter implements Exporter {
     this.timeoutMs = timeoutMs;
   }
 
+  // 終了の待ち合わせに入れずに送る。canary の送信でプロセスの終了を待たせない。
+  emitUntracked(event: EventRecord): void {
+    void this.send(event, true);
+  }
+
   emit(event: EventRecord): void {
-    const enriched = this.runId && !event.run_id ? { ...event, run_id: this.runId } : event;
+    // 送り先に run を指定したときは、計装が付けたプロセスの既定の run より指定を優先する。
+    const enriched = this.runId && (!event.run_id || event.run_id === fallbackRunId()) ? { ...event, run_id: this.runId } : event;
     const task = this.send(enriched).finally(() => this.pending.delete(task));
     this.pending.add(task);
   }
 
-  private async send(event: EventRecord): Promise<void> {
+  private async send(event: EventRecord, untracked = false): Promise<void> {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    // 待ち合わせに入れない送信は、中断のタイマーでもプロセスの終了を引き止めない。
+    const timer = setTimeout(() => controller.abort(), untracked ? Math.min(this.timeoutMs, 5000) : this.timeoutMs);
+    if (untracked) timer?.unref?.();
     try {
       const headers: Record<string, string> = { "Content-Type": "application/json" };
       if (this.apiKey) headers["X-API-Key"] = this.apiKey;
