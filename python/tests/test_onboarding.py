@@ -213,8 +213,8 @@ def test_start_from_env_sends_the_check_once_per_host(collecting, monkeypatch, t
     monkeypatch.setenv("SENDA_ARGUS_CANARY_SECRET", "cs1.s-env")
     onboarding.start_from_env()
     marker = onboarding._check_marker("ac1.chk_b.1.n.s")
-    _wait(lambda: marker.exists())
-    assert marker.read_text(encoding="utf-8") == "verified"
+    # 印は送る前に原子的に取るため、判定が書かれるまで待つ。
+    _wait(lambda: marker.exists() and marker.read_text(encoding="utf-8") == "verified")
     onboarding.start_from_env()
     time.sleep(0.2)
     assert len(collecting.captured) == 1
@@ -268,3 +268,34 @@ def test_canary_stops_when_the_agent_id_changes(collecting, monkeypatch):
     assert onboarding._canary.beat() is False
     current["id"] = "agent-old"
     assert onboarding._canary.beat() is True
+
+
+def test_concurrent_start_from_env_sends_the_check_once(collecting, monkeypatch, tmp_path):
+    """同時に起動したプロセスのうち、印を取った 1 つだけが送る。"""
+    collecting.reply = (200, {"accepted": 1, "connection_checks": [
+        {"check_id": "chk_r", "status": "verified", "reason": "verified"}
+    ]})
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    monkeypatch.setenv("SENDA_ARGUS_CONNECTION_CHECK_TOKEN", "ac1.chk_r.1.n.s")
+    monkeypatch.setenv("SENDA_ARGUS_CANARY_AUTOSTART", "false")
+    threads = [threading.Thread(target=onboarding.start_from_env) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    marker = onboarding._check_marker("ac1.chk_r.1.n.s")
+    _wait(lambda: marker.read_text(encoding="utf-8") == "verified")
+    time.sleep(0.2)
+    assert len(collecting.captured) == 1
+
+
+def test_a_check_without_a_verdict_releases_the_marker(collecting, monkeypatch, tmp_path):
+    collecting.reply = (503, {})
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    monkeypatch.setenv("SENDA_ARGUS_CONNECTION_CHECK_TOKEN", "ac1.chk_u.1.n.s")
+    monkeypatch.setenv("SENDA_ARGUS_CANARY_AUTOSTART", "false")
+    marker = onboarding._check_marker("ac1.chk_u.1.n.s")
+    onboarding.start_from_env()
+    _wait(lambda: len(collecting.captured) == 1 and not marker.exists())
+    onboarding.start_from_env()
+    _wait(lambda: len(collecting.captured) == 2)

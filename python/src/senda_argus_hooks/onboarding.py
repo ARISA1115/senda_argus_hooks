@@ -310,7 +310,8 @@ def start_from_env() -> None:
     token = os.getenv("SENDA_ARGUS_CONNECTION_CHECK_TOKEN", "").strip()
     if token:
         marker = _check_marker(token)
-        if marker is None or not marker.exists():
+        # 送る前に印を原子的に取る。同時に起動したプロセスのうち、印を取った 1 つだけが送る。
+        if marker is None or _claim_marker(marker):
             threading.Thread(
                 target=_send_once, args=(token, marker), name="senda-argus-connection-check", daemon=True
             ).start()
@@ -324,11 +325,24 @@ def restart_canary_from_env() -> None:
         start_canary()
 
 
+def _claim_marker(marker: Path) -> bool:
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except OSError:
+        return False
+    os.close(fd)
+    return True
+
+
 def _send_once(token: str, marker: Path | None) -> None:
     result = send_connection_check(token)
-    if marker is None or result.get("status") == "error":
+    if marker is None:
         return
-    # The server answered. Verified or not, sending the same value again cannot change it.
     with contextlib.suppress(Exception):
-        marker.parent.mkdir(parents=True, exist_ok=True)
+        if result.get("status") == "error":
+            # サーバが判定を返さなかった。印を外し、後のプロセスが送れるようにする。
+            marker.unlink(missing_ok=True)
+            return
+        # The server answered. Verified or not, sending the same value again cannot change it.
         marker.write_text(str(result.get("status") or ""), encoding="utf-8")

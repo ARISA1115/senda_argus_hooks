@@ -17,7 +17,7 @@ import { createHash } from "node:crypto";
 import { getContext } from "./core/context.js";
 import { newEvent } from "./core/event.js";
 import type { EventRecord } from "./core/types.js";
-import { argusExporter, getConfig, isCollecting, onShutdown } from "./runtime.js";
+import { argusExporter, getConfig, isCollecting, observedAgentId, onAgentObserved, onShutdown } from "./runtime.js";
 
 export const CONNECTION_CHECK_EVENT = "onboarding.connection_check";
 export const CANARY_EVENT = "collector.canary";
@@ -53,7 +53,14 @@ export function secretGeneration(secret: string): number | undefined {
   return Number(head.slice(2));
 }
 
-function buildEvent(eventType: string, data: Record<string, unknown>, agentId?: string): EventRecord {
+// 見張る対象のエージェントの識別子。明示の値、実行の文脈、設定の値、計装の事象が送った値の順に使う。
+// どれも無ければ undefined を返し、呼び出し側は送らない。導入の処理が自分で識別子を導くと、計装の
+// 事象と別のエージェントとして扱われる。
+export function monitoredAgentId(explicit?: string): string | undefined {
+  return explicit || getContext().agentId || getConfig().agentId || observedAgentId() || undefined;
+}
+
+function buildEvent(eventType: string, data: Record<string, unknown>, agentId: string): EventRecord {
   const config = getConfig();
   const event = newEvent({
     config, context: getContext(), eventType,
@@ -75,7 +82,9 @@ export async function sendConnectionCheck(
     ? `${options.endpoint.replace(/\/$/, "")}/v1/agent-runs/ingest`
     : exporter?.ingestUrl ?? `${(process.env.SENDA_ARGUS_ENDPOINT ?? "http://localhost:8000").replace(/\/$/, "")}/v1/agent-runs/ingest`;
   const apiKey = options.apiKey ?? exporter?.key ?? process.env.SENDA_ARGUS_API_KEY ?? "";
-  const event = buildEvent(CONNECTION_CHECK_EVENT, { token: token.trim() }, options.agentId);
+  const agentId = monitoredAgentId(options.agentId);
+  if (!agentId) return { status: "error", reason: "no_agent" };
+  const event = buildEvent(CONNECTION_CHECK_EVENT, { token: token.trim() }, agentId);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? 10000);
   try {
@@ -128,7 +137,10 @@ class Canary {
     const exporter = argusExporter();
     if (!isCollecting() || !exporter) return false;
     try {
-      const probe = buildEvent(CANARY_EVENT, {}, this.agentId);
+      const resolved = monitoredAgentId(this.agentId);
+      // 計装の事象がまだ無く識別子が分からない間は送らない。
+      if (!resolved) return false;
+      const probe = buildEvent(CANARY_EVENT, {}, resolved);
       const agentId = String(probe.agent_id ?? "");
       // 鍵はエージェントの識別子に束ねてある。始めた時点から識別子が変わったら送らない。新しい
       // 識別子では署名が合わず、古い識別子で送り続けると止まった収集を生きて見せる。
@@ -183,23 +195,44 @@ function checkMarker(token: string): string | undefined {
   }
 }
 
-// 自動導入から呼ぶ。接続の確認はホストで 1 回だけ送る。応答を得たら印を残し、後のプロセスは送らない。
-// canary は鍵が設定されていれば始める。SENDA_ARGUS_CANARY_AUTOSTART=false で止められる。
+// 印を原子的に取る。複数のプロセスが同時に起動しても、送るのは印を取った 1 つだけにする。
+function claimMarker(marker: string): boolean {
+  try {
+    fs.mkdirSync(path.dirname(marker), { recursive: true });
+    fs.closeSync(fs.openSync(marker, "wx"));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function sendClaimed(token: string, marker: string | undefined): void {
+  void sendConnectionCheck(token).then((result) => {
+    if (!marker) return;
+    try {
+      // サーバが判定を返さなかったときは印を外し、後のプロセスが送れるようにする。
+      if (result.status === "error") fs.rmSync(marker, { force: true });
+      else fs.writeFileSync(marker, String(result.status), "utf8");
+    } catch {
+      // 印を扱えなくても、判定は変わらない。
+    }
+  }).catch(() => undefined);
+}
+
+// 自動導入から呼ぶ。接続の確認はホストで 1 回だけ送る。送る前に印を原子的に取り、印を取った
+// プロセスだけが送る。サーバが判定を返さなかったときは印を外す。識別子がまだ分からなければ、計装の
+// 事象が初めて送られたときに送る。canary は鍵が設定されていれば始める。
+// SENDA_ARGUS_CANARY_AUTOSTART=false で止められる。
 export function startFromEnv(): void {
   const token = (process.env.SENDA_ARGUS_CONNECTION_CHECK_TOKEN ?? "").trim();
   if (token) {
     const marker = checkMarker(token);
-    if (!marker || !fs.existsSync(marker)) {
-      void sendConnectionCheck(token).then((result) => {
-        if (!marker || result.status === "error") return;
-        try {
-          fs.mkdirSync(path.dirname(marker), { recursive: true });
-          fs.writeFileSync(marker, String(result.status), "utf8");
-        } catch {
-          // 印を残せなくても次の起動でもう一度送るだけで、判定は変わらない。
-        }
-      }).catch(() => undefined);
-    }
+    const send = () => {
+      if (marker && !claimMarker(marker)) return;
+      sendClaimed(token, marker);
+    };
+    if (monitoredAgentId()) send();
+    else onAgentObserved(() => send());
   }
   if (!autostartDisabled()) startCanary();
 }

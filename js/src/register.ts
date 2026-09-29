@@ -40,6 +40,33 @@ export function instrument(targets: Targets = {}) {
     llamaindex: targets.llamaindex ? instrumentLlamaIndex(targets.llamaindex) : false,
     openaiAgents: targets.openaiAgents ? instrumentOpenAIAgents(targets.openaiAgents) : false
   };
-  if (Object.values(result).some(Boolean)) markInstrumented();
+  // shutdown の後に同じ呼び出し先を登録し直すと、包んだ関数が既にあるため計装はどれも新しく入らない。
+  // 包んだ関数は新しい exporter へ送り続けるので、既に包まれた呼び出し先も計装が入っているとみなす。
+  // みなさないと、登録し直した後の canary が送られず、収集の停止に見える。
+  if (Object.values(result).some(Boolean) || Object.values(targets).some((t) => hasPatchedFunction(t))) {
+    markInstrumented();
+  }
   return result;
+}
+
+const PATCHED_MARKERS = [Symbol.for("senda.argus.patched"), Symbol.for("senda.argus.mcp.patched")];
+
+// 呼び出し先の中に、計装が包んだ関数があるか。クライアントは chat.completions.create のように入れ子に
+// なるため、決まった深さまでたどる。
+function hasPatchedFunction(target: unknown, depth = 4, seen = new Set<unknown>()): boolean {
+  if (!target || (typeof target !== "object" && typeof target !== "function") || seen.has(target)) return false;
+  seen.add(target);
+  if (typeof target === "function" && PATCHED_MARKERS.some((m) => (target as any)[m])) return true;
+  if (depth <= 0) return false;
+  const names = new Set<string>();
+  for (let o: any = target; o && o !== Object.prototype && o !== Function.prototype; o = Object.getPrototypeOf(o)) {
+    for (const name of Object.getOwnPropertyNames(o)) names.add(name);
+  }
+  for (const name of names) {
+    if (name === "constructor") continue;
+    let value: unknown;
+    try { value = (target as any)[name]; } catch { continue; }
+    if (hasPatchedFunction(value, depth - 1, seen)) return true;
+  }
+  return false;
 }

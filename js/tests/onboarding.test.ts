@@ -62,7 +62,9 @@ test("connection check is posted once and returns the verdict", async () => {
 
 test("connection check never throws", async () => {
   stubFetch({}, 500);
-  assert.deepEqual(await sendConnectionCheck("t", { endpoint: "http://argus.test" }), { status: "error", reason: "http_500" });
+  assert.deepEqual(await sendConnectionCheck("t", { endpoint: "http://argus.test", agentId: "agent-1" }), { status: "error", reason: "http_500" });
+  // 見張る対象の識別子が分からなければ送らない。導入の処理が自分で導いた識別子は、計装の事象と食い違う。
+  assert.equal((await sendConnectionCheck("t", { endpoint: "http://argus.test" })).reason, "no_agent");
   assert.equal((await sendConnectionCheck("")).reason, "empty_token");
 });
 
@@ -131,7 +133,7 @@ function freshStateHome(): string {
 
 test("startFromEnv sends the connection check once per host", async () => {
   const captured = stubFetch({ accepted: 1, connection_checks: [{ check_id: "chk_b", status: "verified", reason: "verified" }] });
-  register({ project: "env", exporters: [new ArgusExporter("http://argus.test", "k")] }, { mcp: mcpClient() });
+  register({ project: "env", agentId: "agent-e", exporters: [new ArgusExporter("http://argus.test", "k")] }, { mcp: mcpClient() });
   process.env.XDG_STATE_HOME = freshStateHome();
   process.env.SENDA_ARGUS_CONNECTION_CHECK_TOKEN = "ac1.chk_b.1.n.s";
   process.env.SENDA_ARGUS_CANARY_AUTOSTART = "false";
@@ -198,3 +200,81 @@ for (const value of ["false", " n ", "0"]) {
     }
   });
 }
+
+test("canary and connection check use the agent id of the instrumented events", async () => {
+  const captured = stubFetch({ accepted: 1, connection_checks: [{ status: "verified", reason: "verified" }] });
+  const client = mcpClient();
+  register({ project: "derived", exporters: [new ArgusExporter("http://argus.test", "k")] }, { mcp: client });
+  await (client as any).callTool({ name: "lookup" });
+  await settle();
+  const toolEvent = captured.map((c) => c.body.events[0]).find((e) => e.event_type !== CANARY_EVENT);
+  assert.ok(toolEvent?.agent_id);
+  startCanary({ secret: "cs4.s-derived", intervalSec: 10 });
+  assert.equal(currentCanary()!.beat(), true);
+  await sendConnectionCheck("ac1.chk_d.1.n.s");
+  await settle();
+  const sent = captured.map((c) => c.body.events[0]).filter((e) => e.event_type === CANARY_EVENT || e.event_type === CONNECTION_CHECK_EVENT);
+  assert.ok(sent.some((e) => e.event_type === CANARY_EVENT));
+  assert.ok(sent.some((e) => e.event_type === CONNECTION_CHECK_EVENT && e.data.token === "ac1.chk_d.1.n.s"));
+  for (const e of sent) assert.equal(e.agent_id, toolEvent.agent_id);
+  stopCanary();
+  await shutdown();
+});
+
+test("re-registering the same client after shutdown keeps the canary beating", async () => {
+  stubFetch();
+  const client = mcpClient();
+  register({ project: "rereg", agentId: "agent-r", exporters: [new ArgusExporter("http://argus.test", "k")] }, { mcp: client });
+  await shutdown();
+  register({ project: "rereg", agentId: "agent-r", exporters: [new ArgusExporter("http://argus.test", "k")] }, { mcp: client });
+  startCanary({ secret: "cs5.s-rereg", intervalSec: 10 });
+  assert.equal(currentCanary()!.beat(), true);
+  stopCanary();
+  await shutdown();
+});
+
+test("concurrent startFromEnv calls send the one-time check once", async () => {
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const captured: Captured[] = [];
+  (globalThis as any).fetch = async (url: string, init: any) => {
+    captured.push({ url, headers: init.headers, body: JSON.parse(init.body) });
+    await gate;
+    return { ok: true, status: 200, json: async () => ({ accepted: 1, connection_checks: [{ status: "verified", reason: "verified" }] }) };
+  };
+  register({ project: "race", agentId: "agent-c", exporters: [new ArgusExporter("http://argus.test", "k")] }, { mcp: mcpClient() });
+  process.env.XDG_STATE_HOME = freshStateHome();
+  process.env.SENDA_ARGUS_CONNECTION_CHECK_TOKEN = "ac1.chk_c.1.n.s";
+  process.env.SENDA_ARGUS_CANARY_AUTOSTART = "false";
+  try {
+    startFromEnv();
+    startFromEnv();
+    await settle();
+    release();
+    await settle();
+    assert.equal(captured.filter((c) => c.body.events[0].event_type === CONNECTION_CHECK_EVENT).length, 1);
+  } finally {
+    delete process.env.SENDA_ARGUS_CONNECTION_CHECK_TOKEN;
+    delete process.env.SENDA_ARGUS_CANARY_AUTOSTART;
+    await shutdown();
+  }
+});
+
+test("a check that got no verdict releases the marker for a later process", async () => {
+  const captured = stubFetch({}, 503);
+  register({ project: "retry", agentId: "agent-t", exporters: [new ArgusExporter("http://argus.test", "k")] }, { mcp: mcpClient() });
+  process.env.XDG_STATE_HOME = freshStateHome();
+  process.env.SENDA_ARGUS_CONNECTION_CHECK_TOKEN = "ac1.chk_t.1.n.s";
+  process.env.SENDA_ARGUS_CANARY_AUTOSTART = "false";
+  try {
+    startFromEnv();
+    await settle();
+    startFromEnv();
+    await settle();
+    assert.equal(captured.filter((c) => c.body.events[0].event_type === CONNECTION_CHECK_EVENT).length, 2);
+  } finally {
+    delete process.env.SENDA_ARGUS_CONNECTION_CHECK_TOKEN;
+    delete process.env.SENDA_ARGUS_CANARY_AUTOSTART;
+    await shutdown();
+  }
+});
