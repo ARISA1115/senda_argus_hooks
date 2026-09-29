@@ -1,5 +1,6 @@
 export { register, instrument } from "./register.js";
 export { emitEvent, flush, shutdown, withTrace, getConfig } from "./runtime.js";
+export { sendConnectionCheck, startCanary, stopCanary, canaryMac } from "./onboarding.js";
 export { instrumentOpenAI } from "./instrumentors/openai.js";
 export { instrumentAnthropic } from "./instrumentors/anthropic.js";
 export { instrumentOllama } from "./instrumentors/ollama.js";

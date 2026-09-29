@@ -13,6 +13,33 @@ let config: RuntimeConfig = {
   captureArguments: false, captureResult: false, captureHash: true, redact: true, actor: {}
 };
 let exporters: Exporter[] = [];
+// 収集が動いているか。configure で立て、shutdown で下ろす。canary はこれが立っている間だけ送る。
+let collecting = false;
+// 計装が 1 つでも入ったか。canary は計装が入り、収集が止まっていない間だけ送る。
+let instrumented = false;
+const shutdownHooks: Array<() => void> = [];
+
+export function isCollecting(): boolean { return collecting && instrumented; }
+
+// 計装した呼び出しが送った事象の agent_id。導入の確認と canary は、見張る対象と同じ識別子で送る。
+// 識別子を明示しないとき、計装の事象は SDK ごとの値から識別子を導くため、導入の処理が自分で導くと
+// 別のエージェントとして扱われる。
+let observedAgent: string | undefined;
+const agentListeners: Array<(agentId: string) => void> = [];
+export function observedAgentId(): string | undefined { return observedAgent; }
+// 計装の事象の識別子が初めて分かったときに 1 回呼ぶ。分かっていればすぐ呼ぶ。
+export function onAgentObserved(listener: (agentId: string) => void): void {
+  if (observedAgent) { void contain(() => listener(observedAgent as string)); return; }
+  agentListeners.push(listener);
+}
+export function markInstrumented(): void { instrumented = true; }
+
+// Argus へ送る exporter。canary と接続の確認は通常の事象と同じ送り先へ、秘匿を通さずに渡す。
+export function argusExporter(): ArgusExporter | undefined {
+  return exporters.find((exporter): exporter is ArgusExporter => exporter instanceof ArgusExporter);
+}
+
+export function onShutdown(hook: () => void): void { shutdownHooks.push(hook); }
 
 function isExporter(value: Exporter | ExporterConfig): value is Exporter {
   return typeof (value as Exporter)?.emit === "function";
@@ -48,6 +75,7 @@ export function configure(options: RegisterOptions = {}): void {
   exporters = options.exporters?.length
     ? options.exporters.map(exporterFromConfig)
     : [new JsonlExporter()];
+  collecting = true;
 }
 
 export function getConfig(): RuntimeConfig { return config; }
@@ -127,6 +155,12 @@ function buildEventContained(eventType: string, args: EmitArgs): EventRecord {
 export function emitEvent(eventType: string, args: EmitArgs = {}): EventRecord {
   const event = buildEventContained(eventType, args);
   for (const exporter of exporters) void contain(() => exporter.emit(event));
+  const agent = typeof event.agent_id === "string" ? event.agent_id : "";
+  if (agent && agent !== observedAgent) {
+    const first = observedAgent === undefined;
+    observedAgent = agent;
+    if (first) for (const listener of agentListeners.splice(0)) void contain(() => listener(agent));
+  }
   return event;
 }
 
@@ -143,6 +177,10 @@ export async function flush(): Promise<void> {
   for (const exporter of exporters) await contain(() => exporter.flush?.());
 }
 export async function shutdown(): Promise<void> {
+  // 収集を止めるなら canary も止める。止めないと、計装を外した後も生きている印だけが届く。
+  collecting = false;
+  instrumented = false;
+  for (const hook of shutdownHooks) void contain(() => hook());
   await flush();
   for (const exporter of exporters) await contain(() => exporter.shutdown?.());
 }

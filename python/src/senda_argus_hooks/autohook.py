@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import atexit
+import contextlib
 import json
 import os
 import sys
@@ -134,6 +135,12 @@ def bootstrap() -> dict[str, Any] | None:
         _BOOTSTRAPPED = True
         _BOOTSTRAP_RESULT = result
         atexit.register(shutdown)
+        # 接続の確認の値と canary の鍵が設定されていれば、ここで 1 回送り、見張りを始める。
+        # 失敗しても起動は止めない。
+        with contextlib.suppress(Exception):
+            from senda_argus_hooks.onboarding import start_from_env
+
+            start_from_env()
         if _bool("SENDA_ARGUS_BOOTSTRAP_DEBUG", False):
             print(f"[senda-argus] auto-hook enabled: {result}", file=sys.stderr)
         return result

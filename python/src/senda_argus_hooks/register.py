@@ -119,6 +119,11 @@ def register(
         except Exception:  # noqa: BLE001 - 計装を有効にできなくても呼び出し元を止めない
             installed["rag"] = False
 
+    # shutdown で止めた canary を、収集を再開したときに始め直す。鍵が設定されていなければ何もしない。
+    with contextlib.suppress(Exception):
+        from senda_argus_hooks.onboarding import restart_canary_from_env
+
+        restart_canary_from_env()
     return {"project": project, "environment": environment, "instrumentors": installed, "rag": rag_handle}
 
 
@@ -137,6 +142,12 @@ def flush() -> None:
 
 
 def shutdown() -> None:
+    # 収集を止めるなら canary も止める。止めないと、計装を外した後も生きている印だけが届き、
+    # 収集の停止が検知されない。
+    with contextlib.suppress(Exception):
+        from senda_argus_hooks.onboarding import stop_canary
+
+        stop_canary()
     flush()
     for rag_handle in list(_ACTIVE_RAG_INSTRUMENTATIONS):  # noqa: PERF101 - 後始末の間に一覧が書き換わっても回す対象を固定する
         with contextlib.suppress(Exception):

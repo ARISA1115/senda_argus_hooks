@@ -7,6 +7,8 @@ from typing import Any
 
 from senda_argus_hooks.core.hashing import sha256_value
 from senda_argus_hooks.core.identity import (
+    SERVER_INFO_NAME_ATTR,
+    UNNAMED_MCP_SERVER,
     data_source_hash,
     derive_mcp_profile_id,
     derive_purpose_id,
@@ -15,6 +17,7 @@ from senda_argus_hooks.core.identity import (
     resolve_mcp_server_name,
 )
 from senda_argus_hooks.core.instruction_files import classify_instruction_write
+from senda_argus_hooks.core.mcp_tools import get_mcp_tool_directory, tool_names_of
 from senda_argus_hooks.core.resource_access import (
     classify_read_resource,
     classify_resource_access,
@@ -38,12 +41,14 @@ class MCPPythonInstrumentor(BaseInstrumentor):
             candidates.append((ClientSession, "read_resource", "read_resource"))
             candidates.append((ClientSession, "list_tools", "list_tools"))
             candidates.append((ClientSession, "list_resources", "list_resources"))
+            # 初期化は事象を出さない。応答が名乗るサーバ名をセッションへ控えるだけにする。
+            candidates.append((ClientSession, "initialize", "initialize"))
         patched = False
         for cls, method_name, op in candidates:
             original = getattr(cls, method_name, None)
             if original is None or hasattr(original, "__senda_patched__"):
                 continue
-            wrapped = self._wrap(original, op)
+            wrapped = self._wrap_initialize(original) if op == "initialize" else self._wrap(original, op)
             wrapped.__senda_patched__ = True
             setattr(cls, method_name, wrapped)
             self._patches.append((cls, method_name, original))
@@ -58,6 +63,23 @@ class MCPPythonInstrumentor(BaseInstrumentor):
                     return await self._observe_async_call(original_result=result, operation=operation, obj=obj, args=args, kwargs=kwargs)
                 return awaited()
             return result
+        return sync_wrapper
+
+    @staticmethod
+    def _wrap_initialize(original: Callable) -> Callable:
+        def sync_wrapper(obj, *args, **kwargs):
+            result = original(obj, *args, **kwargs)
+            if not hasattr(result, "__await__"):
+                return result
+
+            async def awaited():
+                response = await result
+                with audit_guard("initialize"):
+                    _remember_server_info_name(obj, response)
+                return response
+
+            return awaited()
+
         return sync_wrapper
 
     async def _observe_async_call(self, *, original_result, operation: str, obj, args, kwargs):
@@ -96,6 +118,9 @@ class MCPPythonInstrumentor(BaseInstrumentor):
             if cfg.capture_result:
                 data["mcp"]["result"] = result_payload
             data["mcp"]["result_hash"] = sha256_value(result_payload)
+            if operation == "list_tools":
+                # 一覧に出たツールをサーバごとに控える。LLM に差し出した候補のサーバはここから引く。
+                get_mcp_tool_directory().record(meta["server"], tool_names_of(response), session=obj)
             emit_event(
                 "mcp.tool_call.completed" if operation == "call_tool" else f"mcp.{operation}.completed",
                 source={"component": "instrumentor", "sdk": "mcp_python", "operation": operation},
@@ -113,6 +138,40 @@ class MCPPythonInstrumentor(BaseInstrumentor):
         return True
 
 
+def _session_server_name(obj: Any) -> Any:
+    """セッションのサーバ名。名乗りから採った名前が別のセッションと衝突したら、名前を持たないものとして扱う。
+
+    明示の名前は利用者の設定で、同じ名前の複数のセッションを持つ構成もあるため、呼び出しの記録には
+    そのまま残す。帰属の台帳は明示の名前も持ち主で絞る。
+    """
+    name = resolve_mcp_server_name(obj)
+    if name == getattr(obj, SERVER_INFO_NAME_ATTR, None) and not get_mcp_tool_directory().claim(name, obj):
+        return UNNAMED_MCP_SERVER
+    return name
+
+
+def _remember_server_info_name(obj: Any, response: Any) -> None:
+    """初期化の応答が名乗ったサーバ名を、セッションへ控える。
+
+    SDK のセッションはこの名前を保持しないため、控えないとサーバ名は予約した名前になり、Argus は
+    そのサーバを承認できず、一覧のツールの帰属も引けない。明示の名前を持つセッションでは読み方の
+    順で明示の名前が勝つため、控えても結果は変わらない。
+    """
+    info = getattr(response, "serverInfo", None)
+    if info is None and isinstance(response, dict):
+        info = response.get("serverInfo")
+    name = info.get("name") if isinstance(info, dict) else getattr(info, "name", None)
+    # 名乗りはサーバが決める値である。同じ名前を別のセッションが既に名乗っていれば衝突として控えず、
+    # 候補にも呼び出しにもその名前を付けない。承認済みのサーバの名前を名乗った偽のサーバを、
+    # 承認済みのものとして送らない。
+    if (
+        isinstance(name, str)
+        and name.strip()
+        and get_mcp_tool_directory().claim(name.strip(), obj)
+    ):
+        setattr(obj, SERVER_INFO_NAME_ATTR, name.strip())
+
+
 def _extract_arguments(operation: str, args, kwargs) -> dict[str, Any]:
     if operation == "call_tool":
         return {"tool": args[0] if args else kwargs.get("name"), "arguments": args[1] if len(args) > 1 else kwargs.get("arguments")}
@@ -123,7 +182,7 @@ def _mcp_metadata(obj, operation: str, args, kwargs) -> dict[str, Any]:
     cfg = get_config()
     arguments = _extract_arguments(operation, args, kwargs)
     tool_name = arguments.get("tool")
-    server_name = resolve_mcp_server_name(obj)
+    server_name = _session_server_name(obj)
     server_url = getattr(obj, "url", None) or getattr(obj, "base_url", None) or getattr(obj, "server_url", None)
     capability = kwargs.get("capability") or getattr(obj, "capability", None)
     args_hash = sha256_value(arguments)

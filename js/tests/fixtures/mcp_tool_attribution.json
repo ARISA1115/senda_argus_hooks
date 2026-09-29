@@ -1,0 +1,181 @@
+{
+ "cases": [
+  {
+   "name": "exact names from two servers resolve to their own server",
+   "servers": [
+    [
+     "drill-ref-a1",
+     [
+      "drill-ref-a1_lookup_order"
+     ]
+    ],
+    [
+     "drill-decoy-b2",
+     [
+      "drill-decoy-b2_lookup_order"
+     ]
+    ]
+   ],
+   "lookups": {
+    "drill-ref-a1_lookup_order": "drill-ref-a1",
+    "drill-decoy-b2_lookup_order": "drill-decoy-b2",
+    "lookup_order": ""
+   }
+  },
+  {
+   "name": "the same bare name on two servers is not attributed",
+   "servers": [
+    [
+     "alpha",
+     [
+      "search"
+     ]
+    ],
+    [
+     "beta",
+     [
+      "search"
+     ]
+    ]
+   ],
+   "lookups": {
+    "search": ""
+   }
+  },
+  {
+   "name": "framework prefixes with either separator resolve",
+   "servers": [
+    [
+     "files",
+     [
+      "read"
+     ]
+    ]
+   ],
+   "lookups": {
+    "files__read": "files",
+    "files_read": "files",
+    "filesread": "",
+    "read": "files"
+   }
+  },
+  {
+   "name": "a prefix that fits two servers is not attributed",
+   "servers": [
+    [
+     "a",
+     [
+      "b_c"
+     ]
+    ],
+    [
+     "a_b",
+     [
+      "c"
+     ]
+    ]
+   ],
+   "lookups": {
+    "a_b_c": ""
+   }
+  },
+  {
+   "name": "an exact match wins over a prefix match",
+   "servers": [
+    [
+     "a",
+     [
+      "a_b"
+     ]
+    ],
+    [
+     "x",
+     [
+      "b"
+     ]
+    ]
+   ],
+   "lookups": {
+    "a_b": "a"
+   }
+  },
+  {
+   "name": "the unnamed session is never recorded",
+   "servers": [
+    [
+     "unknown",
+     [
+      "orphan"
+     ]
+    ],
+    [
+     "",
+     [
+      "blank"
+     ]
+    ]
+   ],
+   "lookups": {
+    "orphan": "",
+    "blank": ""
+   }
+  },
+  {
+   "name": "long names are folded, not dropped",
+   "servers": [
+    [
+     "s",
+     [
+      "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+     ]
+    ],
+    [
+     "m",
+     [
+      "あああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああ"
+     ]
+    ]
+   ],
+   "lookups": {
+    "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx": "s",
+    "s__xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx": "s",
+    "あああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああ": "m"
+   }
+  },
+  {
+   "name": "pages of one listing are merged",
+   "servers": [
+    [
+     "s",
+     [
+      "t1"
+     ]
+    ],
+    [
+     "s",
+     [
+      "t2"
+     ]
+    ]
+   ],
+   "lookups": {
+    "t1": "s",
+    "t2": "s"
+   }
+  }
+ ],
+ "fold": [
+  {
+   "input": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   "expected": "sha256:0d4e2ca9e9cbced7a7a5380eb29e1a3783b9b6d0db72de36a1051038e1c1fbc7"
+  },
+  {
+   "input": "あああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああ",
+   "expected": "sha256:7f70cab64b7c56eab99b83cfe27f263964bb72c1b4e00aa19bc593a0f84d082f"
+  },
+  {
+   "input": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   "expected": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  }
+ ]
+}
