@@ -9,7 +9,6 @@ import sys
 import types
 
 import pytest
-
 from senda_argus_hooks import register, shutdown
 from senda_argus_hooks.instrumentors.base import audit_guard
 

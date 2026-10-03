@@ -41,7 +41,7 @@ def _actor() -> dict[str, Any]:
     try:
         value = json.loads(raw)
         return value if isinstance(value, dict) else {}
-    except Exception:
+    except Exception:  # noqa: BLE001
         return {}
 
 
@@ -52,7 +52,7 @@ def _default_jsonl_path() -> str:
         return str(Path(state_home) / "senda-argus" / "events.jsonl")
     try:
         return str(Path.home() / ".local" / "state" / "senda-argus" / "events.jsonl")
-    except Exception:
+    except Exception:  # noqa: BLE001
         return "./senda-events.jsonl"
 
 
@@ -95,7 +95,7 @@ def bootstrap() -> dict[str, Any] | None:
     try:
         from senda_argus_hooks.config import load_config_files
         load_config_files()
-    except Exception:
+    except Exception:  # noqa: BLE001, S110
         pass
     if _BOOTSTRAPPED or not _bool("SENDA_ARGUS_ENABLED", True):
         return _BOOTSTRAP_RESULT
@@ -115,11 +115,13 @@ def bootstrap() -> dict[str, Any] | None:
             instrument_mcp=_bool("SENDA_ARGUS_INSTRUMENT_MCP", True),
             instrument_argus_sdk=_bool("SENDA_ARGUS_INSTRUMENT_ARGUS_SDK", True),
             instrument_openai_agents=_bool("SENDA_ARGUS_INSTRUMENT_OPENAI_AGENTS", True),
+            instrument_openai_realtime=_bool("SENDA_ARGUS_INSTRUMENT_OPENAI_REALTIME", True),
             capture_prompt=_bool("SENDA_ARGUS_CAPTURE_PROMPT", False),
             capture_response=_bool("SENDA_ARGUS_CAPTURE_RESPONSE", False),
             capture_arguments=_bool("SENDA_ARGUS_CAPTURE_ARGUMENTS", False),
             capture_result=_bool("SENDA_ARGUS_CAPTURE_RESULT", False),
             scan_result=_bool("SENDA_ARGUS_SCAN_RESULT", True),
+            scan_input=_bool("SENDA_ARGUS_SCAN_INPUT", True),
             capture_hash=_bool("SENDA_ARGUS_CAPTURE_HASH", True),
             redact=_bool("SENDA_ARGUS_REDACT", True),
             actor=_actor(),
@@ -145,7 +147,7 @@ def bootstrap() -> dict[str, Any] | None:
         if _bool("SENDA_ARGUS_BOOTSTRAP_DEBUG", False):
             print(f"[senda-argus] auto-hook enabled: {result}", file=sys.stderr)
         return result
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         # Observability must never prevent the Agent from starting.
         if _bool("SENDA_ARGUS_BOOTSTRAP_DEBUG", False):
             print(f"[senda-argus] auto-hook bootstrap failed: {exc!r}", file=sys.stderr)

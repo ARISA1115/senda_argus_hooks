@@ -300,6 +300,62 @@ test("chunks sent while the page closes use keepalive and still all arrive", asy
   }
 });
 
+test("requests sent while the page stays open do not use keepalive", async () => {
+  const restoreNavigator = override("navigator", undefined);
+  const fetchStub = stubFetch([200]);
+  try {
+    registerHttp({headers: {"x-api-key": "collect-key"}});
+    await SendaArgus.emit("unit.test");
+    await SendaArgus.flush();
+    assert.equal(fetchStub.calls.length, 1);
+    assert.equal(fetchStub.calls[0].init.keepalive, false);
+  } finally {
+    SendaArgus.unregister();
+    fetchStub.restore();
+    restoreNavigator();
+  }
+});
+
+for (const status of [403, 408, 425, 429, 500]) {
+  test(`a batch refused with status ${status} waits and is sent again`, async () => {
+    const restoreNavigator = override("navigator", undefined);
+    const fetchStub = stubFetch([status, 200]);
+    try {
+      registerHttp({headers: {"x-api-key": "collect-key"}});
+      const event = await SendaArgus.emit("unit.test");
+      await SendaArgus.flush();
+      await SendaArgus.flush();
+      assert.equal(fetchStub.calls.length, 1);
+      await SendaArgus.flush({force: true});
+      assert.equal(fetchStub.calls.length, 2);
+      assert.ok(sentEventIds([fetchStub.calls[1]]).includes(event.event_id));
+    } finally {
+      SendaArgus.unregister();
+      fetchStub.restore();
+      restoreNavigator();
+    }
+  });
+}
+
+test("a batch refused with 404 is not sent again", async () => {
+  const restoreNavigator = override("navigator", undefined);
+  const fetchStub = stubFetch([404, 200]);
+  const warn = stubWarn();
+  try {
+    registerHttp({headers: {"x-api-key": "collect-key"}});
+    await SendaArgus.emit("unit.test");
+    await SendaArgus.flush();
+    await SendaArgus.flush({force: true});
+    assert.equal(fetchStub.calls.length, 1);
+    assert.ok(warn.warnings.some((message) => message.includes("collector responded 404")));
+  } finally {
+    SendaArgus.unregister();
+    fetchStub.restore();
+    warn.restore();
+    restoreNavigator();
+  }
+});
+
 test("events that JSON cannot represent are converted instead of losing the batch", async () => {
   const restoreNavigator = override("navigator", undefined);
   const fetchStub = stubFetch([200]);

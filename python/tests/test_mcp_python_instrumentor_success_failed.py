@@ -5,7 +5,6 @@ import types
 from pathlib import Path
 
 import pytest
-
 from senda_argus_hooks import register, shutdown
 
 

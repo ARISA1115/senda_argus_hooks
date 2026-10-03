@@ -19,11 +19,11 @@ def _system_site_dirs() -> list[Path]:
     result: list[Path] = []
     try:
         result.extend(Path(p) for p in site.getsitepackages())
-    except Exception:
+    except Exception:  # noqa: BLE001, S110
         pass
     # Fallback for unusual Python distributions.
     for p in sys.path:
-        if p and (p.endswith("site-packages") or p.endswith("dist-packages")):
+        if p and (p.endswith(("site-packages", "dist-packages"))):
             path = Path(p)
             if path not in result:
                 result.append(path)
@@ -85,7 +85,7 @@ def status(*, target: str | None = None) -> dict[str, Any]:
         if exists:
             try:
                 content_ok = pth.read_text(encoding="utf-8") == PTH_CONTENT
-            except Exception:
+            except Exception:  # noqa: BLE001
                 content_ok = False
         entries.append({"path": str(pth), "exists": exists, "managed": content_ok})
     installed = any(entry["exists"] and entry["managed"] for entry in entries)
@@ -108,7 +108,7 @@ def uninstall(*, target: str | None = None, force: bool = False) -> dict[str, An
         managed = False
         try:
             managed = pth.read_text(encoding="utf-8") == PTH_CONTENT
-        except Exception:
+        except Exception:  # noqa: BLE001
             managed = False
         if not managed and not force:
             skipped.append(str(pth))

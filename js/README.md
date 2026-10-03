@@ -70,6 +70,8 @@ A preload/loader based ESM auto-instrumentation layer can be added in a later JS
 
 Exporter configuration objects compatible with the Python package are supported for `jsonl`, `stdout`, and `null`, while custom exporter instances remain supported.
 
+Observation never changes the result of an instrumented call. An exporter that throws or returns a rejected Promise is isolated from the call and from the other exporters, including during `flush()` and `shutdown()`. Circular data is recorded as `[Circular]` and nesting deeper than 100 levels as `[MaxDepth]`. If an event still cannot be built, its `data` is emptied and `security.observation_failed` is set to `true`. Calls that return `undefined` are recorded as completed.
+
 ## Framework integrations (JS v0.2.0 / Senda-Argus Hooks v0.7.0)
 
 The Node/TypeScript package also provides framework-level integrations. These remain optional and are loaded by the application only when the corresponding framework is used.

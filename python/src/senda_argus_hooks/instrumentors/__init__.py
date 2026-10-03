@@ -5,6 +5,7 @@ from .litellm import LiteLLMInstrumentor
 from .mcp_python import MCPPythonInstrumentor
 from .ollama import OllamaInstrumentor
 from .openai import OpenAIInstrumentor
+from .openai_realtime import OpenAIRealtimeInstrumentor
 from .vertexai import VertexAIInstrumentor
 
 __all__ = [
@@ -15,5 +16,6 @@ __all__ = [
     "MCPPythonInstrumentor",
     "OllamaInstrumentor",
     "OpenAIInstrumentor",
+    "OpenAIRealtimeInstrumentor",
     "VertexAIInstrumentor",
 ]

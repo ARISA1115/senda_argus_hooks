@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from senda_argus_hooks.autoinstall import PTH_CONTENT, PTH_FILENAME, install, status, uninstall
+from senda_argus_hooks.autoinstall import (
+    PTH_CONTENT,
+    PTH_FILENAME,
+    install,
+    status,
+    uninstall,
+)
 
 
 def test_autohook_install_status_uninstall_target(tmp_path: Path):

@@ -6,9 +6,10 @@ import shlex
 import shutil
 import subprocess
 import sys
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from senda_argus_hooks.autoinstall import PTH_CONTENT, PTH_FILENAME
 
@@ -76,7 +77,7 @@ def _candidate_from_path(path: str | os.PathLike[str] | None) -> str | None:
         p = Path(path).expanduser()
         if p.exists() and p.is_file():
             return str(p.absolute())
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
     return None
 
@@ -116,7 +117,7 @@ def _proc_candidates() -> tuple[dict[str, set[str]], dict[str, set[int]]]:
         try:
             raw = (item / "cmdline").read_bytes()
             args = [part.decode(errors="ignore") for part in raw.split(b"\0") if part]
-        except Exception:
+        except Exception:  # noqa: BLE001
             args = []
         first = args[0] if args else None
         if first and "python" in Path(first).name.lower():
@@ -124,7 +125,7 @@ def _proc_candidates() -> tuple[dict[str, set[str]], dict[str, set[int]]]:
             try:
                 exe_link = os.readlink(item / "exe")
                 add(exe_link, pid, "running-process-exe")
-            except Exception:
+            except Exception:  # noqa: BLE001, S110
                 pass
         try:
             environ_raw = (item / "environ").read_bytes()
@@ -137,7 +138,7 @@ def _proc_candidates() -> tuple[dict[str, set[str]], dict[str, set[int]]]:
             venv = env.get("VIRTUAL_ENV")
             if venv:
                 add(str(Path(venv) / ("Scripts/python.exe" if os.name == "nt" else "bin/python")), pid, "running-venv")
-        except Exception:
+        except Exception:  # noqa: BLE001, S110
             pass
     return candidates, pids_by_exe
 
@@ -188,7 +189,7 @@ print(json.dumps({
 '''
     try:
         result = _run([executable, "-c", probe], timeout=8)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
     if result.returncode != 0:
         return None
@@ -205,9 +206,9 @@ print(json.dumps({
             user_site=str(data["user_site"]) if data.get("user_site") else None,
             virtualenv=str(data["prefix"]) != str(data["base_prefix"]),
             source=tuple(sorted(set(sources))),
-            running_pids=tuple(sorted(set(int(p) for p in running_pids))),
+            running_pids=tuple(sorted({int(p) for p in running_pids})),
         )
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
 
 
@@ -282,7 +283,7 @@ def install_target(target: PythonTarget, *, package: str, bootstrap_pip: bool = 
         if pth.exists() and pth.read_text(encoding="utf-8") != PTH_CONTENT and not force:
             raise RuntimeError(f"Refusing to overwrite unmanaged {pth}")
         pth.write_text(PTH_CONTENT, encoding="utf-8")
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         return {"ok": False, "target": target.to_dict(), "error": f"SDK installed but startup hook failed: {exc}"}
     verify = _run([target.executable, "-c", "import senda_argus_hooks; print('ok')"], timeout=15)
     return {
@@ -303,7 +304,7 @@ def target_status(target: PythonTarget) -> dict[str, Any]:
     if pth.exists():
         try:
             managed = pth.read_text(encoding="utf-8") == PTH_CONTENT
-        except Exception:
+        except Exception:  # noqa: BLE001, S110
             pass
     package_check = _run([target.executable, "-c", "import importlib.util; print(bool(importlib.util.find_spec('senda_argus_hooks')))"], timeout=10)
     package_installed = package_check.returncode == 0 and package_check.stdout.strip().endswith("True")
@@ -325,7 +326,7 @@ def uninstall_target(target: PythonTarget, *, remove_sdk: bool = False, force: b
         managed = False
         try:
             managed = pth.read_text(encoding="utf-8") == PTH_CONTENT
-        except Exception:
+        except Exception:  # noqa: BLE001, S110
             pass
         if managed or force:
             pth.unlink()
@@ -383,6 +384,6 @@ def write_config(values: dict[str, str | None], *, path: str | None = None, forc
     config_path.write_text(content, encoding="utf-8")
     try:
         os.chmod(config_path, 0o600)
-    except Exception:
+    except Exception:  # noqa: BLE001, S110
         pass
     return {"path": str(config_path), "keys": sorted(merged), "mode": "0600"}

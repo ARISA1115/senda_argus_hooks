@@ -10,7 +10,7 @@ def _parse_env_file(path: Path) -> dict[str, str]:
     values: dict[str, str] = {}
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
-    except Exception:
+    except Exception:  # noqa: BLE001
         return values
     for line in lines:
         text = line.strip()
@@ -32,7 +32,7 @@ def config_paths() -> list[Path]:
     try:
         base = Path(os.getenv("XDG_CONFIG_HOME", Path.home() / ".config"))
         paths.append(base / "senda-argus" / "hooks.env")
-    except Exception:
+    except Exception:  # noqa: BLE001, S110
         pass
     explicit = os.getenv("SENDA_ARGUS_CONFIG")
     if explicit:

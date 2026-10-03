@@ -4,8 +4,8 @@ import atexit
 import contextlib
 import json
 import logging
-import sys
 import queue
+import sys
 import threading
 import time
 import urllib.error
@@ -101,7 +101,7 @@ class ArgusExporter(BaseExporter):
             body = json.loads(payload.decode("utf-8"))
             events = body.get("events") if isinstance(body, dict) else None
             return len(events) if isinstance(events, list) else None
-        except Exception:
+        except Exception:  # noqa: BLE001
             return None
 
     def _send(self, payload: bytes, headers: dict[str, str]) -> None:
@@ -144,15 +144,41 @@ class ArgusExporter(BaseExporter):
                 atexit.register(self.shutdown)
                 self._atexit_registered = True
 
-    def export(self, events: list[dict[str, Any]]) -> None:
-        if not events:
-            return
+    def _request(self, events: list[dict[str, Any]]) -> tuple[bytes, dict[str, str]]:
         if self._run_id:
             events = [dict(ev, run_id=ev.get("run_id") or self._run_id) for ev in events]
         payload = json.dumps({"events": events}, ensure_ascii=False, default=str).encode("utf-8")
         headers = {"Content-Type": "application/json"}
         if self._api_key:
             headers["X-API-Key"] = self._api_key
+        return payload, headers
+
+    def send_sync(self, events: list[dict[str, Any]]) -> bool:
+        """待って送り、受け取り側が 2xx を返したかを返す。
+
+        引き取り型の収集は、届いたことを確かめてから取得位置を進める。キューへ積むだけの export では
+        届かなかった記録を取り直せない。受け取り側は event_id で重複を除くため、送り直しても二重に
+        数えない。
+        """
+        if not events:
+            return True
+        payload, headers = self._request(events)
+        req = urllib.request.Request(self._url, data=payload, method="POST", headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=self._timeout) as response:
+                status = getattr(response, "status", None) or response.getcode()
+        except urllib.error.HTTPError as exc:
+            self._http_log(f"POST failed status={exc.code} url={self._url}")
+            return False
+        except (urllib.error.URLError, OSError) as exc:
+            self._http_log(f"POST failed url={self._url} error={getattr(exc, 'reason', exc)}")
+            return False
+        return 200 <= int(status) < 300
+
+    def export(self, events: list[dict[str, Any]]) -> None:
+        if not events:
+            return
+        payload, headers = self._request(events)
         # 送信をキューへ積み、単一ワーカーが FIFO 順にホスト経路の外で送る。キューが
         # 満杯なら捨てて呼び出し側を待たせない。ワーカーは 1 本に限定する。
         self._ensure_worker()

@@ -58,6 +58,7 @@ When `SENDA_AGENT_INSTALL_DEPS=true` and the mounted workspace has a `package.js
 | `SENDA_ARGUS_CAPTURE_ARGUMENTS` | `false` | Store tool arguments |
 | `SENDA_ARGUS_CAPTURE_RESULT` | `false` | Store tool results |
 | `SENDA_ARGUS_SCAN_RESULT` | `true` | Send a redacted scan text of tool results for detection only. Argus does not store it |
+| `SENDA_ARGUS_SCAN_INPUT` | `true` | Send a redacted scan text of voice session transcripts for detection only. Raw audio is never sent. Argus does not store it |
 | `SENDA_ARGUS_CAPTURE_HASH` | `true` | Store hashes |
 | `SENDA_ARGUS_REDACT` | `true` | Enable redaction |
 | `SENDA_ARGUS_BOOTSTRAP_DEBUG` | `false` | Bootstrap diagnostic messages |
