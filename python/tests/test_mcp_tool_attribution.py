@@ -19,7 +19,6 @@ import types
 from pathlib import Path
 
 import pytest
-
 from senda_argus_hooks import register, shutdown
 from senda_argus_hooks.core.identity import (
     SERVER_INFO_NAME_ATTR,

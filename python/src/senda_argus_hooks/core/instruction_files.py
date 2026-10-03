@@ -19,8 +19,15 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
+import math
+import os
 import posixpath
 import re
+import struct
+import threading
+import time
+import unicodedata
 from collections.abc import Mapping
 from typing import Any, Final
 
@@ -646,6 +653,10 @@ def classify_instruction_write(arguments: Any) -> dict[str, Any] | None:
     pairs, pairs_over = token_pair_digests_with_overflow(
         body, limit=MAX_WRITE_DIGESTS, is_patch=is_patch
     )
+    # 文の署名は埋め込みと鍵が揃うときだけ出る。揃わない構成では空で、欄を載せない。
+    semantic, semantic_over = semantic_band_digests_with_overflow(
+        body, limit=MAX_WRITE_SEMANTIC_SENTENCES, is_patch=is_patch
+    )
     written: dict[str, Any] = {
         "instruction_file_name": name,
         "written_content_hash": _digest(body),
@@ -658,7 +669,10 @@ def classify_instruction_write(arguments: Any) -> dict[str, Any] | None:
     # 欠けた記録が完全な記録と見分けられなくなる。実測で正規の指示ファイルは最大 48 組で、
     # 上限はその 85 倍である。超える書き込みは指示ファイルの体を成しておらず、超過そのものが
     # 判定の材料になる。
-    if lines_over or pairs_over:
+    if semantic:
+        # 語の組が作れない本文のための証拠。本文も埋め込みも載せず、鍵付きのダイジェストだけを載せる。
+        written["written_semantic_hashes"] = semantic
+    if lines_over or pairs_over or semantic_over:
         written["written_digests_truncated"] = True
     return written
 
@@ -872,3 +886,393 @@ def system_prompt_line_digests(*sources: Any, **named: Any) -> list[str]:
     if not texts:
         return []
     return line_digests("\n".join(texts))
+
+
+# ---------------------------------------------------------------------------
+# 文の署名。**語の組が作れない本文のための突合である。**
+#
+# 語の組は ASCII で書かれた経路と URL からしか作れず、日本語だけで書かれた指示ファイルからは 1 つも
+# 作れない。要約は文言を作り替えるため行も残らない。文の意味は要約を経ても残るので、指示と書き込みを
+# 文に分け、ローカルの多言語の埋め込みモデルで埋め込み、テナントごとの鍵から作った超平面で符号に
+# 変え、符号を帯に分けて帯ごとの鍵付きダイジェストだけを出す。
+#
+# **本文も埋め込みも出さない。** 埋め込みからは元の文をある程度戻せる。出すのは鍵付きのダイジェスト
+# だけで、鍵を持たない受け取り側からは符号の値も戻せない。
+#
+# **鍵をテナントごとにする。** 鍵が共通だと、別のテナントの署名と照合でき、同じ文を持つかどうかが
+# 漏れる。鍵は超平面と帯のダイジェストの両方に掛ける。
+#
+# **埋め込みか鍵のどちらかが無ければ何も出さない。** 判別できないものを既定の値へ倒さない。
+# ---------------------------------------------------------------------------
+
+# テナントの鍵を読む環境変数。16 進で書いた 32 バイト以上の値に限る。記録にも送出にも載せない。
+SEMANTIC_KEY_ENV: Final[str] = "SENDA_ARGUS_INSTRUCTION_SIGNATURE_KEY"
+
+# ローカルに置いた埋め込みモデルのディレクトリ。実在するディレクトリだけを受け付け、外部へは
+# 接続しない。モデルの識別子は受け付けない。識別子を受けると、置いていないときに取得へ落ちる。
+SEMANTIC_MODEL_DIR_ENV: Final[str] = "SENDA_ARGUS_INSTRUCTION_EMBED_MODEL_DIR"
+
+# 鍵の長さの下限。短い鍵は総当たりで超平面を推せる。
+SEMANTIC_KEY_MIN_BYTES: Final[int] = 32
+
+# 突合の対象にする文の最小の文字数。短い文は無関係な文書どうしでも同じ意味になる。
+SEMANTIC_MIN_SENTENCE_CHARS: Final[int] = 12
+
+# 1 文を埋め込みへ渡す前に切る長さ。埋め込みの時間は文の長さに比例して伸びる。書き手は本文を
+# 自由に決められるため、長い文を並べるだけで導出に時間を使わせられる。
+SEMANTIC_MAX_SENTENCE_CHARS: Final[int] = 256
+
+# 指示側で 1 件あたりに埋め込む文の上限。指示は毎回の呼び出しに載るため、時間に効く。
+MAX_SEMANTIC_SENTENCES: Final[int] = 64
+
+# 書き込み側で 1 件あたりに埋め込む文の上限。**指示側と同じ上限を書き込み側へ課すと、埋め草で
+# 押し出せる。** 書き込みは指示ファイルへの書き込みに限られ頻度が低いため、上限を広く取る。
+MAX_WRITE_SEMANTIC_SENTENCES: Final[int] = 256
+
+# 帯の数と、1 つの帯に入る符号の桁の数。桁を増やすと無関係な文が同じ帯に入りにくくなり、帯を
+# 増やすと言い換えた文がどれかの帯で揃いやすくなる。
+SEMANTIC_BANDS: Final[int] = 32
+SEMANTIC_ROWS: Final[int] = 48
+
+# 1 件あたりの埋め込みに掛けてよい時間。埋め込みは文の塊ごとに呼び、超えたら残りを落とす。
+# **落とすのは値の順で後ろの文で、本文の位置に依らない。** 時間は送り手が決められないので、
+# 落ちたことを書き込みの超過の印には数えない。
+SEMANTIC_MAX_SECONDS: Final[float] = 2.0
+
+# 埋め込みへ 1 度に渡す文の数。時間の上限はこの単位で確かめる。
+SEMANTIC_BATCH: Final[int] = 16
+
+# 帯のダイジェストの接頭辞。行と組の sha256 と形で分ける。
+SEMANTIC_DIGEST_PREFIX: Final[str] = "hmac-sha256:"
+
+# 受け付ける埋め込みの次元の範囲。外れた値は壊れた埋め込みとして何も出さない。
+_SEMANTIC_MIN_DIM: Final[int] = 8
+_SEMANTIC_MAX_DIM: Final[int] = 4096
+
+# 文の区切り。改行と、文の終わりの記号の後ろで切る。半角の点は後ろに空白があるときだけ切る。
+# 数字や経路の中の点で文を切らないため。
+_SENTENCE_SPLIT_RE: Final[Any] = re.compile(r"\n+|(?<=[。!?])|(?<=\.)\s+")
+
+# 文の頭に付く箇条書きと見出しの印。要約で付いたり外れたりするため落とす。
+_SENTENCE_LEAD_RE: Final[Any] = re.compile(r"\A(?:[-*+>#|]+|\d+[.)])\s*")
+
+# 文の意味を運ばない書式。**書式で文が近くなると、無関係な文書どうしが重なる。** 実測で、表の
+# 区切りの行、強調の印だけが違う見出し、文書間の参照の並びが、無関係な文書の合併に対して重なった
+# 文のほとんどを占めた。参照の並びは参照先の名前を列挙しているだけで、指示の意味を持たない。
+# 印を 1 つずつ足さず、書式の記号をまとめて落とし、残った文字のうち字の数で長さを測る。
+_SENTENCE_MARKUP_RE: Final[Any] = re.compile(r"\[\[[^\]\n]*\]\]|\]\([^)\s]*\)|[*_`|~]+")
+
+_SEMANTIC_PLANE_LABEL: Final[bytes] = b"senda-argus/instruction-semantic-planes/v1|"
+_SEMANTIC_BAND_LABEL: Final[bytes] = b"senda-argus/instruction-semantic-band/v1|"
+
+# 超平面は鍵と次元ごとに一度だけ作る。鍵そのものは控えの名前に使わず、鍵のダイジェストを使う。
+_SEMANTIC_PLANE_CACHE: Final[dict[tuple[bytes, int], list[list[float]]]] = {}
+_SEMANTIC_PLANE_CACHE_MAX: Final[int] = 4
+
+# 指示側の結果の控え。指示は毎回の呼び出しで同じ本文が載るため、同じ本文を何度も埋め込まない。
+_SEMANTIC_RESULT_CACHE: Final[dict[tuple[bytes, int, str], list[str]]] = {}
+_SEMANTIC_RESULT_CACHE_MAX: Final[int] = 64
+
+_SEMANTIC_LOCK: Final[Any] = threading.Lock()
+
+# 埋め込みの取得先。差し替えたものがあればそれを使い、無ければ環境変数のディレクトリから読む。
+# 読めなかったことも控え、呼び出しのたびに読み直さない。
+_SEMANTIC_EMBEDDER: Final[dict[str, Any]] = {
+    "override": None,
+    "loaded": False,
+    "model": None,
+}
+
+
+def set_sentence_embedder(embedder: Any) -> None:
+    """文の列を受けて同じ長さのベクトルの列を返す関数を差し替える。None で既定の読み込みへ戻す。"""
+    with _SEMANTIC_LOCK:
+        _SEMANTIC_EMBEDDER["override"] = embedder
+        _SEMANTIC_EMBEDDER["loaded"] = False
+        _SEMANTIC_EMBEDDER["model"] = None
+        _SEMANTIC_RESULT_CACHE.clear()
+
+
+def reset_semantic_signature_for_tests() -> None:
+    """差し替えと読み込みの結果と控えを全部消す。"""
+    set_sentence_embedder(None)
+    with _SEMANTIC_LOCK:
+        _SEMANTIC_PLANE_CACHE.clear()
+
+
+def _load_local_embedder() -> Any:
+    """環境変数のディレクトリから埋め込みモデルを読む。読めなければ None を返す。
+
+    **外部へ接続しない。** 実在するローカルのディレクトリだけを受け付け、取得を禁じる印を立て、
+    読み込みもローカルのファイルに限る。モデルの中のコードは実行しない。ライブラリが入っていない
+    構成では何も読まず、文の署名を出さない。
+    """
+    directory = os.environ.get(SEMANTIC_MODEL_DIR_ENV, "").strip()
+    if not directory or not os.path.isdir(directory):
+        return None
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+    os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+    try:
+        from sentence_transformers import SentenceTransformer
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        model = SentenceTransformer(
+            directory,
+            device="cpu",
+            local_files_only=True,
+            trust_remote_code=False,
+        )
+    except Exception:  # noqa: BLE001
+        return None
+
+    def _encode(sentences: list[str]) -> Any:
+        return model.encode(
+            sentences,
+            convert_to_numpy=True,
+            normalize_embeddings=False,
+            show_progress_bar=False,
+        ).tolist()
+
+    return _encode
+
+
+def _resolve_embedder() -> Any:
+    with _SEMANTIC_LOCK:
+        override = _SEMANTIC_EMBEDDER["override"]
+        if override is not None:
+            return override
+        if not _SEMANTIC_EMBEDDER["loaded"]:
+            _SEMANTIC_EMBEDDER["model"] = _load_local_embedder()
+            _SEMANTIC_EMBEDDER["loaded"] = True
+        return _SEMANTIC_EMBEDDER["model"]
+
+
+def semantic_signature_key() -> bytes | None:
+    """テナントの鍵を環境変数から読む。形が合わなければ None を返し、署名を出さない。"""
+    raw = os.environ.get(SEMANTIC_KEY_ENV, "").strip()
+    if not raw:
+        return None
+    try:
+        key = bytes.fromhex(raw)
+    except ValueError:
+        return None
+    if len(key) < SEMANTIC_KEY_MIN_BYTES:
+        return None
+    return key
+
+
+def split_sentences(text: Any) -> list[str]:
+    """本文を文に分ける。互換の字形へ均し、書式を落とし、空白を詰め、短い文を除き、重複を畳む。"""
+    if not isinstance(text, str) or not text:
+        return []
+    text = unicodedata.normalize("NFKC", text)
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in _SENTENCE_SPLIT_RE.split(text):
+        sentence = _SENTENCE_MARKUP_RE.sub(" ", _SENTENCE_LEAD_RE.sub("", raw.strip()))
+        sentence = " ".join(_SENTENCE_LEAD_RE.sub("", sentence.strip()).split())
+        # 長さは字の数で測る。記号や数字だけが並ぶ行は、長くても文の意味を持たない。
+        if sum(1 for ch in sentence if ch.isalpha()) < SEMANTIC_MIN_SENTENCE_CHARS:
+            continue
+        sentence = sentence[:SEMANTIC_MAX_SENTENCE_CHARS]
+        if sentence in seen:
+            continue
+        seen.add(sentence)
+        out.append(sentence)
+    return out
+
+
+def _select_sentences(sentences: list[str], limit: int) -> tuple[list[str], bool]:
+    """上限を超える分を、本文の位置に依らない値の順で落とす。
+
+    **文頭から詰めて打ち切ると、末尾に書かれたものが必ず落ちる。** 指示ファイルは追記して育つため、
+    後から書かれた払い出しがちょうど落ちる位置に来る。文のダイジェストの順で選ぶ。
+    """
+    ordered = sorted(sentences, key=lambda s: hashlib.sha256(s.encode("utf-8")).digest())
+    return ordered[:limit], len(ordered) > limit
+
+
+def _semantic_planes(key: bytes, dim: int) -> list[list[float]]:
+    """鍵と次元から超平面を作る。鍵から決まるため、両側で同じ超平面になる。
+
+    各成分は鍵付きの擬似乱数から正規分布に従う値を作る。正規分布の超平面で符号を取ると、
+    2 つのベクトルの符号が一致する割合が両者のなす角で決まる。
+    """
+    cache_key = (hashlib.sha256(key).digest(), dim)
+    with _SEMANTIC_LOCK:
+        cached = _SEMANTIC_PLANE_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    count = SEMANTIC_BANDS * SEMANTIC_ROWS * dim
+    values: list[float] = []
+    counter = 0
+    while len(values) < count:
+        block = hmac.new(
+            key,
+            _SEMANTIC_PLANE_LABEL + struct.pack(">IQ", dim, counter),
+            hashlib.sha256,
+        ).digest()
+        counter += 1
+        for offset in (0, 16):
+            high, low = struct.unpack(">QQ", block[offset : offset + 16])
+            radius = math.sqrt(-2.0 * math.log((high + 1) / 18446744073709551617.0))
+            angle = 2.0 * math.pi * (low / 18446744073709551616.0)
+            values.append(radius * math.cos(angle))
+            values.append(radius * math.sin(angle))
+    planes = [values[i * dim : (i + 1) * dim] for i in range(SEMANTIC_BANDS * SEMANTIC_ROWS)]
+    with _SEMANTIC_LOCK:
+        if len(_SEMANTIC_PLANE_CACHE) >= _SEMANTIC_PLANE_CACHE_MAX:
+            _SEMANTIC_PLANE_CACHE.clear()
+        _SEMANTIC_PLANE_CACHE[cache_key] = planes
+    return planes
+
+
+def _valid_vectors(vectors: Any, count: int) -> list[list[float]] | None:
+    """埋め込みの戻り値を確かめる。数と次元と値の形が合わなければ None を返す。"""
+    try:
+        rows = [list(v) for v in vectors]
+    except TypeError:
+        return None
+    if len(rows) != count or not rows:
+        return None
+    dim = len(rows[0])
+    if not _SEMANTIC_MIN_DIM <= dim <= _SEMANTIC_MAX_DIM:
+        return None
+    out: list[list[float]] = []
+    for row in rows:
+        if len(row) != dim:
+            return None
+        values: list[float] = []
+        for value in row:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return None
+            if not math.isfinite(value):
+                return None
+            values.append(float(value))
+        out.append(values)
+    return out
+
+
+def _signature_bits(planes: list[list[float]], vectors: list[list[float]]) -> list[list[bool]]:
+    """各ベクトルが各超平面のどちら側にあるかを返す。
+
+    数値計算のライブラリがあればそれで掛ける。埋め込みのモデルを読む構成には必ず入っている。
+    無ければ同じ計算を素の Python で行う。両者の差は内積が 0 にごく近いときの符号だけで、
+    帯のどれか 1 つが揃えばよい突合には効かない。
+    """
+    try:
+        import numpy
+    except Exception:  # noqa: BLE001
+        numpy = None
+    if numpy is not None:
+        products = numpy.asarray(vectors, dtype=numpy.float64) @ numpy.asarray(
+            planes, dtype=numpy.float64
+        ).T
+        return [[bool(v) for v in row] for row in (products >= 0.0).tolist()]
+    return [
+        [sum(p * v for p, v in zip(plane, vector)) >= 0.0 for plane in planes]
+        for vector in vectors
+    ]
+
+
+def _band_digests(key: bytes, bits: list[bool]) -> list[str]:
+    """1 文の符号を帯に分け、帯ごとの鍵付きダイジェストにする。"""
+    out: list[str] = []
+    for band in range(SEMANTIC_BANDS):
+        value = 0
+        for bit in bits[band * SEMANTIC_ROWS : (band + 1) * SEMANTIC_ROWS]:
+            value = (value << 1) | (1 if bit else 0)
+        mac = hmac.new(
+            key,
+            _SEMANTIC_BAND_LABEL
+            + struct.pack(">BB", band, SEMANTIC_ROWS)
+            + value.to_bytes((SEMANTIC_ROWS + 7) // 8, "big"),
+            hashlib.sha256,
+        ).hexdigest()
+        out.append(SEMANTIC_DIGEST_PREFIX + mac)
+    return out
+
+
+def semantic_band_digests_with_overflow(
+    body: Any,
+    *,
+    limit: int = MAX_SEMANTIC_SENTENCES,
+    is_patch: bool = False,
+    embedder: Any = None,
+    key: bytes | None = None,
+) -> tuple[list[str], bool]:
+    """本文を文ごとの帯のダイジェストにする。文の数が上限を超えたかも返す。
+
+    返す列は文ごとに帯の数ずつ並ぶ。受け取り側はこの単位で重なる文を数える。埋め込みか鍵が
+    無いとき、埋め込みの戻り値が壊れているときは空を返す。
+    """
+    body = normalize_patch_body(body, is_patch=is_patch)
+    sentences = split_sentences(body)
+    if not sentences:
+        return [], False
+    key = key if key is not None else semantic_signature_key()
+    embed = embedder if embedder is not None else _resolve_embedder()
+    if key is None or embed is None:
+        return [], False
+    chosen, overflowed = _select_sentences(sentences, limit)
+    started = time.monotonic()
+    out: list[str] = []
+    planes: list[list[float]] | None = None
+    for start in range(0, len(chosen), SEMANTIC_BATCH):
+        if out and time.monotonic() - started > SEMANTIC_MAX_SECONDS:
+            break
+        batch = chosen[start : start + SEMANTIC_BATCH]
+        try:
+            vectors = _valid_vectors(embed(batch), len(batch))
+        except Exception:  # noqa: BLE001
+            return [], False
+        if vectors is None:
+            return [], False
+        # 塊ごとに次元が変わる戻り値は壊れている。別の次元の超平面で作った値を混ぜない。
+        if planes is None:
+            planes = _semantic_planes(key, len(vectors[0]))
+        elif len(planes[0]) != len(vectors[0]):
+            return [], False
+        for bits in _signature_bits(planes, vectors):
+            out.extend(_band_digests(key, bits))
+    return out, overflowed
+
+
+def semantic_band_digests(body: Any, **options: Any) -> list[str]:
+    """本文を文ごとの帯のダイジェストにする。"""
+    return semantic_band_digests_with_overflow(body, **options)[0]
+
+
+def system_prompt_semantic_digests(*sources: Any, **named: Any) -> list[str]:
+    """指示の本文を、文ごとの帯のダイジェストにする。入力の受け方は行と組の導出と揃える。
+
+    同じ本文は控えから返す。指示は毎回の呼び出しに同じ本文が載り、埋め込みは時間を使う。
+    控えの名前には鍵のダイジェストと埋め込みの取得先を含め、鍵や取得先を替えたら引き直す。
+    """
+    texts: list[str] = []
+    for source in list(sources) + list(named.values()):
+        texts.extend(_texts_from(source))
+    texts = [t for t in texts if t]
+    if not texts:
+        return []
+    key = semantic_signature_key()
+    embed = _resolve_embedder()
+    if key is None or embed is None:
+        return []
+    joined = "\n".join(texts)
+    cache_key = (
+        hashlib.sha256(key).digest(),
+        id(embed),
+        hashlib.sha256(joined.encode("utf-8")).hexdigest(),
+    )
+    with _SEMANTIC_LOCK:
+        cached = _SEMANTIC_RESULT_CACHE.get(cache_key)
+    if cached is not None:
+        return list(cached)
+    digests = semantic_band_digests(joined, embedder=embed, key=key)
+    with _SEMANTIC_LOCK:
+        if len(_SEMANTIC_RESULT_CACHE) >= _SEMANTIC_RESULT_CACHE_MAX:
+            _SEMANTIC_RESULT_CACHE.clear()
+        _SEMANTIC_RESULT_CACHE[cache_key] = list(digests)
+    return digests

@@ -10,7 +10,6 @@ import os
 from pathlib import Path
 
 import pytest
-
 from senda_argus_hooks import register, shutdown
 from senda_argus_hooks.core.runtime import _process_run_id, emit_event, span_context
 

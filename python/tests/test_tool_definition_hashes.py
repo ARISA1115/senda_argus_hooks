@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import ClassVar
 
 import pytest
-
 from senda_argus_hooks import describe_mcp_session, register, shutdown
 from senda_argus_hooks.core.mcp_tools import (
     MAX_NAME_LEN,

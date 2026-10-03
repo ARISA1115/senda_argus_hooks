@@ -10,6 +10,7 @@ from senda_argus_hooks.core.instruction_files import (
     collect_instruction_sources,
     system_prompt_line_digests,
     system_prompt_pair_digests,
+    system_prompt_semantic_digests,
 )
 from senda_argus_hooks.core.result_scan import result_scan_fields
 from senda_argus_hooks.core.runtime import emit_event, get_config
@@ -56,6 +57,7 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
         # 利用者入力が 1 つの文字列に混ざるため、利用者の入力を指示として扱ってしまう。
         self._prompt_line_hashes: dict[str, list[str]] = {}
         self._prompt_pair_hashes: dict[str, list[str]] = {}
+        self._prompt_semantic_hashes: dict[str, list[str]] = {}
         self._tool_types: dict[str, str] = {}
         self._requested_models: dict[str, str] = {}
 
@@ -88,6 +90,9 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
         pair_hashes = system_prompt_pair_digests(*_sources)
         if pair_hashes:
             _remember(self._prompt_pair_hashes, run_id, pair_hashes)
+        semantic_hashes = system_prompt_semantic_digests(*_sources)
+        if semantic_hashes:
+            _remember(self._prompt_semantic_hashes, run_id, semantic_hashes)
         payload = {"serialized": serialized, "messages": messages, "kwargs": _safe_kwargs(kwargs)}
         emit_event(
             "llm.request.started",
@@ -121,6 +126,9 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
         pair_hashes = self._prompt_pair_hashes.pop(run_id, None)
         if pair_hashes:
             llm_data["system_prompt_pair_hashes"] = pair_hashes
+        semantic_hashes = self._prompt_semantic_hashes.pop(run_id, None)
+        if semantic_hashes:
+            llm_data["system_prompt_semantic_hashes"] = semantic_hashes
         emit_event(
             "llm.request",
             source={"component": "integration", "sdk": self.framework, "operation": "on_llm_end"},
@@ -137,6 +145,7 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
         self._messages_hashes.pop(run_id, None)
         self._prompt_line_hashes.pop(run_id, None)
         self._prompt_pair_hashes.pop(run_id, None)
+        self._prompt_semantic_hashes.pop(run_id, None)
         self._requested_models.pop(run_id, None)
         emit_event(
             "llm.error",

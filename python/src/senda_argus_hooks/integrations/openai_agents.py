@@ -11,6 +11,7 @@ from senda_argus_hooks.core.instruction_files import (
     collect_instruction_sources,
     system_prompt_line_digests,
     system_prompt_pair_digests,
+    system_prompt_semantic_digests,
 )
 from senda_argus_hooks.core.result_scan import result_scan_fields
 from senda_argus_hooks.core.runtime import emit_event, get_config
@@ -256,11 +257,13 @@ def _span_event_data(span: Any, event_type: str) -> dict[str, Any]:
     model = _span_model(span)
     if model:
         llm["model"] = model
-    line_hashes, pair_hashes = _span_instruction_digests(span)
+    line_hashes, pair_hashes, semantic_hashes = _span_instruction_digests(span)
     if line_hashes:
         llm["system_prompt_line_hashes"] = line_hashes
     if pair_hashes:
         llm["system_prompt_pair_hashes"] = pair_hashes
+    if semantic_hashes:
+        llm["system_prompt_semantic_hashes"] = semantic_hashes
     data["llm"] = llm
     return data
 
@@ -337,7 +340,7 @@ def _safe_value(value: Any) -> Any:
     return str(value)
 
 
-def _span_instruction_digests(span: Any) -> tuple[list[str], list[str]]:
+def _span_instruction_digests(span: Any) -> tuple[list[str], list[str], list[str]]:
     """推論区間から、指示にあたる本文の行と語の組のダイジェストを取り出す。
 
     指示は区間の内容として渡り、呼び出しの引数には現れない。取り出せない形なら空を返す。
@@ -348,7 +351,7 @@ def _span_instruction_digests(span: Any) -> tuple[list[str], list[str]]:
     """
     try:
         if "llm.request" not in _span_event_type(span, suffix="completed"):
-            return [], []
+            return [], [], []
         value = _safe_value(span)
         holder = _span_data_of(span)
         sources = collect_instruction_sources(value if isinstance(value, dict) else None, None, holder)
@@ -359,6 +362,10 @@ def _span_instruction_digests(span: Any) -> tuple[list[str], list[str]]:
             inner = value.get("span_data")
             if isinstance(inner, dict):
                 sources.extend(collect_instruction_sources(inner))
-        return system_prompt_line_digests(*sources), system_prompt_pair_digests(*sources)
+        return (
+            system_prompt_line_digests(*sources),
+            system_prompt_pair_digests(*sources),
+            system_prompt_semantic_digests(*sources),
+        )
     except Exception:  # noqa: BLE001
-        return [], []
+        return [], [], []

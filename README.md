@@ -195,11 +195,14 @@ SENDA_ARGUS_CAPTURE_RESPONSE=false
 SENDA_ARGUS_CAPTURE_ARGUMENTS=false
 SENDA_ARGUS_CAPTURE_RESULT=false
 SENDA_ARGUS_SCAN_RESULT=true
+SENDA_ARGUS_SCAN_INPUT=true
 SENDA_ARGUS_CAPTURE_HASH=true
 SENDA_ARGUS_REDACT=true
 ```
 
 `SENDA_ARGUS_SCAN_RESULT` is separate from result capture. It sends a redacted scan text of each MCP and generic tool result, capped at 32768 characters with the head and tail kept, so that Argus can detect instructions embedded in tool results. Argus uses it for detection only and does not store it. Set it to `false` to stop sending it; Argus then cannot detect instructions in tool results on the agent-run path.
+
+`SENDA_ARGUS_SCAN_INPUT` does the same for the user side of a voice session: the transcript of each utterance is sent as a redacted scan text with the same cap, so that instructions spoken into the room reach the injection rules. Raw audio is never sent. Argus uses it for detection only and does not store it.
 
 `SENDA_ARGUS_RUN_ENVIRONMENT` tags every event with the environment the agent runs in. Only `production`, `staging`, `test`, and `evaluation` are sent; other values are dropped. Argus alerts when a run tagged `test` or `evaluation` calls an external host. The tag comes only from this setting, never from the event body.
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-import senda_argus_hooks.config as config
+from senda_argus_hooks import config
 
 
 def test_load_config_does_not_override_process_env(tmp_path: Path, monkeypatch):

@@ -17,6 +17,7 @@ from senda_argus_hooks.instrumentors import (
     MCPPythonInstrumentor,
     OllamaInstrumentor,
     OpenAIInstrumentor,
+    OpenAIRealtimeInstrumentor,
     VertexAIInstrumentor,
 )
 from senda_argus_hooks.integrations.openai_agents import OpenAIAgentsInstrumentor
@@ -40,12 +41,14 @@ def register(
     instrument_mcp: bool = True,
     instrument_argus_sdk: bool = True,
     instrument_openai_agents: bool = True,
+    instrument_openai_realtime: bool = True,
     rag: dict[str, Any] | None = None,
     capture_prompt: bool = False,
     capture_response: bool = False,
     capture_arguments: bool = False,
     capture_result: bool = False,
     scan_result: bool = True,
+    scan_input: bool = True,
     capture_hash: bool = True,
     redact: bool = True,
     actor: dict[str, Any] | None = None,
@@ -75,6 +78,7 @@ def register(
         capture_arguments=capture_arguments,
         capture_result=capture_result,
         scan_result=scan_result,
+        scan_input=scan_input,
         capture_hash=capture_hash,
         redact=redact,
         actor=actor or {},
@@ -111,6 +115,8 @@ def register(
             installed["argus_sdk"] = _activate(ArgusSDKInstrumentor())
         if instrument_openai_agents:
             installed["openai_agents"] = _activate(OpenAIAgentsInstrumentor())
+        if instrument_openai_realtime:
+            installed["openai_realtime"] = _activate(OpenAIRealtimeInstrumentor())
 
     rag_handle = None
     if rag:

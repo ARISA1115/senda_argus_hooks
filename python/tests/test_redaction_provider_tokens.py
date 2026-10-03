@@ -6,7 +6,6 @@
 """
 
 import pytest
-
 from senda_argus_hooks.core.redaction import redact_event, redact_value
 
 REDACTED = "***REDACTED***"

@@ -58,6 +58,7 @@ The verified event included `source.sdk = "ollama"`, `source.operation = "Client
 | Ollama Python SDK              | Experimental       | SDK method hook / monkey patch | Fake SDK hook test             | `llm.request`, `llm.error`                                                   |
 | MCP Python SDK                 | Experimental       | Client/session hook            | Fake `ClientSession` hook test | `mcp.tool_call.requested`, `mcp.tool_call.completed`, `mcp.tool_call.failed` |
 | OpenAI Agents SDK | Experimental | Runner hook / trace processor helper | Real SDK import/patch smoke test; invalid API key error-path test | `agent.run.*`, `agent.step.*`, `tool_call.*`, `llm.*` |
+| OpenAI Realtime voice session | Experimental | Connection send/receive hook for the OpenAI SDK and the Agents SDK realtime model | Recorded event replay; real SDK class patch check | `llm.request`, `tool_call.*`, `agent.decision`, `mcp.tool_call.completed` |
 | LangChain | Experimental | Callback handler | Real `CallbackManager` smoke test | `llm.*`, `tool_call.*`, `agent.step.*`, `agent.decision` |
 | LangGraph | Experimental | Stream wrapper / event stream integration | Real `StateGraph` stream smoke test | `agent.run.*`, `agent.step.*` |
 | LlamaIndex / RAG | Experimental | `register(..., rag={...})` / `instrument_rag()` / wrapper helpers | Fake component tests; `register(..., rag={...})` smoke test | `retrieval.*`, `embedding.*`, `rag.query.*` |
@@ -786,6 +787,35 @@ For callback-style usage, the package also provides:
 from senda_argus_hooks.integrations import SendaArgusLlamaIndexCallbackHandler
 ```
 
+### OpenAI Realtime voice sessions
+
+`register(auto_instrument=True)` wraps the realtime connection of the OpenAI SDK, both `openai.resources.realtime.realtime` and the older `openai.resources.beta.realtime.realtime`, and the realtime model of the OpenAI Agents SDK. Disable it with `instrument_openai_realtime=False` or `SENDA_ARGUS_INSTRUMENT_OPENAI_REALTIME=false`. The session is mapped onto existing events, so the current Argus rules apply without new event types:
+
+| Session event | Emitted event |
+| --- | --- |
+| `session.update` instructions and persona | `llm.request` with instruction digests |
+| `response.create` instructions, a per-response override | `llm.request` with instruction digests |
+| `conversation.item.create` or `response.create` input with a system message | `llm.request` with instruction digests |
+| `conversation.item.input_audio_transcription.completed` | `llm.request` with the transcript in the input field and a redacted `input_scan` |
+| `response.function_call_arguments.done` | `tool_call.requested` and `agent.decision` |
+| `conversation.item.create` with `function_call_output` | `tool_call.completed` |
+| provider-run `mcp_call` item | `mcp.tool_call.completed` |
+| Agents SDK handoff | `agent.decision` with `decision_kind: handoff` |
+
+Each confirmed utterance starts a turn, and the tool calls that follow share its `turn_id`. One session is one `run_id`. Raw audio from `input_audio_buffer.append` and `response.output_audio.delta` is never read into an event.
+
+When the session does not enable transcription, a local transcriber can be plugged in. It runs inside the process and does not connect out:
+
+```python
+from senda_argus_hooks.core.local_transcription import faster_whisper_transcriber
+from senda_argus_hooks.instrumentors.openai_realtime import set_local_transcriber
+
+# The directory must exist locally. A model name is refused, so nothing is downloaded.
+set_local_transcriber(faster_whisper_transcriber("/models/whisper-small-ct2", weights_sha256="sha256:..."))
+```
+
+`faster-whisper` is an optional dependency, installed with the `voice-local` extra.
+
 ## Exporters
 
 ### JSONL exporter
@@ -854,6 +884,7 @@ Common controls:
 | `capture_arguments` | Capture MCP, generic tool, retrieval query, and embedding input payloads |
 | `capture_result`    | Capture MCP, generic tool, retrieval result, and RAG query results |
 | `scan_result`       | On by default. Send a redacted scan text of MCP and generic tool results for detection only. Argus does not store it. Env `SENDA_ARGUS_SCAN_RESULT` |
+| `scan_input`        | On by default. Send a redacted scan text of voice session transcripts for detection only. Raw audio is never sent. Argus does not store it. Env `SENDA_ARGUS_SCAN_INPUT` |
 | `redact`            | Apply redaction to configured sensitive values        |
 | `run_environment`   | `production`, `staging`, `test`, or `evaluation`. Sent at the top level of every event. Other values are dropped. Env `SENDA_ARGUS_RUN_ENVIRONMENT` |
 
@@ -1033,6 +1064,33 @@ find . -maxdepth 1 -name "*.egg-info" -exec rm -rf {} +
 python -m build
 python -m twine check dist/*
 ```
+
+## Devin sessions and audit logs
+
+Devin runs in a cloud VM, so hooks cannot be installed there. `senda-argus devin-collect` pulls
+sessions, the messages users sent to them, and (optionally) organization audit logs through the
+Devin API v3 and sends them to Argus `/v1/agent-runs/ingest`.
+
+```bash
+export DEVIN_API_KEY=...            # service user key with ViewOrgSessions
+export DEVIN_ORG_ID=org-...
+export SENDA_ARGUS_ENDPOINT=https://argus.example.com
+export SENDA_ARGUS_API_KEY=...      # collector key bound to devin:<org>
+# export SENDA_ARGUS_DEVIN_AUDIT_LOGS=1   # needs ViewAccountAuditLogs (enterprise)
+senda-argus devin-collect --interval 60
+```
+
+- A session start becomes `agent.run.started`, its end `agent.run.completed` or `agent.run.failed`.
+  `run_id` is the Devin session id. The end event carries `exclusive_windows`, the time ranges in
+  which no other session of the organization was running. Argus attaches relay calls of the same
+  organization to the session only inside these ranges.
+- A message a user sent to a session becomes `llm.request` with the same instruction digests as the
+  other instrumentors. The text is sent only with `SENDA_ARGUS_CAPTURE_PROMPT=1`, after redaction.
+- An audit log record becomes `agent.step.completed` in the run `devin-audit:<org>:<date>`. MCP server
+  configuration records carry `configured_mcp_server`, which Argus lists as unobserved.
+- Event ids are derived from Devin ids, and the pull position advances only after Argus accepted the
+  batch, so the same session or record is not sent twice.
+- The API key is read from the environment and is not written to events or state.
 
 ## Test coverage
 

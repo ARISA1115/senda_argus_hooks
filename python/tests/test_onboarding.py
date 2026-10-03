@@ -7,7 +7,6 @@ import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
-
 from senda_argus_hooks import onboarding
 
 

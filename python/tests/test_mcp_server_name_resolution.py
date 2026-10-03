@@ -13,7 +13,6 @@ import types
 from pathlib import Path
 
 import pytest
-
 from senda_argus_hooks import register, shutdown
 from senda_argus_hooks.core.identity import UNNAMED_MCP_SERVER, resolve_mcp_server_name
 

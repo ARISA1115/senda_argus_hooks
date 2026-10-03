@@ -12,6 +12,7 @@ from senda_argus_hooks.core.instruction_files import (
     collect_instruction_sources,
     system_prompt_line_digests,
     system_prompt_pair_digests,
+    system_prompt_semantic_digests,
 )
 from senda_argus_hooks.core.mcp_tools import offered_alternatives
 from senda_argus_hooks.core.model_identity import models_correspond
@@ -87,6 +88,8 @@ class BedrockInstrumentor(BaseInstrumentor):
                 _sources.extend(collect_instruction_sources(_decoded_body(_params)))
                 system_prompt_line_hashes = system_prompt_line_digests(*_sources)
                 system_prompt_pair_hashes = system_prompt_pair_digests(*_sources)
+                # 語の組が作れない日本語だけの指示のための文の署名。埋め込みと鍵が揃うときだけ出る。
+                system_prompt_semantic_hashes = system_prompt_semantic_digests(*_sources)
                 llm_data: dict[str, Any] = {"provider": "bedrock", "operation": operation_name, "model": model, "input": input_payload}
                 if operation_name == "InvokeModel" and isinstance(response, dict):
                     raw = _read_and_rewrap_body(response)
@@ -112,6 +115,8 @@ class BedrockInstrumentor(BaseInstrumentor):
                 # 黙って止まる。2 つは別々の導出で、片方が空でももう片方は成立する。
                 if system_prompt_pair_hashes:
                     llm_data["system_prompt_pair_hashes"] = system_prompt_pair_hashes
+                if system_prompt_semantic_hashes:
+                    llm_data["system_prompt_semantic_hashes"] = system_prompt_semantic_hashes
                 emit_event(
                     "llm.request",
                     source={"component": "instrumentor", "sdk": "bedrock", "provider": "bedrock", "operation": operation_name},

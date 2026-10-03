@@ -122,21 +122,46 @@ def result_scan_fields(value: Any) -> dict[str, Any]:
 
     作成に失敗しても例外を出さず、落としたことを示す印だけを返す。事象は送る。
     """
+    return _scan_fields(value, SCAN_FIELD, TRUNCATED_FIELD, LENGTH_FIELD, FAILED_FIELD)
+
+
+# 推論へ渡った入力の走査の文を載せる項目の名前。音声のセッションの発話の文字起こしがここへ載る。
+# 戻り値の走査の文と同じく、Argus は保存せず判定の後に捨てる。
+INPUT_SCAN_FIELD = "input_scan"
+INPUT_TRUNCATED_FIELD = "input_scan_truncated"
+INPUT_LENGTH_FIELD = "input_scan_length"
+INPUT_FAILED_FIELD = "input_scan_failed"
+
+
+def input_scan_fields(value: Any) -> dict[str, Any]:
+    """推論の入力から、走査の文と印を作る。秘匿と上限は戻り値の走査の文と同じ実装を通す。
+
+    導出を 2 つ持たない。入力の側だけ別に書くと、秘匿か上限の片方だけが変わったときに、
+    文字起こしだけ秘密が通るか、長い前置きの後ろの指示が落ちる。
+    """
+    return _scan_fields(
+        value, INPUT_SCAN_FIELD, INPUT_TRUNCATED_FIELD, INPUT_LENGTH_FIELD, INPUT_FAILED_FIELD
+    )
+
+
+def _scan_fields(
+    value: Any, scan_field: str, truncated_field: str, length_field: str, failed_field: str
+) -> dict[str, Any]:
     try:
         parts, cut = _collect(value)
         parts = [p for p in parts if p.strip()]
         if not parts:
-            return {TRUNCATED_FIELD: True} if cut else {}
+            return {truncated_field: True} if cut else {}
         text = " ".join(parts)
         out: dict[str, Any] = {}
         if len(text) > RESULT_SCAN_MAX_CHARS:
-            out[TRUNCATED_FIELD] = True
-            out[LENGTH_FIELD] = len(text)
+            out[truncated_field] = True
+            out[length_field] = len(text)
             keep = (RESULT_SCAN_MAX_CHARS - len(RESULT_SCAN_ELISION)) // 2
             text = text[:keep] + RESULT_SCAN_ELISION + text[-keep:]
         elif cut:
-            out[TRUNCATED_FIELD] = True
-        out[SCAN_FIELD] = text
+            out[truncated_field] = True
+        out[scan_field] = text
         return out
-    except Exception:
-        return {FAILED_FIELD: True}
+    except Exception:  # noqa: BLE001
+        return {failed_field: True}

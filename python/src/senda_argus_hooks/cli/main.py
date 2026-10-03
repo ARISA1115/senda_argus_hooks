@@ -286,6 +286,42 @@ def cmd_autohook_uninstall(args) -> int:
     print_json(uninstall(target=args.target, force=args.force))
     return 0
 
+def cmd_devin_collect(args) -> int:
+    """Devin の API からセッションと監査記録を引き取り、Argus へ送る。"""
+    import os
+    import time
+
+    from senda_argus_hooks.collectors.devin import collector_from_env
+    from senda_argus_hooks.exporters.argus import ArgusExporter
+
+    endpoint = os.environ.get("SENDA_ARGUS_ENDPOINT", "").strip()
+    if not endpoint:
+        raise ValueError("SENDA_ARGUS_ENDPOINT is required")
+    exporter = ArgusExporter(
+        {
+            "endpoint": endpoint,
+            "api_key": os.environ.get("SENDA_ARGUS_API_KEY", ""),
+            "timeout": int(os.environ.get("SENDA_ARGUS_TIMEOUT", "10") or 10),
+        }
+    )
+    collector = collector_from_env(exporter.send_sync)
+    # 0 や負の間隔は待たずに回り続けるため、下限を置く。
+    interval = max(10, int(args.interval))
+    from senda_argus_hooks.collectors.devin import DevinApiError
+
+    while True:
+        try:
+            result = collector.poll_once()
+        except DevinApiError as exc:
+            # 取得位置は進んでいない。次の周期で同じ範囲を引き直す。
+            print(f"error: {exc}", file=sys.stderr, flush=True)
+            result = {"sent": 0, "failed": 1}
+        print(json.dumps(result), flush=True)
+        if args.once:
+            return 0 if not result.get("failed") else 1
+        time.sleep(interval)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="senda-hooks", description="Inspect, validate, and convert Senda-Argus hook event files.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -344,6 +380,14 @@ def build_parser() -> argparse.ArgumentParser:
     autohook_uninstall_p.add_argument("--target", help="Explicit site-packages directory")
     autohook_uninstall_p.add_argument("--force", action="store_true")
     autohook_uninstall_p.set_defaults(func=cmd_autohook_uninstall)
+
+    devin_p = sub.add_parser(
+        "devin-collect",
+        help="Pull Devin sessions and audit logs through the Devin API and send them to Argus",
+    )
+    devin_p.add_argument("--once", action="store_true", help="Pull once and exit")
+    devin_p.add_argument("--interval", type=int, default=60, help="Seconds between pulls")
+    devin_p.set_defaults(func=cmd_devin_collect)
 
     return parser
 
