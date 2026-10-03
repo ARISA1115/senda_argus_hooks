@@ -25,6 +25,18 @@ UNNAMED_MCP_SERVER = "unknown"
 # セッションへ控える属性。明示の名前が無いときにだけ使う。
 SERVER_INFO_NAME_ATTR = "_senda_argus_server_info_name"
 
+# 利用者が describe_mcp_session で明示したサーバの URL を控える属性。SDK のセッションは URL を持たない。
+SERVER_URL_ATTR = "_senda_argus_server_url"
+
+
+def resolve_mcp_server_url(obj: Any) -> Any:
+    """MCP クライアントのオブジェクトからサーバの URL を読む。明示の値を先に読む。"""
+    for attr in (SERVER_URL_ATTR, "url", "base_url", "server_url"):
+        value = getattr(obj, attr, None)
+        if value:
+            return value
+    return None
+
 
 def resolve_mcp_server_name(obj: Any) -> Any:
     """MCP クライアントのオブジェクトからサーバ名を読む。

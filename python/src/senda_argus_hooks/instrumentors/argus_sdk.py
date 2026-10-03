@@ -14,6 +14,7 @@ from senda_argus_hooks.core.identity import (
     mcp_data_source_profile,
     normalize_url,
     resolve_mcp_server_name,
+    resolve_mcp_server_url,
 )
 from senda_argus_hooks.core.instruction_files import (
     classify_instruction_write,
@@ -165,7 +166,7 @@ class ArgusSDKInstrumentor(BaseInstrumentor):
             arguments = args[1] if len(args) > 1 else kwargs.get("arguments") or {}
             capability = kwargs.get("capability")
             server = resolve_mcp_server_name(obj)
-            server_url = getattr(obj, "url", None) or getattr(obj, "base_url", None) or getattr(obj, "server_url", None)
+            server_url = resolve_mcp_server_url(obj)
             purpose_profile = mcp_data_source_profile(mcp_server_name=server, mcp_server_url=server_url, tool_name=tool, capability=capability)
             purpose_id = derive_purpose_id(mcp_server_name=server, mcp_server_url=server_url, tool_name=tool, capability=capability)
             mcp_profile_id = derive_mcp_profile_id(mcp_server_name=server, mcp_server_url=server_url, tools=list(getattr(obj, "tools", {}).keys()) if hasattr(obj, "tools") else [])
