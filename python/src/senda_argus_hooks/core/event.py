@@ -36,6 +36,7 @@ class Event:
     latency_ms: int | None = None
     error: dict[str, Any] | None = None
     runtime: dict[str, Any] = field(default_factory=dict)
+    run_environment: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -63,6 +64,7 @@ def new_event(
     agent_id: str | None = None,
     purpose_id: str | None = None,
     runtime: dict[str, Any] | None = None,
+    run_environment: str | None = None,
 ) -> Event:
     return Event(
         schema_version="0.2",
@@ -89,4 +91,5 @@ def new_event(
         latency_ms=latency_ms,
         error=error,
         runtime=runtime or {},
+        run_environment=run_environment,
     )

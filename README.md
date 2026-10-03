@@ -201,6 +201,10 @@ SENDA_ARGUS_REDACT=true
 
 `SENDA_ARGUS_SCAN_RESULT` is separate from result capture. It sends a redacted scan text of each MCP and generic tool result, capped at 32768 characters with the head and tail kept, so that Argus can detect instructions embedded in tool results. Argus uses it for detection only and does not store it. Set it to `false` to stop sending it; Argus then cannot detect instructions in tool results on the agent-run path.
 
+`SENDA_ARGUS_RUN_ENVIRONMENT` tags every event with the environment the agent runs in. Only `production`, `staging`, `test`, and `evaluation` are sent; other values are dropped. Argus alerts when a run tagged `test` or `evaluation` calls an external host. The tag comes only from this setting, never from the event body.
+
+MCP tool calls always carry `egress_hosts` and `monitor_targets`, even when arguments are not captured. They hold only normalized host names and the names of monitoring components a call would rewrite, never the argument body. When an MCP server lists a tool with `readOnlyHint`, a body-less call to that tool is sent as a read of the resource it names.
+
 Exported events, Workflow traces, and Runtime logs are security-sensitive data. Do not commit credentials or sensitive outputs to Git.
 
 ## Documentation
