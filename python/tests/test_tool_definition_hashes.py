@@ -113,6 +113,22 @@ def test_list_tools_event_carries_hashes_and_the_described_url(tmp_path, monkeyp
     assert mcp["server"] == "orders"
 
 
+def test_list_tools_url_drops_credentials_and_takes_the_provider_form(tmp_path, monkeypatch):
+    """URL の資格情報は送らない。既定のポートと区切りの違いも、Argus の取得と同じ鍵へ畳む。"""
+    userinfo = "user" + ":" + "pw" + "@"
+    mcp = _list_once(
+        tmp_path,
+        monkeypatch,
+        lambda: describe_mcp_session(
+            _RealShapedClientSession(),
+            server_url=f"https://{userinfo}MCP.EXAMPLE.com:443/a/../mcp/./",
+            server_name="orders",
+        ),
+    )
+    assert mcp["server_url"] == "https://mcp.example.com/mcp"
+    assert "pw" not in json.dumps(mcp)
+
+
 def test_without_a_described_url_no_url_is_sent(tmp_path, monkeypatch):
     """実物の形のセッションは URL を持たない。明示が無ければ推測した URL を載せない。"""
     mcp = _list_once(tmp_path, monkeypatch, _RealShapedClientSession)

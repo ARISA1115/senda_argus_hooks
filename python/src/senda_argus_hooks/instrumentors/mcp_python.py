@@ -24,7 +24,10 @@ from senda_argus_hooks.core.resource_access import (
     classify_resource_access,
 )
 from senda_argus_hooks.core.runtime import emit_event, get_config
-from senda_argus_hooks.core.tool_definitions import tool_definition_hashes
+from senda_argus_hooks.core.tool_definitions import (
+    normalize_provider_url,
+    tool_definition_hashes,
+)
 
 from .base import BaseInstrumentor, audit_guard
 
@@ -128,6 +131,9 @@ class MCPPythonInstrumentor(BaseInstrumentor):
                 hashes = tool_definition_hashes(response)
                 if hashes:
                     data["mcp"]["tool_definition_hashes"] = hashes
+                    # 突き合わせの鍵は提供元の正規化で作る。URL に含まれる資格情報を送らず、既定のポートや
+                    # 区切りの違いで Argus の取得と別の鍵にならないようにする。
+                    data["mcp"]["server_url"] = normalize_provider_url(resolve_mcp_server_url(obj))
             emit_event(
                 _completed_event_type(operation),
                 source={"component": "instrumentor", "sdk": "mcp_python", "operation": operation},

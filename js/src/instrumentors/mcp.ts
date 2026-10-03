@@ -4,7 +4,7 @@ import { newTraceId, runWithContext } from "../core/context.js";
 import { dataSourceHash, deriveMcpProfileId, derivePurposeId, mcpDataSourceProfile, normalizeUrl } from "../core/identity.js";
 import { emitEvent, getConfig, observe } from "../runtime.js";
 import { getMcpToolDirectory, toolNamesOf, UNNAMED_MCP_SERVER } from "../core/mcp_tools.js";
-import { toolDefinitionHashes } from "../core/tool_definitions.js";
+import { normalizeProviderUrl, toolDefinitionHashes } from "../core/tool_definitions.js";
 
 const patched = Symbol.for("senda.argus.mcp.patched");
 
@@ -43,7 +43,9 @@ function instrumentListTools(client: any, metadata: McpMetadata): boolean {
       const serverName = resolveMcpServerName(client, metadata);
       const serverUrl = metadata.serverUrl ?? client.serverUrl ?? client.url ?? client.baseUrl ?? null;
       const mcp: Record<string, unknown> = {
-        operation: "list_tools", server: serverName, server_url: normalizeUrl(serverUrl),
+        // 突き合わせの鍵は提供元の正規化で作る。URL に含まれる資格情報を送らず、既定のポートや区切りの違いで
+        // Argus の取得と別の鍵にならないようにする。
+        operation: "list_tools", server: serverName, server_url: normalizeProviderUrl(serverUrl),
         mcp_profile_id: deriveMcpProfileId(serverName, serverUrl), tool_definition_hashes: hashes
       };
       emitEvent("mcp.list_tools.completed", { source: { component: "instrumentor", sdk: "mcp_js", operation: "listTools" }, data: { mcp }, status: "success", latencyMs: Math.round(performance.now() - started) });

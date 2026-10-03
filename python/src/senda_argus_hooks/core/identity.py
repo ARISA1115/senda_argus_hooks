@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import socket
 import sys
 from typing import Any
@@ -60,11 +61,12 @@ def normalize_url(url: str | None) -> str | None:
     try:
         parts = urlsplit(raw)
         scheme = parts.scheme.lower()
-        netloc = parts.netloc.lower()
+        # URL に埋め込まれた資格情報は記録にも識別子の材料にも載せない
+        netloc = parts.netloc.rpartition("@")[2].lower()
         path = parts.path.rstrip("/") or "/"
         return urlunsplit((scheme, netloc, path, "", ""))
     except Exception:  # noqa: BLE001 - 観測の失敗で計装対象の呼び出しを止めない
-        return raw.lower().rstrip("/")
+        return re.sub(r"(?<=://)[^/?#]*@", "", raw).lower().rstrip("/")
 
 
 def _clean(value: Any) -> Any:

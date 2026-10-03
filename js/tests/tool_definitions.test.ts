@@ -58,6 +58,26 @@ test("listTools emits the definition hashes with the server url", async () => {
   assert.equal(mcp.server_url, "https://mcp.example.com/mcp");
 });
 
+test("listTools drops credentials from the url and emits the provider form", async () => {
+  const sink = new MemoryExporter();
+  const userinfo = "user" + ":" + "pw" + "@";
+  const client = {
+    callTool: async () => ({}),
+    listTools: async () => ({ tools: [fixture.cases[0].tool] })
+  };
+  register({ project: "definitions-creds", exporters: [sink] }, { mcp: client, mcpMetadata: { serverName: "demo", serverUrl: `https://${userinfo}MCP.EXAMPLE.com:443/a/../mcp/./` } });
+  try {
+    await client.listTools();
+  } finally {
+    await shutdown();
+  }
+  const listed = sink.events.filter((e) => e.event_type === "mcp.list_tools.completed");
+  assert.equal(listed.length, 1);
+  const mcp = (listed[0].data as any).mcp;
+  assert.equal(mcp.server_url, "https://mcp.example.com/mcp");
+  assert.ok(!JSON.stringify(mcp).includes("pw"));
+});
+
 test("an empty listing emits nothing", async () => {
   const sink = new MemoryExporter();
   const client = { callTool: async () => ({}), listTools: async () => ({ tools: [] }) };
