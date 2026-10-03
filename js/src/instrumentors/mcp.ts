@@ -5,6 +5,7 @@ import { dataSourceHash, deriveMcpProfileId, derivePurposeId, mcpDataSourceProfi
 import { emitEvent, getConfig, observe } from "../runtime.js";
 import { getMcpToolDirectory, toolNamesOf, UNNAMED_MCP_SERVER } from "../core/mcp_tools.js";
 import { normalizeProviderUrl, toolDefinitionHashes } from "../core/tool_definitions.js";
+import { resultScanFields } from "../core/result_scan.js";
 
 const patched = Symbol.for("senda.argus.mcp.patched");
 
@@ -90,6 +91,13 @@ export function instrumentMCP(client: any, metadata: McpMetadata = {}): boolean 
       observe(() => {
         const completed = { ...meta, result_hash: sha256Value(result) } as Record<string, unknown>;
         if (cfg.captureResult) completed.result = result;
+        // 結果の本文を送らない設定でも、エラーの印だけは常に送る。判別できない形なら載せない。
+        const isError = toolResultIsError(result);
+        if (isError !== undefined) completed.is_error = isError;
+        // 本文を送らない既定でも、戻り値に埋め込まれた指示が注入の規則に届くようにする。
+        if (cfg.scanResult) {
+          Object.assign(completed, resultScanFields(result));
+        }
         emitEvent("mcp.tool_call.completed", { source: { component: "instrumentor", sdk: "mcp_js", operation: "callTool" }, data: { mcp: completed }, status: "success", latencyMs: Math.round(performance.now() - started), purposeId });
       });
       return result;
@@ -98,4 +106,14 @@ export function instrumentMCP(client: any, metadata: McpMetadata = {}): boolean 
   wrapped[patched] = true;
   client.callTool = wrapped;
   return true;
+}
+
+/** 結果のエラーの印を返す。判別できない形なら undefined を返し、成功へ倒さない。 */
+export function toolResultIsError(result: unknown): boolean | undefined {
+  if (result === null || typeof result !== "object") return undefined;
+  for (const key of ["isError", "is_error"]) {
+    const value = (result as Record<string, unknown>)[key];
+    if (typeof value === "boolean") return value;
+  }
+  return undefined;
 }

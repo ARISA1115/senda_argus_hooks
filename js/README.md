@@ -47,6 +47,7 @@ register({
   captureResponse: false,
   captureArguments: true,
   captureResult: false,
+  scanResult: true, // detection-only scan text of tool results; Argus does not store it
   redact: true
 }, {
   openai,

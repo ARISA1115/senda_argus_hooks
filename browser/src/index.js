@@ -113,6 +113,60 @@ function sanitize(value, redactFields, ancestors = new WeakSet(), depth = 0) {
   return redactFields && typeof value === "string" ? redactString(value) : value;
 }
 
+// tool の戻り値から、検知の走査だけに使う文を作る。値は Python と Node の計装と揃える。
+// 秘匿は平坦にする前に当て、上限を超えた文は先頭と末尾を残して中央を落とす。先頭だけを残すと、
+// 長い前置きの後ろへ指示を置くだけで走査から外せる。Argus の走査も辞書の鍵を読むため鍵も残す。
+const RESULT_SCAN_MAX_CHARS = 32768;
+const RESULT_SCAN_ELISION = "\n...\n";
+const RESULT_SCAN_MAX_DEPTH = 32;
+
+function collectScanStrings(value, out, depth, cut) {
+  if (value !== null && typeof value === "object" && depth >= RESULT_SCAN_MAX_DEPTH) { cut.hit = true; return; }
+  if (value === "[MaxDepth]" || value === "[Circular]") { cut.hit = true; return; }
+  if (typeof value === "string") {
+    out.push(value);
+  } else if (Array.isArray(value)) {
+    for (const item of value) collectScanStrings(item, out, depth + 1, cut);
+  } else if (value && typeof value === "object") {
+    for (const [key, item] of Object.entries(value)) {
+      out.push(key);
+      collectScanStrings(item, out, depth + 1, cut);
+    }
+  }
+}
+
+// 走査の文と印。切り詰めたら印と元の長さを載せる。作成に失敗しても例外を出さず、落としたことを
+// 示す印だけを返す。事象は送る。
+function resultScanFields(value) {
+  try {
+    const parts = [];
+    const cut = {hit: false};
+    collectScanStrings(sanitize(value, true), parts, 0, cut);
+    const kept = parts.filter((part) => part.trim() !== "");
+    if (kept.length === 0) return cut.hit ? {result_scan_truncated: true} : {};
+    let text = kept.join(" ");
+    const out = {};
+    if (text.length > RESULT_SCAN_MAX_CHARS) {
+      out.result_scan_truncated = true;
+      out.result_scan_length = text.length;
+      const keep = Math.floor((RESULT_SCAN_MAX_CHARS - RESULT_SCAN_ELISION.length) / 2);
+      text = text.slice(0, keep) + RESULT_SCAN_ELISION + text.slice(text.length - keep);
+    } else if (cut.hit) {
+      out.result_scan_truncated = true;
+    }
+    out.result_scan = text;
+    return out;
+  } catch {
+    return {result_scan_failed: true};
+  }
+}
+
+// 本文を送らない既定でも、tools/call の戻り値に埋め込まれた指示が注入の規則に届くようにする。
+function attachResultScan(data, method, responsePayload) {
+  if (method !== "tools/call" || !state.config.scanResult) return;
+  Object.assign(data.mcp, resultScanFields(responsePayload));
+}
+
 // 本文から事象を組み立てられなくても、起きたこと自体は本文を空にして残す。
 function sanitizeEvent(event, redactFields) {
   let out;
@@ -148,6 +202,8 @@ function defaultConfig(options = {}) {
     captureResponse: false,
     captureArguments: false,
     captureResult: false,
+    // 戻り値の本文とは別に、検知の走査だけに使う文を送る。Argus は保存せず判定の後に捨てる。
+    scanResult: true,
     captureHash: true,
     redact: true,
     maxBodyBytes: 256000,
@@ -562,9 +618,13 @@ async function instrumentedFetch(input, init = {}) {
     const response = await rawFetch(input, init);
     const latencyMs = Math.round(performance.now() - start);
     let responsePayload = null;
+    // 本文の上限を超えた応答も、走査の文は本文から作る。走査の文は自分の上限で先頭と末尾を残すため、
+    // 本文の上限で落とすと長い応答だけが走査から外れる。
+    let scanSource = null;
 
     try {
       const text = await response.clone().text();
+      scanSource = text;
       if (text.length <= state.config.maxBodyBytes) responsePayload = parseMaybeJson(text) ?? text;
     } catch {}
 
@@ -572,6 +632,7 @@ async function instrumentedFetch(input, init = {}) {
       const data = (await mcpRequestData(url, body)).data;
       if (state.config.captureHash) data.mcp.result_hash = await sha256(responsePayload);
       if (state.config.captureResult) data.mcp.result = responsePayload;
+      attachResultScan(data, body?.method, responsePayload ?? scanSource);
       await emit(body?.method === "tools/call" ? "mcp.tool_call.completed" : "mcp.completed", {
         source: {component: "instrumentor", sdk: "browser_fetch", operation: body?.method},
         data,
@@ -671,6 +732,7 @@ function patchXHR() {
           const data = (await mcpRequestData(meta.url, object)).data;
           if (state.config.captureHash) data.mcp.result_hash = await sha256(responsePayload);
           if (state.config.captureResult) data.mcp.result = responsePayload;
+          attachResultScan(data, object?.method, responsePayload);
           await emit(
             object?.method === "tools/call"
               ? (succeeded ? "mcp.tool_call.completed" : "mcp.tool_call.failed")
@@ -837,6 +899,7 @@ function autoRegisterFromScript() {
     captureResponse: bool("captureResponse", false),
     captureArguments: bool("captureArguments", false),
     captureResult: bool("captureResult", false),
+    scanResult: bool("scanResult", true),
     redact: bool("redact", true),
     instrumentFetch: bool("instrumentFetch", true),
     instrumentXHR: bool("instrumentXhr", true),

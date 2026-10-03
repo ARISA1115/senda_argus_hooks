@@ -189,6 +189,7 @@ Raw content is disabled by default.
 | `captureResponse` | `false` | Store raw LLM response payloads |
 | `captureArguments` | `false` | Store MCP arguments and selected request headers |
 | `captureResult` | `false` | Store MCP result payloads |
+| `scanResult` | `true` | Send a redacted scan text of `tools/call` results for detection only. Argus does not store it. Set `data-scan-result="false"` on the script tag to stop it |
 | `captureHash` | `true` | Emit hashes for correlation when raw content is disabled |
 | `redact` | `true` | Redact tokens, credentials, cookies, and known secret fields |
 

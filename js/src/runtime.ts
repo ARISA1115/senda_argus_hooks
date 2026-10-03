@@ -10,7 +10,7 @@ import { ArgusExporter } from "./exporters/argus.js";
 
 let config: RuntimeConfig = {
   project: "default", environment: "dev", capturePrompt: false, captureResponse: false,
-  captureArguments: false, captureResult: false, captureHash: true, redact: true, actor: {}
+  captureArguments: false, captureResult: false, scanResult: true, captureHash: true, redact: true, actor: {}
 };
 let exporters: Exporter[] = [];
 // 収集が動いているか。configure で立て、shutdown で下ろす。canary はこれが立っている間だけ送る。
@@ -64,6 +64,7 @@ export function configure(options: RegisterOptions = {}): void {
     captureResponse: options.captureResponse ?? false,
     captureArguments: options.captureArguments ?? false,
     captureResult: options.captureResult ?? false,
+    scanResult: options.scanResult ?? true,
     captureHash: options.captureHash ?? true,
     redact: options.redact ?? true,
     actor: options.actor ?? {},

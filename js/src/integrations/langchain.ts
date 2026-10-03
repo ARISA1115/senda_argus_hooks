@@ -3,6 +3,7 @@ import { sha256Value } from "../core/hashing.js";
 import { newTraceId, runWithContext } from "../core/context.js";
 import { emitEvent, getConfig } from "../runtime.js";
 import { safeValue } from "../instrumentors/common.js";
+import { resultScanFields } from "../core/result_scan.js";
 
 const starts = new Map<string, number>();
 const traces = new Map<string, string>();
@@ -36,6 +37,15 @@ function finish(runId?: unknown): { traceId: string; latencyMs?: number } {
 
 function maybeBody(value: unknown, capture: boolean) {
   return capture ? safeValue(value) : { hash: sha256Value(safeValue(value)) };
+}
+
+// 本文を送らない既定でも、戻り値に埋め込まれた指示が注入の規則に届くよう、走査の文を添える。
+function toolResult(output: unknown): Record<string, unknown> {
+  const tool: Record<string, unknown> = { framework: "langchain", result: maybeBody(output, getConfig().captureResult) };
+  if (getConfig().scanResult) {
+    Object.assign(tool, resultScanFields(safeValue(output)));
+  }
+  return tool;
 }
 
 export class SendaArgusLangChainCallbackHandler {
@@ -85,7 +95,7 @@ export class SendaArgusLangChainCallbackHandler {
     const lifecycle = finish(runId);
     return runWithContext({ traceId: lifecycle.traceId, runId: key(runId) || undefined }, () => emitEvent("tool_call.completed", {
       source: { component: "integration", framework: "langchain", sdk: "langchain", operation: "tool" },
-      data: { tool: { framework: "langchain", result: maybeBody(output, getConfig().captureResult) } },
+      data: { tool: toolResult(output) },
       status: "success", latencyMs: lifecycle.latencyMs
     }));
   }

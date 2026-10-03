@@ -6,6 +6,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from senda_argus_hooks.core.tool_result import tool_result_is_error
 from senda_argus_hooks.core.hashing import sha256_value
 from senda_argus_hooks.core.identity import (
     data_source_hash,
@@ -27,6 +28,7 @@ from senda_argus_hooks.core.purpose_registry import (
     register_mcp_tool_source,
     selected_tool_purpose,
 )
+from senda_argus_hooks.core.result_scan import result_scan_fields
 from senda_argus_hooks.core.runtime import emit_event, get_config
 
 from .base import BaseInstrumentor, audit_guard
@@ -229,6 +231,13 @@ class ArgusSDKInstrumentor(BaseInstrumentor):
                 if result_payload is not None:
                     completed_mcp["result"] = result_payload
                 completed_mcp["result_hash"] = sha256_value(raw_result)
+                # 結果の本文を送らない設定でも、エラーの印だけは常に送る。判別できない形なら載せない。
+                is_error = tool_result_is_error(response)
+                if is_error is not None:
+                    completed_mcp["is_error"] = is_error
+                if cfg.scan_result:
+                    # 本文を送らない既定でも、戻り値に埋め込まれた指示が注入の規則に届くようにする。
+                    completed_mcp.update(result_scan_fields(raw_result))
                 emit_event(
                     "mcp.tool_call.completed",
                     source={"component": "instrumentor", "sdk": "senda_argus_hooks.sdk", "operation": operation},

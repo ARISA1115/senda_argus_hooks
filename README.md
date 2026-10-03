@@ -194,9 +194,12 @@ SENDA_ARGUS_CAPTURE_PROMPT=false
 SENDA_ARGUS_CAPTURE_RESPONSE=false
 SENDA_ARGUS_CAPTURE_ARGUMENTS=false
 SENDA_ARGUS_CAPTURE_RESULT=false
+SENDA_ARGUS_SCAN_RESULT=true
 SENDA_ARGUS_CAPTURE_HASH=true
 SENDA_ARGUS_REDACT=true
 ```
+
+`SENDA_ARGUS_SCAN_RESULT` is separate from result capture. It sends a redacted scan text of each MCP and generic tool result, capped at 32768 characters with the head and tail kept, so that Argus can detect instructions embedded in tool results. Argus uses it for detection only and does not store it. Set it to `false` to stop sending it; Argus then cannot detect instructions in tool results on the agent-run path.
 
 Exported events, Workflow traces, and Runtime logs are security-sensitive data. Do not commit credentials or sensitive outputs to Git.
 

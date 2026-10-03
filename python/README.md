@@ -853,6 +853,7 @@ Common controls:
 | `capture_response`  | Capture LLM response payloads when supported          |
 | `capture_arguments` | Capture MCP, generic tool, retrieval query, and embedding input payloads |
 | `capture_result`    | Capture MCP, generic tool, retrieval result, and RAG query results |
+| `scan_result`       | On by default. Send a redacted scan text of MCP and generic tool results for detection only. Argus does not store it. Env `SENDA_ARGUS_SCAN_RESULT` |
 | `redact`            | Apply redaction to configured sensitive values        |
 
 When body capture is disabled, hashes are still useful for correlation without storing raw content.
