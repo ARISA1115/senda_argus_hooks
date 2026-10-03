@@ -61,6 +61,7 @@ def register(
     purpose_id: str | None = None,
     agent_hint: str | None = None,
     batch_size: int = 1,
+    run_environment: str | None = None,
 ) -> dict[str, Any]:
     """Configure Senda-Argus Hooks.
 
@@ -89,6 +90,7 @@ def register(
         agent_id=agent_id,
         purpose_id=purpose_id,
         agent_hint=agent_hint,
+        run_environment=run_environment,
     )
     bus = EventBus(exporters=exporter_instances, batch_size=batch_size)
     configure(cfg, bus)

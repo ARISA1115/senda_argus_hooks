@@ -34,6 +34,8 @@ export interface EventRecord {
   latency_ms: number | null;
   error: Record<string, unknown> | null;
   runtime: Record<string, unknown>;
+  // 実行環境の札。production と staging と test と evaluation に限る。設定に無い値は載せない。
+  run_environment?: string | null;
 }
 
 export interface Exporter {
@@ -51,6 +53,7 @@ export type ExporterConfig =
 export interface RegisterOptions {
   project?: string;
   environment?: string;
+  runEnvironment?: string;
   exporters?: Array<Exporter | ExporterConfig>;
   capturePrompt?: boolean;
   captureResponse?: boolean;
@@ -72,7 +75,8 @@ export interface RegisterOptions {
 }
 
 export interface RuntimeConfig extends Required<Omit<RegisterOptions,
-  "exporters" | "tenantId" | "sessionId" | "conversationId" | "runId" | "turnId" | "agentId" | "purposeId" | "agentHint">> {
+  "exporters" | "tenantId" | "sessionId" | "conversationId" | "runId" | "turnId" | "agentId" | "purposeId" | "agentHint" | "runEnvironment">> {
+  runEnvironment?: string;
   tenantId?: string;
   sessionId?: string;
   conversationId?: string;

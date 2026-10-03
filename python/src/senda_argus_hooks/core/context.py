@@ -32,6 +32,9 @@ class RuntimeConfig:
     agent_id: str | None = None
     purpose_id: str | None = None
     agent_hint: str | None = None
+    # 実行環境の札。production と staging と test と evaluation に限る。受け取り側は試験と評価の札が
+    # 付いた run からの外部への通信を検知する。設定に無い値は載せない。
+    run_environment: str | None = None
 
 
 def new_run_id() -> str:

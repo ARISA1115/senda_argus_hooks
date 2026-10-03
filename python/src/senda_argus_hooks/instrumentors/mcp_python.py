@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 import time
 from collections.abc import Callable
 from typing import Any
@@ -18,7 +19,14 @@ from senda_argus_hooks.core.identity import (
     resolve_mcp_server_url,
 )
 from senda_argus_hooks.core.instruction_files import classify_instruction_write
-from senda_argus_hooks.core.mcp_tools import get_mcp_tool_directory, tool_names_of
+from senda_argus_hooks.core.mcp_tools import (
+    MAX_TOOLS_PER_SERVER,
+    get_mcp_tool_directory,
+    read_only_tool_names_of,
+    tool_names_of,
+)
+from senda_argus_hooks.core.egress_hosts import egress_hosts_with_overflow
+from senda_argus_hooks.core.monitor_targets import monitor_targets
 from senda_argus_hooks.core.resource_access import (
     classify_read_resource,
     classify_resource_access,
@@ -32,6 +40,8 @@ from senda_argus_hooks.core.tool_definitions import (
 from senda_argus_hooks.core.tool_result import tool_result_is_error
 
 from .base import BaseInstrumentor, audit_guard
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class MCPPythonInstrumentor(BaseInstrumentor):
@@ -136,6 +146,9 @@ class MCPPythonInstrumentor(BaseInstrumentor):
             if operation == "list_tools":
                 # 一覧に出たツールをサーバごとに控える。LLM に差し出した候補のサーバはここから引く。
                 get_mcp_tool_directory().record(meta["server"], tool_names_of(response), session=obj)
+                # 読み取りだけと宣言したツールを控える。本文を持たない呼び出しの向きを決めるのに使う。
+                with contextlib.suppress(Exception):
+                    _record_read_only_tools(obj, response, continuation=_is_continuation_page(args, kwargs))
                 # 受け取った定義のダイジェストを載せる。Argus は提供元へ自分で取得した定義と突き合わせ、
                 # 呼び出し元によって定義を変える提供元を捉える。本文は載せない。
                 hashes = tool_definition_hashes(response)
@@ -166,11 +179,62 @@ class MCPPythonInstrumentor(BaseInstrumentor):
 LIST_TOOLS_COMPLETED = "mcp.list_tools.completed"
 
 
+# 資源の直接読み取りの完了。Argus は資源の往復と主体の間の連絡路で、読み取りの側をこの種別で受ける。
+READ_RESOURCE_COMPLETED = "mcp.read_resource.completed"
+
+# 提供元が読み取りだけと宣言したツールの名前を、セッションへ控える属性。
+READ_ONLY_TOOLS_ATTR = "_senda_argus_read_only_tools"
+
+
+def _is_continuation_page(args, kwargs) -> bool:
+    """一覧の取得が続きの頁か。継続位置を渡した取得を続きの頁とする。
+
+    list_tools は継続位置を位置引数、cursor、params.cursor のいずれかで受ける。
+    """
+    cursor = kwargs.get("cursor")
+    if cursor is None and args:
+        first = args[0]
+        cursor = first if isinstance(first, str) else getattr(first, "cursor", None)
+    params = kwargs.get("params")
+    if cursor is None and params is not None:
+        cursor = params.get("cursor") if isinstance(params, dict) else getattr(params, "cursor", None)
+    return cursor is not None
+
+
+def _record_read_only_tools(obj, response, *, continuation: bool) -> None:
+    """読み取りだけと宣言したツールの名前を控える。
+
+    続きの頁は前の頁の控えへ足し、継続位置の無い取得、つまり新しい一覧の始まりでだけ空にする。
+    続きの頁で置き換えると、前の頁で宣言したツールの向きが引けなくなる。続きの頁に読み取りだけと
+    宣言せずに出た名前は控えから外す。
+
+    控えはサーバごとのツールの上限と同じ数で打ち切る。提供元は続きの頁を返すたびに名前を足せる。
+    上限の外の名前は読み取りとして扱わず、向きを載せない。落とした数は記録に残す。
+    """
+    declared = read_only_tool_names_of(response)
+    listed = {n for n in tool_names_of(response) if isinstance(n, str)}
+    known = set(getattr(obj, READ_ONLY_TOOLS_ATTR, None) or ()) if continuation else set()
+    known -= listed - set(declared)
+    dropped = 0
+    for name in declared:
+        if name in known:
+            continue
+        if len(known) >= MAX_TOOLS_PER_SERVER:
+            dropped += 1
+            continue
+        known.add(name)
+    if dropped:
+        _LOGGER.warning("senda_argus_read_only_tools_dropped count=%d", dropped)
+    setattr(obj, READ_ONLY_TOOLS_ATTR, frozenset(known))
+
+
 def _completed_event_type(operation: str) -> str:
     if operation == "call_tool":
         return "mcp.tool_call.completed"
     if operation == "list_tools":
         return LIST_TOOLS_COMPLETED
+    if operation == "read_resource":
+        return READ_RESOURCE_COMPLETED
     return f"mcp.{operation}.completed"
 
 
@@ -249,7 +313,20 @@ def _mcp_metadata(obj, operation: str, args, kwargs) -> dict[str, Any]:
         # 同じ資源への読み取りと書き込みを 1 つの鍵で結び付ける。data_source_hash はツール名を
         # 含むため、同じ資源でも読み取りと書き込みで別の値になり、往復を追う鍵にならない。
         # 名前そのものは載せない。判定に要るのは同一性だけで、名前を運ぶと受け取り側の権威記録に残る。
-        meta.update(classify_resource_access(arguments.get("arguments"), server=resource_scope))
+        read_only = str(tool_name) in (getattr(obj, READ_ONLY_TOOLS_ATTR, None) or ())
+        meta.update(
+            classify_resource_access(arguments.get("arguments"), server=resource_scope, read_only=read_only)
+        )
+        # 宛先と監視の構成要素の区分。引数の本文を送らない設定でも、受け取り側の判定に要る正規化した
+        # 値だけを送る。導出は受け取り側と同じ規則である。
+        hosts, truncated = egress_hosts_with_overflow(arguments.get("arguments"))
+        if hosts:
+            meta["egress_hosts"] = hosts
+        if truncated:
+            meta["egress_hosts_truncated"] = True
+        targets = monitor_targets(arguments.get("arguments"), tool=tool_name)
+        if targets:
+            meta["monitor_targets"] = targets
         # 指示ファイルへの書き込みは、次のエージェントへ払い出しが渡る経路になる。突合に使う
         # ダイジェストだけを載せる。本文は載せない。分類の可否は受け取り側が名前から判定し直すため、
         # ここでの分類は候補の提示にとどまる。

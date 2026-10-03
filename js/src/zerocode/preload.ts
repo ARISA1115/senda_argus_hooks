@@ -149,6 +149,7 @@ if (enabledValue(process.env.SENDA_ARGUS_ENABLED, true)) {
     register({
       project: process.env.SENDA_ARGUS_PROJECT ?? "default",
       environment: process.env.SENDA_ARGUS_ENVIRONMENT ?? "prod",
+      runEnvironment: process.env.SENDA_ARGUS_RUN_ENVIRONMENT,
       exporters: exportersFromEnv(),
       capturePrompt: truthy(process.env.SENDA_ARGUS_CAPTURE_PROMPT),
       captureResponse: truthy(process.env.SENDA_ARGUS_CAPTURE_RESPONSE),

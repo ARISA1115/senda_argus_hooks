@@ -886,6 +886,7 @@ Common controls:
 | `scan_result`       | On by default. Send a redacted scan text of MCP and generic tool results for detection only. Argus does not store it. Env `SENDA_ARGUS_SCAN_RESULT` |
 | `scan_input`        | On by default. Send a redacted scan text of voice session transcripts for detection only. Raw audio is never sent. Argus does not store it. Env `SENDA_ARGUS_SCAN_INPUT` |
 | `redact`            | Apply redaction to configured sensitive values        |
+| `run_environment`   | `production`, `staging`, `test`, or `evaluation`. Sent at the top level of every event. Other values are dropped. Env `SENDA_ARGUS_RUN_ENVIRONMENT` |
 
 When body capture is disabled, hashes are still useful for correlation without storing raw content.
 

@@ -204,6 +204,10 @@ SENDA_ARGUS_REDACT=true
 
 `SENDA_ARGUS_SCAN_INPUT` does the same for the user side of a voice session: the transcript of each utterance is sent as a redacted scan text with the same cap, so that instructions spoken into the room reach the injection rules. Raw audio is never sent. Argus uses it for detection only and does not store it.
 
+`SENDA_ARGUS_RUN_ENVIRONMENT` tags every event with the environment the agent runs in. Only `production`, `staging`, `test`, and `evaluation` are sent; other values are dropped. Argus alerts when a run tagged `test` or `evaluation` calls an external host. The tag comes only from this setting, never from the event body.
+
+MCP tool calls always carry `egress_hosts` and `monitor_targets`, even when arguments are not captured. They hold only normalized host names and the names of monitoring components a call would rewrite, never the argument body. When an MCP server lists a tool with `readOnlyHint`, a body-less call to that tool is sent as a read of the resource it names.
+
 Exported events, Workflow traces, and Runtime logs are security-sensitive data. Do not commit credentials or sensitive outputs to Git.
 
 ## Documentation
