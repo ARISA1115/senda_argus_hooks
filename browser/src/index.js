@@ -120,11 +120,23 @@ const RESULT_SCAN_MAX_CHARS = 32768;
 const RESULT_SCAN_ELISION = "\n...\n";
 const RESULT_SCAN_MAX_DEPTH = 32;
 
+// 文字列の中に書かれた鍵と値の組。構造を解析できない応答でも、鍵名で資格情報と分かる値を伏せる。
+// 鍵の前は語の続きでないこと、引用符は前に逆斜線があってもよい。Python の計装と同じ規則にする。
+function kvPattern(keys) {
+  const alt = [...keys].sort((a, b) => b.length - a.length).map((k) => k.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&")).join("|");
+  return new RegExp(`(^|[^A-Za-z0-9_-])(\\\\?["']?)(${alt})(\\\\?["']?)(\\s*[:=]\\s*)("(?:[^"\\\\]|\\\\.)*"|'(?:[^'\\\\]|\\\\.)*'|[^\\s,;&}\\]]+)`, "gi");
+}
+const SCAN_KV_PATTERN = kvPattern(REDACT_FIELDS);
+
+function redactScanString(value) {
+  return redactString(value).replace(SCAN_KV_PATTERN, (_m, pre, q1, key, q2, sep) => `${pre}${q1}${key}${q2}${sep}"***REDACTED***"`);
+}
+
 function collectScanStrings(value, out, depth, cut) {
   if (value !== null && typeof value === "object" && depth >= RESULT_SCAN_MAX_DEPTH) { cut.hit = true; return; }
   if (value === "[MaxDepth]" || value === "[Circular]") { cut.hit = true; return; }
   if (typeof value === "string") {
-    out.push(value);
+    out.push(redactScanString(value));
   } else if (Array.isArray(value)) {
     for (const item of value) collectScanStrings(item, out, depth + 1, cut);
   } else if (value && typeof value === "object") {
@@ -624,8 +636,11 @@ async function instrumentedFetch(input, init = {}) {
 
     try {
       const text = await response.clone().text();
-      scanSource = text;
-      if (text.length <= state.config.maxBodyBytes) responsePayload = parseMaybeJson(text) ?? text;
+      // 捕捉の上限とは別に、走査には構造を解析した値を渡す。生の文字列を渡すと鍵名の秘匿が効かない。
+      // 解析できない文字列は、走査の文を作るときに文字列の中の鍵と値の組を伏せる。
+      const parsed = parseMaybeJson(text);
+      scanSource = parsed ?? text;
+      if (text.length <= state.config.maxBodyBytes) responsePayload = parsed ?? text;
     } catch {}
 
     if (kind === "mcp") {

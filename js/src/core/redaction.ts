@@ -1,4 +1,4 @@
-const fields = new Set([
+export const REDACT_FIELDS: ReadonlySet<string> = new Set([
   "authorization", "api_key", "apikey", "password", "secret", "token",
   "access_token", "refresh_token", "cookie", "set-cookie", "x-api-key"
 ]);
@@ -25,7 +25,7 @@ export function sanitizeValue(
       if (Array.isArray(value)) return value.map((item) => sanitizeValue(item, redactFields, ancestors, depth + 1));
       const out: Record<string, unknown> = {};
       for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
-        out[key] = redactFields && fields.has(key.toLowerCase())
+        out[key] = redactFields && REDACT_FIELDS.has(key.toLowerCase())
           ? "***REDACTED***"
           : sanitizeValue(item, redactFields, ancestors, depth + 1);
       }

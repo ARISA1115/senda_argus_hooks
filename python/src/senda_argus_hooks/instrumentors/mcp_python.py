@@ -5,7 +5,6 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from senda_argus_hooks.core.tool_result import tool_result_is_error
 from senda_argus_hooks.core.hashing import sha256_value
 from senda_argus_hooks.core.identity import (
     SERVER_INFO_NAME_ATTR,
@@ -24,12 +23,13 @@ from senda_argus_hooks.core.resource_access import (
     classify_read_resource,
     classify_resource_access,
 )
-from senda_argus_hooks.core.result_scan import result_scan_fields
+from senda_argus_hooks.core.result_scan import result_scan_fields, scan_source
 from senda_argus_hooks.core.runtime import emit_event, get_config
 from senda_argus_hooks.core.tool_definitions import (
     normalize_provider_url,
     tool_definition_hashes,
 )
+from senda_argus_hooks.core.tool_result import tool_result_is_error
 
 from .base import BaseInstrumentor, audit_guard
 
@@ -132,7 +132,7 @@ class MCPPythonInstrumentor(BaseInstrumentor):
                     data["mcp"]["is_error"] = is_error
             if operation == "call_tool" and cfg.scan_result:
                 # 本文を送らない既定でも、戻り値に埋め込まれた指示が注入の規則に届くようにする。
-                data["mcp"].update(result_scan_fields(result_payload))
+                data["mcp"].update(result_scan_fields(scan_source(response)))
             if operation == "list_tools":
                 # 一覧に出たツールをサーバごとに控える。LLM に差し出した候補のサーバはここから引く。
                 get_mcp_tool_directory().record(meta["server"], tool_names_of(response), session=obj)

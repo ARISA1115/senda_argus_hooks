@@ -6,7 +6,6 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from senda_argus_hooks.core.tool_result import tool_result_is_error
 from senda_argus_hooks.core.hashing import sha256_value
 from senda_argus_hooks.core.identity import (
     data_source_hash,
@@ -28,8 +27,9 @@ from senda_argus_hooks.core.purpose_registry import (
     register_mcp_tool_source,
     selected_tool_purpose,
 )
-from senda_argus_hooks.core.result_scan import result_scan_fields
+from senda_argus_hooks.core.result_scan import result_scan_fields, scan_source
 from senda_argus_hooks.core.runtime import emit_event, get_config
+from senda_argus_hooks.core.tool_result import tool_result_is_error
 
 from .base import BaseInstrumentor, audit_guard
 
@@ -237,7 +237,7 @@ class ArgusSDKInstrumentor(BaseInstrumentor):
                     completed_mcp["is_error"] = is_error
                 if cfg.scan_result:
                     # 本文を送らない既定でも、戻り値に埋め込まれた指示が注入の規則に届くようにする。
-                    completed_mcp.update(result_scan_fields(raw_result))
+                    completed_mcp.update(result_scan_fields(scan_source(response)))
                 emit_event(
                     "mcp.tool_call.completed",
                     source={"component": "instrumentor", "sdk": "senda_argus_hooks.sdk", "operation": operation},

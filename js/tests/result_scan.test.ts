@@ -85,3 +85,20 @@ test("OpenAI Agents tool span end sends scan text", async () => {
   assert.ok(completed);
   assert.ok(String(completed.data.tool.result_scan).includes(INJECTION));
 });
+
+// 偽の秘密は分割して組み立てる。リテラルのまま置くと秘密の検出に掛かる。
+const SHORT_SECRET = "hun" + "ter" + "2x";
+
+test("key and value pairs inside strings are redacted", () => {
+  for (const text of [
+    `{"password": "${SHORT_SECRET}"}`,
+    `{'Token': '${SHORT_SECRET}'}`,
+    `secret=${SHORT_SECRET}&x=1`,
+    JSON.stringify(JSON.stringify({ api_key: SHORT_SECRET })),
+  ]) {
+    const out = resultScanText(text);
+    assert.ok(out !== undefined);
+    assert.ok(!out.includes(SHORT_SECRET), text);
+  }
+  assert.equal(resultScanText("tokenizer=fast"), "tokenizer=fast");
+});

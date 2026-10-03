@@ -68,7 +68,7 @@ def test_unknown_shape_is_not_reported_as_success():
 
 def _span(name: str, *, error=None):
     return types.SimpleNamespace(
-        type="tool", span_data=types.SimpleNamespace(type="function", name=name), error=error
+        span_data=types.SimpleNamespace(type="function", name=name), error=error
     )
 
 
@@ -97,7 +97,8 @@ def test_openai_agents_failed_tool_span_is_not_a_completion(tmp_path):
 def test_openai_agents_span_without_name_carries_no_tool(tmp_path):
     path = tmp_path / "events.jsonl"
     register(project="t", exporters=[{"type": "jsonl", "path": str(path)}])
-    SendaArgusOpenAIAgentsProcessor().on_span_end(types.SimpleNamespace(type="tool"))
+    SendaArgusOpenAIAgentsProcessor().on_span_end(types.SimpleNamespace(span_data=types.SimpleNamespace(type="function")))
     shutdown()
     (event,) = _events(path)
+    assert event["event_type"] == "tool_call.completed"
     assert "tool" not in event["data"]

@@ -257,8 +257,8 @@ def test_mcp_call_tool_with_deep_result_still_sends_the_event(tmp_path, monkeypa
         deep = _deep(depth)
 
         class Result:
-            def model_dump(self):
-                return deep
+            def model_dump(self, _deep=deep):
+                return _deep
 
         class ClientSession:
             server = "fake_mcp"
@@ -283,16 +283,95 @@ def test_mcp_call_tool_with_deep_result_still_sends_the_event(tmp_path, monkeypa
 def test_openai_agents_tool_span_end_sends_scan_text(tmp_path):
     import types as _types
 
-    from senda_argus_hooks.integrations.openai_agents import SendaArgusOpenAIAgentsProcessor
+    from senda_argus_hooks.integrations.openai_agents import (
+        SendaArgusOpenAIAgentsProcessor,
+    )
 
     path = tmp_path / "events.jsonl"
     register(project="test", exporters=[{"type": "jsonl", "path": str(path)}])
     try:
         processor = SendaArgusOpenAIAgentsProcessor()
         span_data = _types.SimpleNamespace(type="function", output=INJECTION)
-        processor.on_span_end(_types.SimpleNamespace(type="tool", name="lookup", span_data=span_data))
+        processor.on_span_end(_types.SimpleNamespace(name="lookup", span_data=span_data))
     finally:
         shutdown()
     completed = [e for e in _read_events(path) if e["event_type"] == "tool_call.completed"]
     assert len(completed) == 1
     assert INJECTION in completed[0]["data"]["tool"]["result_scan"]
+
+
+# 偽の秘密は分割して組み立てる。リテラルのまま置くと秘密の検出に掛かる。
+_SHORT_SECRET = "hun" + "ter" + "2x"
+
+
+def test_mcp_call_tool_redacts_short_secret_by_key_name(tmp_path, monkeypatch):
+    session_cls = _install_fake_mcp(monkeypatch)
+
+    async def call_tool(self, name, arguments=None, **kwargs):
+        return {"content": [{"type": "text", "text": INJECTION}], "password": _SHORT_SECRET}
+
+    monkeypatch.setattr(session_cls, "call_tool", call_tool)
+    path = tmp_path / "events.jsonl"
+    _register_mcp_only(path, instrument_argus_sdk=False)
+    try:
+        asyncio.run(session_cls().call_tool("lookup", {"q": "x"}))
+    finally:
+        shutdown()
+    (completed,) = [e for e in _read_events(path) if e["event_type"] == "mcp.tool_call.completed"]
+    scan = completed["data"]["mcp"]["result_scan"]
+    assert INJECTION in scan
+    assert _SHORT_SECRET not in scan
+    # 構造のまま走査へ渡したことを見る。文字列にしてから渡すと括弧と引用符が文に残る。
+    assert "{" not in scan
+
+
+class _JsonOnlyResponse:
+    """構造を json の文字列でしか返さない応答。"""
+
+    def __init__(self, payload):
+        self._payload = payload
+
+    def json(self):
+        return json.dumps(self._payload)
+
+
+def test_builtin_mcp_client_redacts_short_secret_by_key_name(tmp_path):
+    path = tmp_path / "events.jsonl"
+    _register_mcp_only(path, instrument_mcp=False)
+    try:
+        mcp = MockMCPClient(
+            {"lookup": lambda query: _JsonOnlyResponse({"text": INJECTION, "api_key": _SHORT_SECRET})},
+            server="mock_mcp",
+        )
+        mcp.call_tool("lookup", {"query": "q"})
+    finally:
+        shutdown()
+    (completed,) = [e for e in _read_events(path) if e["event_type"] == "mcp.tool_call.completed"]
+    scan = completed["data"]["mcp"]["result_scan"]
+    assert INJECTION in scan
+    assert _SHORT_SECRET not in scan
+    # 構造のまま走査へ渡したことを見る。文字列にしてから渡すと括弧と引用符が文に残る。
+    assert "{" not in scan
+
+
+def test_scan_source_keeps_structure_for_dicts_and_models():
+    from senda_argus_hooks.core.result_scan import scan_source
+
+    value = {"password": _SHORT_SECRET}
+    assert scan_source(value) is value
+    model = types.SimpleNamespace(model_dump=lambda: {"token": _SHORT_SECRET})
+    assert scan_source(model) == {"token": _SHORT_SECRET}
+
+
+def test_key_value_pairs_inside_strings_are_redacted():
+    for text in (
+        "{'password': '" + _SHORT_SECRET + "'}",
+        '{"Token": "' + _SHORT_SECRET + '"}',
+        "secret=" + _SHORT_SECRET + "&x=1",
+        json.dumps(json.dumps({"api_key": _SHORT_SECRET})),
+    ):
+        out = result_scan_text(text)
+        assert out is not None
+        assert _SHORT_SECRET not in out, text
+    # 鍵の続きの語は伏せない。
+    assert result_scan_text("tokenizer=fast") == "tokenizer=fast"

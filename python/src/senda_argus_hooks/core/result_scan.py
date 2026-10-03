@@ -17,6 +17,9 @@ Argus は保存せず、判定へ渡した後に捨てる。本文の保存と�
 
 from __future__ import annotations
 
+import contextlib
+import json
+import re
 from typing import Any
 
 from senda_argus_hooks.core.redaction import DEFAULT_REDACT_FIELDS, _redact_str
@@ -35,6 +38,45 @@ FAILED_FIELD = "result_scan_failed"
 
 _REDACTED = "***REDACTED***"
 
+# 文字列の中に書かれた鍵と値の組。構造を解析できない応答や、辞書を文字列にした値でも、鍵名で
+# 資格情報と分かる値を伏せる。鍵の前は語の続きでないこと、引用符は前に逆斜線があってもよい。
+_KEYS = "|".join(re.escape(k) for k in sorted(DEFAULT_REDACT_FIELDS, key=len, reverse=True))
+_KV_PATTERN = re.compile(
+    r"(^|[^A-Za-z0-9_-])(\\?[\"']?)(" + _KEYS + r")(\\?[\"']?)(\s*[:=]\s*)"
+    r"(\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*'|[^\s,;&}\]]+)",
+    re.IGNORECASE,
+)
+
+
+def redact_scan_string(value: str) -> str:
+    """走査の文に入れる文字列から、形式で分かる秘密と、文字列の中の鍵と値の組の値を伏せる。"""
+    return _KV_PATTERN.sub(lambda m: f"{m.group(1)}{m.group(2)}{m.group(3)}{m.group(4)}{m.group(5)}\"{_REDACTED}\"", _redact_str(value))
+
+
+def scan_source(response: Any) -> Any:
+    """走査に渡す値を、鍵名が残る構造のまま取り出す。
+
+    辞書を 1 つの文字列にしてから渡すと、鍵名による秘匿が効かず短い秘密がそのまま送られる。
+    構造を取り出せない値だけを文字列にし、その場合も文字列の中の鍵と値の組を伏せる。
+    """
+    if response is None or isinstance(response, (str, dict, list, tuple)):
+        return response
+    for attr in ("model_dump", "dict", "json"):
+        if hasattr(response, attr):
+            value = None
+            with contextlib.suppress(Exception):
+                value = getattr(response, attr)()
+            if isinstance(value, str):
+                # json の文字列を返す応答は解析して鍵名を取り戻す。解析できなければ文字列のまま渡し、
+                # 文字列の中の鍵と値の組を伏せる。
+                try:
+                    value = json.loads(value)
+                except ValueError:
+                    return value
+            if isinstance(value, (dict, list, tuple, str)):
+                return value
+    return str(response)
+
 
 def _collect(value: Any) -> tuple[list[str], bool]:
     """値の中の文字列を順に集める。辞書は鍵も集める。深さの上限を超えたかも返す。
@@ -47,7 +89,7 @@ def _collect(value: Any) -> tuple[list[str], bool]:
     while stack:
         item, depth = stack.pop()
         if isinstance(item, str):
-            parts.append(_redact_str(item))
+            parts.append(redact_scan_string(item))
             continue
         if not isinstance(item, (dict, list, tuple)):
             continue

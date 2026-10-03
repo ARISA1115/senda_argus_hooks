@@ -313,7 +313,8 @@ def _span_event_type(span: Any, *, suffix: str) -> str:
         or (data.get("type") if isinstance(data, dict) else None)
         or "step"
     ).lower()
-    if "tool" in span_type:
+    # 枠組みの関数の tool は区間の種別が function で出る。JS の統合と同じく tool の呼び出しとして扱う。
+    if "tool" in span_type or "function" in span_type:
         return "tool_call.requested" if suffix == "started" else "tool_call.completed"
     if "handoff" in span_type:
         return f"agent.handoff.{suffix}"

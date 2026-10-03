@@ -1,4 +1,4 @@
-import { redactValue } from "./redaction.js";
+import { REDACT_FIELDS, redactValue } from "./redaction.js";
 
 // tool の戻り値から、検知の走査だけに使う文を作る。
 //
@@ -14,11 +14,23 @@ export const RESULT_SCAN_MAX_CHARS = 32768;
 export const RESULT_SCAN_ELISION = "\n...\n";
 const MAX_DEPTH = 32;
 
+// 文字列の中に書かれた鍵と値の組。構造を解析できない値でも、鍵名で資格情報と分かる値を伏せる。
+// Python とブラウザの計装と同じ規則にする。
+function kvPattern(keys: Iterable<string>): RegExp {
+  const alt = [...keys].sort((a, b) => b.length - a.length).map((k) => k.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&")).join("|");
+  return new RegExp(`(^|[^A-Za-z0-9_-])(\\\\?["']?)(${alt})(\\\\?["']?)(\\s*[:=]\\s*)("(?:[^"\\\\]|\\\\.)*"|'(?:[^'\\\\]|\\\\.)*'|[^\\s,;&}\\]]+)`, "gi");
+}
+const SCAN_KV_PATTERN = kvPattern(REDACT_FIELDS);
+
+function redactScanString(value: string): string {
+  return value.replace(SCAN_KV_PATTERN, (_m, pre, q1, key, q2, sep) => `${pre}${q1}${key}${q2}${sep}"***REDACTED***"`);
+}
+
 function collect(value: unknown, out: string[], depth: number, cut: { hit: boolean }): void {
   if (value !== null && typeof value === "object" && depth >= MAX_DEPTH) { cut.hit = true; return; }
   if (typeof value === "string" && (value === "[MaxDepth]" || value === "[Circular]")) { cut.hit = true; return; }
   if (typeof value === "string") {
-    out.push(value);
+    out.push(redactScanString(value));
   } else if (Array.isArray(value)) {
     for (const item of value) collect(item, out, depth + 1, cut);
   } else if (value && typeof value === "object") {
