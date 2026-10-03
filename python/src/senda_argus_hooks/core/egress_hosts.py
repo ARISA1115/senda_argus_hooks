@@ -80,10 +80,13 @@ def normalize_host(raw: Any) -> str | None:
 
 def _strings(
     value: Any, out: list[tuple[str, str]], key: str, budget: list[int]
-) -> None:
-    """引数を辿り、(引数の名前, 文字列) を集める。辞書の鍵も文字列として扱う。"""
+) -> bool:
+    """引数を辿り、(引数の名前, 文字列) を集める。辞書の鍵も文字列として扱う。
+
+    上限で打ち切ったら False を返す。打ち切った先に宛先が在りうるため、呼び出し側は印を立てる。
+    """
     if budget[0] <= 0:
-        return
+        return False
     if isinstance(value, str):
         budget[0] -= 1
         out.append((key, value))
@@ -91,13 +94,16 @@ def _strings(
         for k, v in value.items():
             if isinstance(k, str):
                 if budget[0] <= 0:
-                    return
+                    return False
                 budget[0] -= 1
                 out.append(("", k))
-            _strings(v, out, k if isinstance(k, str) else "", budget)
+            if not _strings(v, out, k if isinstance(k, str) else "", budget):
+                return False
     elif isinstance(value, (list, tuple)):
         for item in value:
-            _strings(item, out, key, budget)
+            if not _strings(item, out, key, budget):
+                return False
+    return True
 
 
 def hosts_in_text(text: Any) -> list[str]:
@@ -113,11 +119,14 @@ def hosts_in_text(text: Any) -> list[str]:
 
 
 def egress_hosts_with_overflow(arguments: Any) -> tuple[list[str], bool]:
-    """引数に現れるホスト名と、上限に収まらず落とした分があるかを返す。"""
+    """引数に現れるホスト名と、上限に収まらず落とした分があるかを返す。
+
+    走査する文字列の上限で打ち切ったときも落とした分があるとする。打ち切った先の宛先は見ていない。
+    """
     pairs: list[tuple[str, str]] = []
-    _strings(arguments, pairs, "", [MAX_SCANNED_STRINGS])
+    complete = _strings(arguments, pairs, "", [MAX_SCANNED_STRINGS])
     out: list[str] = []
-    overflow = False
+    overflow = not complete
     for key, value in pairs:
         candidates = hosts_in_text(value)
         if key.lower() in HOST_KEYS and not candidates:

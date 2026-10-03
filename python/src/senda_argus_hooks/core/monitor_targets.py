@@ -37,6 +37,8 @@ DETECTION_RULES: Final[str] = "detection_rules"
 TOOL_BASELINE: Final[str] = "tool_baseline"
 NOTIFICATION: Final[str] = "notification"
 OPERATOR: Final[str] = "operator"
+# 走査の上限で照合しきれなかった区分。照合しきれなかった部分に対象が在りうるため、判別不能として扱う。
+UNSCANNED: Final[str] = "unscanned"
 
 CATEGORIES: Final[frozenset[str]] = frozenset(
     {
@@ -47,6 +49,7 @@ CATEGORIES: Final[frozenset[str]] = frozenset(
         TOOL_BASELINE,
         NOTIFICATION,
         OPERATOR,
+        UNSCANNED,
     }
 )
 
@@ -125,6 +128,8 @@ _BODY_KEYS: Final[frozenset[str]] = frozenset(
         "diff",
         "payload",
         "json",
+        "rows",
+        "records",
     }
 )
 
@@ -248,24 +253,40 @@ MAX_STRING_LEN: Final[int] = 65536
 
 
 def _strings(
-    value: Any, out: list[tuple[str, str]], key: str, budget: list[int]
-) -> None:
+    value: Any,
+    out: list[tuple[str, str, bool]],
+    key: str,
+    budgets: dict[bool, list[int]],
+    in_body: bool = False,
+) -> bool:
+    """引数を辿り、(引数の名前, 文字列, 本文の内側か) を集める。
+
+    本文の外で上限に達したら False を返す。本文の内側は別の上限で数え、打ち切っても False に
+    しない。本文は書き込む中身であり、宛先は本文の外の引数が指す。本文の大きさで打ち切りの印を
+    立てると、大きなファイルの書き込みや行の一括の挿入が全部、監視の書き換えに見える。
+    """
+    budget = budgets[in_body]
     if budget[0] <= 0:
-        return
+        return in_body
     if isinstance(value, str):
         budget[0] -= 1
-        out.append((key, value))
+        out.append((key, value, in_body))
     elif isinstance(value, dict):
         for k, v in value.items():
+            child_body = in_body
             if isinstance(k, str):
                 if budget[0] <= 0:
-                    return
+                    return in_body
                 budget[0] -= 1
-                out.append(("", k))
-            _strings(v, out, k if isinstance(k, str) else "", budget)
+                out.append(("", k, in_body))
+                child_body = in_body or k.lower() in _BODY_KEYS
+            if not _strings(v, out, k if isinstance(k, str) else "", budgets, child_body):
+                return False
     elif isinstance(value, (list, tuple)):
         for item in value:
-            _strings(item, out, key, budget)
+            if not _strings(item, out, key, budgets, in_body):
+                return False
+    return True
 
 
 def _clip(text: str) -> str:
@@ -395,34 +416,54 @@ def _command_is_read_only(command: str) -> bool:
     return True
 
 
+def _command_text(value: Any) -> str | None:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (list, tuple)) and all(isinstance(v, str) for v in value):
+        return " ".join(value)
+    return None
+
+
+def _mutation_marks(value: Any, commands: list[Any], budget: list[int]) -> bool:
+    """入れ子を辿り、変更を示す印があるか、上限で打ち切ったら True を返す。命令は commands へ集める。
+
+    対象の探索と同じ深さまで辿る。最上段だけを見ると、入れ子の要求に置いた破壊的な方式や本文が
+    読み取りに見える。
+    """
+    if budget[0] <= 0:
+        return True
+    budget[0] -= 1
+    if isinstance(value, dict):
+        for k, v in value.items():
+            if isinstance(k, str):
+                lowered = k.lower()
+                if lowered in _BODY_KEYS:
+                    return True
+                if lowered in _METHOD_KEYS and (
+                    not isinstance(v, str) or v.strip().upper() not in _READ_METHODS
+                ):
+                    return True
+                if lowered in _COMMAND_KEYS:
+                    commands.append(v)
+            if _mutation_marks(v, commands, budget):
+                return True
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            if _mutation_marks(item, commands, budget):
+                return True
+    return False
+
+
 def _is_read_only(arguments: Any, tool: Any) -> bool:
     """読み取りと言い切れる呼び出しか。言い切れなければ False を返す。"""
-    if isinstance(arguments, dict):
-        keys = {k.lower() for k in arguments if isinstance(k, str)}
-        if keys & _BODY_KEYS:
+    commands: list[Any] = []
+    if _mutation_marks(arguments, commands, [MAX_SCANNED_STRINGS]):
+        return False
+    if commands:
+        texts = [_command_text(value) for value in commands]
+        if any(t is None for t in texts):
             return False
-        for key in _METHOD_KEYS:
-            for k, v in arguments.items():
-                if isinstance(k, str) and k.lower() == key:
-                    if not isinstance(v, str) or v.strip().upper() not in _READ_METHODS:
-                        return False
-        commands = [
-            v
-            for k, v in arguments.items()
-            if isinstance(k, str) and k.lower() in _COMMAND_KEYS
-        ]
-        if commands:
-            texts: list[str] = []
-            for value in commands:
-                if isinstance(value, str):
-                    texts.append(value)
-                elif isinstance(value, (list, tuple)) and all(
-                    isinstance(v, str) for v in value
-                ):
-                    texts.append(" ".join(value))
-                else:
-                    return False
-            return all(_command_is_read_only(t) for t in texts)
+        return all(_command_is_read_only(t) for t in texts if t is not None)
     words = _name_words(tool)
     if words & _WRITE_WORDS:
         return False
@@ -430,15 +471,30 @@ def _is_read_only(arguments: Any, tool: Any) -> bool:
 
 
 def monitor_targets(arguments: Any, *, tool: Any = None) -> list[str]:
-    """呼び出しが書き換える監視の構成要素の区分を返す。該当しないか読むだけなら空を返す。"""
-    pairs: list[tuple[str, str]] = []
-    _strings(arguments, pairs, "", [MAX_SCANNED_STRINGS])
-    if not pairs:
+    """呼び出しが書き換える監視の構成要素の区分を返す。該当しないか読むだけなら空を返す。
+
+    本文の外の引数を走査の上限で打ち切ったか、本文の外の長い文字列の中ほどを照合から外したときは、
+    照合できなかった部分に対象が在りうる。読み取りと言い切れない呼び出しなら UNSCANNED を足す。足さないと、詰め物で
+    対象のパスを上限の外へ押し出すだけで検知を避けられる。読み取りの判定も同じ上限で打ち切るため、
+    打ち切った呼び出しは名前が読み取りでも読み取りと言い切らない。打ち切った先に本文や方式が在りうる。
+    """
+    pairs: list[tuple[str, str, bool]] = []
+    complete = _strings(
+        arguments,
+        pairs,
+        "",
+        {False: [MAX_SCANNED_STRINGS], True: [MAX_SCANNED_STRINGS]},
+    )
+    if not pairs and complete:
         return []
     operator = _operator_paths()
     found: set[str] = set()
-    for _key, value in pairs:
+    for _key, value, in_body in pairs:
+        if len(value) > MAX_STRING_LEN and not in_body:
+            complete = False
         found |= _categories_in(value, operator)
+    if not complete:
+        found.add(UNSCANNED)
     if not found:
         return []
     if _is_read_only(arguments, tool):
