@@ -8,6 +8,8 @@
 
 - セッションの指示とペルソナ ``session.update`` → ``llm.request`` の指示の欄。指示のダイジェストを
   付け、指示ファイルの伝播の判定が読めるようにする
+- 応答ごとの指示の上書き ``response.create`` の ``instructions`` → 同じく ``llm.request`` の指示の欄。
+  その応答だけの文脈 ``response.input`` のシステムの項目も指示として、利用者の項目は発話として写す
 - 発話の文字起こし ``conversation.item.input_audio_transcription.completed`` → ``llm.request`` の
   入力の欄。検知の走査だけに使う文を ``input_scan`` に添え、注入の判定が読めるようにする
 - ツール呼び出し ``response.function_call_arguments.done`` → ``tool_call.requested`` と、提示した
@@ -33,6 +35,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import importlib
 import json
 import threading
 from collections import OrderedDict
@@ -88,9 +91,13 @@ _SERVER_TYPES = (
     "response.output_item.done",
 )
 _SERVER_MARKERS = tuple(t.encode() for t in _SERVER_TYPES)
+# 指示を運ぶクライアントの事象は 3 つある。セッションの指示 ``session.update``、会話へ差し込む
+# システムの項目 ``conversation.item.create``、応答ごとに指示を上書きする ``response.create`` の
+# ``response.instructions`` と、その応答だけの文脈 ``response.input`` である。
 _CLIENT_TYPES = (
     "session.update",
     "conversation.item.create",
+    "response.create",
     "input_audio_buffer.append",
     "input_audio_buffer.clear",
 )
@@ -293,6 +300,8 @@ class RealtimeSessionRecorder:
                 self._on_session_update(payload)
             elif kind == "conversation.item.create":
                 self._on_item_create(payload)
+            elif kind == "response.create":
+                self._on_response_create(payload)
 
     def on_server_raw(self, message: Any) -> None:
         """提供元から届いた解析前の本文を受ける。読む種別の名前が現れなければ解析しない。"""
@@ -450,7 +459,10 @@ class RealtimeSessionRecorder:
         if kind == "function_call_output":
             self._on_function_output(_str(item.get("call_id")), item.get("output"))
             return
-        if kind != "message":
+        self._on_message_item(item, operation="realtime.conversation.item.create")
+
+    def _on_message_item(self, item: dict[str, Any], *, operation: str) -> None:
+        if item.get("type", "message") != "message":
             return
         role = item.get("role")
         texts = _user_texts(item)
@@ -461,7 +473,41 @@ class RealtimeSessionRecorder:
             self._emit_utterance(text, item_id=_str(item.get("id")), origin="text")
         elif role == "system":
             # 会話の途中に差し込まれた指示。セッションの指示と同じ欄へ写す。
-            self._emit_instructions(text, operation="realtime.conversation.item.create")
+            self._emit_instructions(text, operation=operation)
+
+    def _on_response_create(self, payload: dict[str, Any]) -> None:
+        """応答ごとの上書き。``instructions`` はその応答だけセッションの指示を置き換える。
+
+        上書きの指示もセッションの指示と同じく文の署名と監査の事象を出す。出さないと、セッションの
+        指示を変えずに応答ごとの指示で振る舞いを変えられ、指示の伝播の判定は古い指示しか見ない。
+        ``input`` はその応答だけの文脈で、システムの項目は指示として、利用者の項目は発話として扱う。
+        """
+        response = payload.get("response")
+        if not isinstance(response, dict):
+            return
+        operation = "realtime.response.create"
+        instructions = response.get("instructions")
+        if isinstance(instructions, str):
+            self._emit_instructions(instructions, operation=operation, voice=response.get("voice"))
+        items = response.get("input")
+        if not isinstance(items, list):
+            return
+        # 項目ごとに事象を出さず、役割ごとに 1 つへまとめる。項目の数で事象が増えず、数の上限で
+        # 後ろの項目を落とすこともない。
+        system: list[str] = []
+        user: list[str] = []
+        for item in items:
+            if not isinstance(item, dict) or item.get("type", "message") != "message":
+                continue
+            role = item.get("role")
+            if role == "system":
+                system.extend(_user_texts(item))
+            elif role == "user":
+                user.extend(_user_texts(item))
+        if system:
+            self._emit_instructions("\n".join(system), operation=operation)
+        if user:
+            self._emit_utterance("\n".join(user), item_id="", origin="text")
 
     def _emit_utterance(self, transcript: str, *, item_id: str, origin: str, truncated: bool = False) -> None:
         if not transcript.strip():
@@ -705,21 +751,28 @@ class OpenAIRealtimeInstrumentor(BaseInstrumentor):
         return True
 
     def _instrument_openai(self) -> bool:
-        try:
-            from openai.resources.realtime import realtime as rt  # type: ignore
-        except Exception:  # noqa: BLE001 - 任意の SDK の import 失敗は種類を問わず未導入として扱う
-            return False
+        """OpenAI の SDK の接続を包む。接続の置き場所は版で違うため、知っている場所を全部試す。
+
+        1.x の版は ``openai.resources.beta.realtime.realtime`` だけに置く。正式版の Realtime を
+        入れた版は ``openai.resources.realtime.realtime`` にも置き、beta の側も残している。2 つは
+        別の型で、アプリはどちらからでも接続できるため、在るものを全部包む。
+        """
         patched = False
-        sync_conn = getattr(rt, "RealtimeConnection", None)
-        async_conn = getattr(rt, "AsyncRealtimeConnection", None)
-        if sync_conn is not None:
-            patched |= self._patch(sync_conn, "send", _sync_send)
-            patched |= self._patch(sync_conn, "send_raw", _sync_send)
-            patched |= self._patch(sync_conn, "recv_bytes", _sync_recv_bytes)
-        if async_conn is not None:
-            patched |= self._patch(async_conn, "send", _async_send)
-            patched |= self._patch(async_conn, "send_raw", _async_send)
-            patched |= self._patch(async_conn, "recv_bytes", _async_recv_bytes)
+        for module_name in _OPENAI_REALTIME_MODULES:
+            try:
+                rt = importlib.import_module(module_name)
+            except Exception:  # noqa: BLE001, S112 - 任意の SDK の import 失敗は種類を問わず未導入として扱い、次の位置を試す
+                continue
+            sync_conn = getattr(rt, "RealtimeConnection", None)
+            async_conn = getattr(rt, "AsyncRealtimeConnection", None)
+            if sync_conn is not None:
+                patched |= self._patch(sync_conn, "send", _sync_send)
+                patched |= self._patch(sync_conn, "send_raw", _sync_send)
+                patched |= self._patch(sync_conn, "recv_bytes", _sync_recv_bytes)
+            if async_conn is not None:
+                patched |= self._patch(async_conn, "send", _async_send)
+                patched |= self._patch(async_conn, "send_raw", _async_send)
+                patched |= self._patch(async_conn, "recv_bytes", _async_recv_bytes)
         return patched
 
     def _instrument_agents(self) -> bool:
@@ -747,6 +800,11 @@ class OpenAIRealtimeInstrumentor(BaseInstrumentor):
 
 
 _SDK_OPENAI = "openai"
+# OpenAI の SDK のリアルタイムの接続の置き場所。正式版の位置を先に、beta の位置を後に試す。
+_OPENAI_REALTIME_MODULES = (
+    "openai.resources.realtime.realtime",
+    "openai.resources.beta.realtime.realtime",
+)
 _SDK_AGENTS = "openai_agents"
 
 

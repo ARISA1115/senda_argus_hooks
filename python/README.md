@@ -789,11 +789,13 @@ from senda_argus_hooks.integrations import SendaArgusLlamaIndexCallbackHandler
 
 ### OpenAI Realtime voice sessions
 
-`register(auto_instrument=True)` wraps the realtime connection of the OpenAI SDK and the realtime model of the OpenAI Agents SDK. Disable it with `instrument_openai_realtime=False` or `SENDA_ARGUS_INSTRUMENT_OPENAI_REALTIME=false`. The session is mapped onto existing events, so the current Argus rules apply without new event types:
+`register(auto_instrument=True)` wraps the realtime connection of the OpenAI SDK, both `openai.resources.realtime.realtime` and the older `openai.resources.beta.realtime.realtime`, and the realtime model of the OpenAI Agents SDK. Disable it with `instrument_openai_realtime=False` or `SENDA_ARGUS_INSTRUMENT_OPENAI_REALTIME=false`. The session is mapped onto existing events, so the current Argus rules apply without new event types:
 
 | Session event | Emitted event |
 | --- | --- |
 | `session.update` instructions and persona | `llm.request` with instruction digests |
+| `response.create` instructions, a per-response override | `llm.request` with instruction digests |
+| `conversation.item.create` or `response.create` input with a system message | `llm.request` with instruction digests |
 | `conversation.item.input_audio_transcription.completed` | `llm.request` with the transcript in the input field and a redacted `input_scan` |
 | `response.function_call_arguments.done` | `tool_call.requested` and `agent.decision` |
 | `conversation.item.create` with `function_call_output` | `tool_call.completed` |
