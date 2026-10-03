@@ -16,6 +16,7 @@ unknown にし、安全な側へ倒さない。
 from __future__ import annotations
 
 import hashlib
+import io
 import os
 import zipfile
 from typing import Any
@@ -42,11 +43,16 @@ def sniff_format(path: str) -> str:
             head = fh.read(16)
     except OSError:
         return "unknown"
+    return _sniff_head(head, path)
+
+
+def _sniff_head(head: bytes, zip_source: Any) -> str:
+    """先頭の数バイトから形式を決める。zip の中身は zip_source から読む。"""
     if head.startswith(b"GGUF"):
         return "gguf"
     if head.startswith(b"PK\x03\x04"):
         try:
-            with zipfile.ZipFile(path) as zf:
+            with zipfile.ZipFile(zip_source) as zf:
                 names = zf.namelist()
         except (OSError, zipfile.BadZipFile):
             return "unknown"
@@ -123,3 +129,54 @@ def describe_artifact(path: str) -> dict[str, Any]:
         out["digest_truncated"] = True
     return out
 
+
+
+def describe_open_artifact(fh: Any, path: str) -> dict[str, Any]:
+    """開いた成果物から、describe_artifact と同じ項目を求める。
+
+    読み込みの関数へ渡すのと同じ開いた対象から読むため、パスを差し替えられても、記録の形式と
+    ダイジェストは読み込んだ物と一致する。読み終えたら先頭へ戻す。
+    """
+    size = os.fstat(fh.fileno()).st_size
+    out: dict[str, Any] = {
+        "artifact_path": os.path.abspath(path),
+        "size_bytes": size,
+    }
+    fh.seek(0)
+    if size > _digest_max_bytes():
+        out["digest_truncated"] = True
+    else:
+        h = hashlib.sha256()
+        while True:
+            chunk = fh.read(_CHUNK)
+            if not chunk:
+                break
+            h.update(chunk)
+        out["artifact_hash"] = "sha256:" + h.hexdigest()
+    fh.seek(0)
+    head = fh.read(16)
+    fh.seek(0)
+    out["format"] = _sniff_head(head, fh)
+    fh.seek(0)
+    return out
+
+
+
+def read_artifact_bytes(fh: Any) -> bytes | None:
+    """開いた成果物を上限まで読む。上限を超えれば None。読んだ量で決め、fstat の後の伸長も見る。"""
+    limit = _digest_max_bytes()
+    fh.seek(0)
+    data = fh.read(limit + 1)
+    if len(data) > limit:
+        return None
+    return data
+
+
+def describe_artifact_bytes(data: bytes, path: str) -> dict[str, Any]:
+    """読み込みへ渡すのと同じバイト列から、describe_artifact と同じ項目を求める。"""
+    return {
+        "artifact_path": os.path.abspath(path),
+        "size_bytes": len(data),
+        "artifact_hash": "sha256:" + hashlib.sha256(data).hexdigest(),
+        "format": _sniff_head(data[:16], io.BytesIO(data)),
+    }
