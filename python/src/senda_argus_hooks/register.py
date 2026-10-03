@@ -15,6 +15,7 @@ from senda_argus_hooks.instrumentors import (
     BedrockInstrumentor,
     LiteLLMInstrumentor,
     MCPPythonInstrumentor,
+    ModelLoadingInstrumentor,
     OllamaInstrumentor,
     OpenAIInstrumentor,
     OpenAIRealtimeInstrumentor,
@@ -42,6 +43,7 @@ def register(
     instrument_argus_sdk: bool = True,
     instrument_openai_agents: bool = True,
     instrument_openai_realtime: bool = True,
+    instrument_model_loading: bool = True,
     rag: dict[str, Any] | None = None,
     capture_prompt: bool = False,
     capture_response: bool = False,
@@ -117,6 +119,8 @@ def register(
             installed["openai_agents"] = _activate(OpenAIAgentsInstrumentor())
         if instrument_openai_realtime:
             installed["openai_realtime"] = _activate(OpenAIRealtimeInstrumentor())
+        if instrument_model_loading:
+            installed["model_loading"] = _activate(ModelLoadingInstrumentor())
 
     rag_handle = None
     if rag:

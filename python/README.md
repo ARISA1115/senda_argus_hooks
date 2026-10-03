@@ -57,6 +57,7 @@ The verified event included `source.sdk = "ollama"`, `source.operation = "Client
 | LiteLLM                        | Experimental       | SDK method hook / monkey patch | Fake SDK hook test             | `llm.request`, `llm.error`                                                   |
 | Ollama Python SDK              | Experimental       | SDK method hook / monkey patch | Fake SDK hook test             | `llm.request`, `llm.error`                                                   |
 | MCP Python SDK                 | Experimental       | Client/session hook            | Fake `ClientSession` hook test | `mcp.tool_call.requested`, `mcp.tool_call.completed`, `mcp.tool_call.failed` |
+| Local model loading | Experimental | Function hook / monkey patch | Real `joblib` and `safetensors` load tests | `model.loaded` |
 | OpenAI Agents SDK | Experimental | Runner hook / trace processor helper | Real SDK import/patch smoke test; invalid API key error-path test | `agent.run.*`, `agent.step.*`, `tool_call.*`, `llm.*` |
 | OpenAI Realtime voice session | Experimental | Connection send/receive hook for the OpenAI SDK and the Agents SDK realtime model | Recorded event replay; real SDK class patch check | `llm.request`, `tool_call.*`, `agent.decision`, `mcp.tool_call.completed` |
 | LangChain | Experimental | Callback handler | Real `CallbackManager` smoke test | `llm.*`, `tool_call.*`, `agent.step.*`, `agent.decision` |
@@ -97,6 +98,20 @@ Real API success-path tests for OpenAI, Anthropic, and LiteLLM require valid pro
 
 When multiple SDK hooks are enabled at the same time, wrapper SDKs such as LiteLLM may also call lower-level provider SDKs. In that case, multiple events may be emitted for a single application-level request. Disable lower-level hooks if you only want wrapper-level events.
 
+
+## Local model loading hook
+
+When the process loads a model artifact from a local path, the hooks emit `model.loaded`. The wrapped functions are `torch.load`, `safetensors.torch.load_file`, `safetensors.numpy.load_file`, and `joblib.load`. None of these packages is a dependency of the base installation; a function is wrapped only when its package is importable.
+
+The event carries `data.model` with:
+
+* `loader`: the function used, for example `torch.load`
+* `artifact_path`: the absolute path that was loaded
+* `format`: detected from the first bytes of the file, not from the file name. `pickle`, `pytorch_zip`, and `joblib` can run code while loading. `safetensors` and `gguf` do not. Anything else is `unknown`
+* `artifact_hash`: SHA-256 of the whole file. Files larger than `SENDA_ARGUS_MODEL_DIGEST_MAX_BYTES` (default 64 GiB) get no digest and `digest_truncated: true`
+* `weights_only`: for `torch.load`, the value passed by the caller, or `null` when not passed
+
+Loads from a file object instead of a path carry only `loader`, `format: unknown`, and `source: file_object`. Set `SENDA_ARGUS_INSTRUMENT_MODEL_LOADING=0` to turn the hook off in the zero-code bootstrap, or pass `instrument_model_loading=False` to `register(...)`.
 
 ## Ollama Python SDK hook
 
