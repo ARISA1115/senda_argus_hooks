@@ -15,6 +15,7 @@ from senda_argus_hooks.core.identity import (
     mcp_data_source_profile,
     normalize_url,
     resolve_mcp_server_name,
+    resolve_mcp_server_url,
 )
 from senda_argus_hooks.core.instruction_files import classify_instruction_write
 from senda_argus_hooks.core.mcp_tools import get_mcp_tool_directory, tool_names_of
@@ -23,6 +24,10 @@ from senda_argus_hooks.core.resource_access import (
     classify_resource_access,
 )
 from senda_argus_hooks.core.runtime import emit_event, get_config
+from senda_argus_hooks.core.tool_definitions import (
+    normalize_provider_url,
+    tool_definition_hashes,
+)
 
 from .base import BaseInstrumentor, audit_guard
 
@@ -121,8 +126,16 @@ class MCPPythonInstrumentor(BaseInstrumentor):
             if operation == "list_tools":
                 # 一覧に出たツールをサーバごとに控える。LLM に差し出した候補のサーバはここから引く。
                 get_mcp_tool_directory().record(meta["server"], tool_names_of(response), session=obj)
+                # 受け取った定義のダイジェストを載せる。Argus は提供元へ自分で取得した定義と突き合わせ、
+                # 呼び出し元によって定義を変える提供元を捉える。本文は載せない。
+                hashes = tool_definition_hashes(response)
+                if hashes:
+                    data["mcp"]["tool_definition_hashes"] = hashes
+                    # 突き合わせの鍵は提供元の正規化で作る。URL に含まれる資格情報を送らず、既定のポートや
+                    # 区切りの違いで Argus の取得と別の鍵にならないようにする。
+                    data["mcp"]["server_url"] = normalize_provider_url(resolve_mcp_server_url(obj))
             emit_event(
-                "mcp.tool_call.completed" if operation == "call_tool" else f"mcp.{operation}.completed",
+                _completed_event_type(operation),
                 source={"component": "instrumentor", "sdk": "mcp_python", "operation": operation},
                 data=data,
                 status="success",
@@ -136,6 +149,19 @@ class MCPPythonInstrumentor(BaseInstrumentor):
             setattr(cls, method_name, original)
         self._patches = []
         return True
+
+
+# 一覧の取得の完了。受け取った定義のダイジェストを運び、Argus はこの種別を判定の入口に数える。
+# 種別の名前を合成せずに置き、受け取り側の表と文字列で突き合わせられるようにする。
+LIST_TOOLS_COMPLETED = "mcp.list_tools.completed"
+
+
+def _completed_event_type(operation: str) -> str:
+    if operation == "call_tool":
+        return "mcp.tool_call.completed"
+    if operation == "list_tools":
+        return LIST_TOOLS_COMPLETED
+    return f"mcp.{operation}.completed"
 
 
 def _session_server_name(obj: Any) -> Any:
@@ -183,7 +209,7 @@ def _mcp_metadata(obj, operation: str, args, kwargs) -> dict[str, Any]:
     arguments = _extract_arguments(operation, args, kwargs)
     tool_name = arguments.get("tool")
     server_name = _session_server_name(obj)
-    server_url = getattr(obj, "url", None) or getattr(obj, "base_url", None) or getattr(obj, "server_url", None)
+    server_url = resolve_mcp_server_url(obj)
     capability = kwargs.get("capability") or getattr(obj, "capability", None)
     args_hash = sha256_value(arguments)
     mcp_profile_id = derive_mcp_profile_id(mcp_server_name=server_name, mcp_server_url=server_url)

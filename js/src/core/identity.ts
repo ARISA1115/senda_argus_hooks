@@ -6,12 +6,15 @@ export function normalizeUrl(value?: string | null): string | null {
     const url = new URL(value);
     url.hash = "";
     url.search = "";
+    // URL に埋め込まれた資格情報は記録にも識別子の材料にも載せない
+    url.username = "";
+    url.password = "";
     url.hostname = url.hostname.toLowerCase();
     url.protocol = url.protocol.toLowerCase();
     url.pathname = url.pathname.replace(/\/+$/, "") || "/";
     return url.toString();
   } catch {
-    return value.trim().toLowerCase().replace(/\/+$/, "");
+    return value.trim().replace(/(?<=:\/\/)[^/?#]*@/, "").toLowerCase().replace(/\/+$/, "");
   }
 }
 
