@@ -117,6 +117,7 @@ def bootstrap() -> dict[str, Any] | None:
             instrument_argus_sdk=_bool("SENDA_ARGUS_INSTRUMENT_ARGUS_SDK", True),
             instrument_openai_agents=_bool("SENDA_ARGUS_INSTRUMENT_OPENAI_AGENTS", True),
             instrument_openai_realtime=_bool("SENDA_ARGUS_INSTRUMENT_OPENAI_REALTIME", True),
+            instrument_model_loading=_bool("SENDA_ARGUS_INSTRUMENT_MODEL_LOADING", True),
             capture_prompt=_bool("SENDA_ARGUS_CAPTURE_PROMPT", False),
             capture_response=_bool("SENDA_ARGUS_CAPTURE_RESPONSE", False),
             capture_arguments=_bool("SENDA_ARGUS_CAPTURE_ARGUMENTS", False),
