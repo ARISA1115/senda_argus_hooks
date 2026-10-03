@@ -14,6 +14,9 @@ class RuntimeConfig:
     capture_response: bool = False
     capture_arguments: bool = False
     capture_result: bool = False
+    # 戻り値の本文とは別に、検知の走査だけに使う文を送る。本文は保存されるが、この文は Argus が
+    # 判定の後に捨てる。既定で送らないと、戻り値に埋め込まれた指示が規則に届かない。
+    scan_result: bool = True
     capture_hash: bool = True
     redact: bool = True
     actor: dict[str, Any] = field(default_factory=dict)

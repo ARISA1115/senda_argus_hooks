@@ -119,6 +119,7 @@ def bootstrap() -> dict[str, Any] | None:
             capture_response=_bool("SENDA_ARGUS_CAPTURE_RESPONSE", False),
             capture_arguments=_bool("SENDA_ARGUS_CAPTURE_ARGUMENTS", False),
             capture_result=_bool("SENDA_ARGUS_CAPTURE_RESULT", False),
+            scan_result=_bool("SENDA_ARGUS_SCAN_RESULT", True),
             capture_hash=_bool("SENDA_ARGUS_CAPTURE_HASH", True),
             redact=_bool("SENDA_ARGUS_REDACT", True),
             actor=_actor(),

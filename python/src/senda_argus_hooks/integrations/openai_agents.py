@@ -12,6 +12,7 @@ from senda_argus_hooks.core.instruction_files import (
     system_prompt_line_digests,
     system_prompt_pair_digests,
 )
+from senda_argus_hooks.core.result_scan import result_scan_fields
 from senda_argus_hooks.core.runtime import emit_event, get_config
 from senda_argus_hooks.instrumentors.base import BaseInstrumentor
 
@@ -61,12 +62,19 @@ class SendaArgusOpenAIAgentsProcessor:
 
     def on_span_end(self, span: Any) -> None:
         event_type = _span_event_type(span, suffix="completed")
+        error = getattr(span, "error", None)
+        if error is None and isinstance(span, dict):
+            error = span.get("error")
+        # tool の区間が失敗したら完了として送らない。受け手は完了を実行の成功として数える。
+        failed = bool(error) and event_type == "tool_call.completed"
+        if failed:
+            event_type = "tool_call.failed"
         data = _span_event_data(span, event_type)
         emit_event(
             event_type,
             source={"component": "integration", "sdk": "openai_agents", "operation": "span.end"},
             data=data,
-            status="success",
+            status="error" if failed else "success",
         )
 
 
@@ -228,6 +236,20 @@ def _span_event_data(span: Any, event_type: str) -> dict[str, Any]:
     data: dict[str, Any] = {
         "agent": {"framework": "openai_agents", "span": _safe_value(span)}
     }
+    tool: dict[str, Any] = {}
+    if event_type.startswith("tool_call."):
+        # tool の呼び出しは、他の計装と同じ data.tool.tool_name に名前を置く。受け手は区間の
+        # 中身を解釈せず、この項目から tool を特定する。名前を取り出せないときは載せない。
+        name = _span_tool_name(span)
+        if name:
+            tool["tool_name"] = name
+    if event_type == "tool_call.completed" and get_config().scan_result:
+        # tool の区間の完了では、戻り値に埋め込まれた指示が注入の規則に届くよう走査の文を添える。
+        output = _span_output(span)
+        if output is not None:
+            tool.update(result_scan_fields(_safe_value(output)))
+    if tool:
+        data["tool"] = {"framework": "openai_agents", **tool}
     if not event_type.startswith("llm.request"):
         return data
     llm: dict[str, Any] = {}
@@ -241,6 +263,26 @@ def _span_event_data(span: Any, event_type: str) -> dict[str, Any]:
         llm["system_prompt_pair_hashes"] = pair_hashes
     data["llm"] = llm
     return data
+
+
+def _span_output(span: Any) -> Any:
+    """tool の区間の戻り値を返す。取れなければ None を返す。区間の中身と直下の両方を見る。"""
+    for source in (_span_data_of(span), span):
+        if source is None:
+            continue
+        value = source.get("output") if isinstance(source, dict) else getattr(source, "output", None)
+        if value is not None:
+            return value
+    return None
+
+
+def _span_tool_name(span: Any) -> str:
+    """tool の区間が持つ tool 名を返す。取れなければ空を返す。"""
+    holder = _span_data_of(span)
+    if holder is None and isinstance(span, dict):
+        holder = span.get("span_data")
+    value = holder.get("name") if isinstance(holder, dict) else getattr(holder, "name", None)
+    return value.strip() if isinstance(value, str) else ""
 
 
 def _span_model(span: Any) -> str:
@@ -271,7 +313,8 @@ def _span_event_type(span: Any, *, suffix: str) -> str:
         or (data.get("type") if isinstance(data, dict) else None)
         or "step"
     ).lower()
-    if "tool" in span_type:
+    # 枠組みの関数の tool は区間の種別が function で出る。JS の統合と同じく tool の呼び出しとして扱う。
+    if "tool" in span_type or "function" in span_type:
         return "tool_call.requested" if suffix == "started" else "tool_call.completed"
     if "handoff" in span_type:
         return f"agent.handoff.{suffix}"

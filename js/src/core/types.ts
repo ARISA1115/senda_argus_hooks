@@ -56,6 +56,8 @@ export interface RegisterOptions {
   captureResponse?: boolean;
   captureArguments?: boolean;
   captureResult?: boolean;
+  // 戻り値の本文とは別に、検知の走査だけに使う文を送る。Argus は保存せず判定の後に捨てる。
+  scanResult?: boolean;
   captureHash?: boolean;
   redact?: boolean;
   actor?: Record<string, unknown>;

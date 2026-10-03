@@ -11,6 +11,7 @@ from senda_argus_hooks.core.instruction_files import (
     system_prompt_line_digests,
     system_prompt_pair_digests,
 )
+from senda_argus_hooks.core.result_scan import result_scan_fields
 from senda_argus_hooks.core.runtime import emit_event, get_config
 
 try:  # Optional dependency. Unit tests use this module without LangChain installed.
@@ -185,6 +186,9 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
         }
         if get_config().capture_result:
             tool["result"] = _safe_value(output)
+        if get_config().scan_result:
+            # 本文を送らない既定でも、戻り値に埋め込まれた指示が注入の規則に届くようにする。
+            tool.update(result_scan_fields(_safe_value(output)))
         emit_event(
             "tool_call.completed",
             source={"component": "integration", "sdk": self.framework, "operation": "on_tool_end"},
