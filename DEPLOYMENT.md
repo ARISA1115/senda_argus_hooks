@@ -283,6 +283,8 @@ SENDA_ARGUS_ENDPOINT=https://argus.example.local
 SENDA_ARGUS_API_KEY=...
 SENDA_ARGUS_PROJECT=my-agent
 SENDA_ARGUS_ENVIRONMENT=prod
+# production, staging, test, evaluation のいずれか。試験と評価の環境で外部へ出た呼び出しを Argus が検知する
+SENDA_ARGUS_RUN_ENVIRONMENT=production
 SENDA_ARGUS_CAPTURE_PROMPT=false
 SENDA_ARGUS_CAPTURE_RESPONSE=false
 SENDA_ARGUS_CAPTURE_ARGUMENTS=false

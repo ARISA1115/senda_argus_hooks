@@ -26,6 +26,18 @@ from .identity import derive_agent_id, runtime_discriminator, runtime_metadata
 from .queue import EventBus
 from .redaction import redact_event
 
+# 実行環境の札として許す値。受け取り側の値と同じ並びにする。
+RUN_ENVIRONMENTS = frozenset({"production", "staging", "test", "evaluation"})
+
+
+def valid_run_environment(value: Any) -> str | None:
+    """設定の札を確かめる。許した値でなければ載せない。"""
+    if not isinstance(value, str):
+        return None
+    tag = value.strip().lower()
+    return tag if tag in RUN_ENVIRONMENTS else None
+
+
 _config = RuntimeConfig()
 _bus = EventBus(exporters=[])
 _runtime_metadata = runtime_metadata()
@@ -134,6 +146,7 @@ def emit_event(
         agent_id=effective_agent_id(source, agent_id),
         purpose_id=purpose_id or get_purpose_id(),
         runtime=_runtime_metadata,
+        run_environment=valid_run_environment(_config.run_environment),
     ).to_dict()
     if _config.redact:
         event = redact_event(event)

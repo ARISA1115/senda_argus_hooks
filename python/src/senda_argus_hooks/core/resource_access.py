@@ -93,7 +93,7 @@ def resource_identity(arguments: Any, *, server: str | None = None) -> str | Non
     return stable_hash(text, prefix="resource")
 
 
-def access_direction(arguments: Any) -> str | None:
+def access_direction(arguments: Any, *, read_only: bool = False) -> str | None:
     """呼び出しの向きを返す。判別できない場合は None。
 
     本文にあたる引数が在れば書き込みとする。値が空でも書き込みとする。空の本文は資源を空に
@@ -113,10 +113,16 @@ def access_direction(arguments: Any) -> str | None:
         return None
     if _first_present(arguments, _BODY_KEYS) is not _MISSING:
         return WRITE
+    # 提供元が読み取りだけの tool と宣言した呼び出しは、読み取りと言い切れる。宣言の無い tool の
+    # 本文の無い呼び出しは判別できないため載せない。
+    if read_only:
+        return READ
     return None
 
 
-def classify_resource_access(arguments: Any, *, server: str | None = None) -> dict[str, str]:
+def classify_resource_access(
+    arguments: Any, *, server: str | None = None, read_only: bool = False
+) -> dict[str, str]:
     """資源への呼び出しなら、同一性と向きを返す。該当しなければ空の辞書。
 
     2 つを別々に導出すると、片方だけ載る記録が生まれる。向きだけ在って資源が無い記録は
@@ -125,7 +131,7 @@ def classify_resource_access(arguments: Any, *, server: str | None = None) -> di
     identity = resource_identity(arguments, server=server)
     if identity is None:
         return {}
-    direction = access_direction(arguments)
+    direction = access_direction(arguments, read_only=read_only)
     if direction is None:
         return {}
     out = {"resource_id": identity, "access_direction": direction}

@@ -60,6 +60,7 @@ export function configure(options: RegisterOptions = {}): void {
   config = {
     project: options.project ?? "default",
     environment: options.environment ?? "dev",
+    runEnvironment: options.runEnvironment,
     capturePrompt: options.capturePrompt ?? false,
     captureResponse: options.captureResponse ?? false,
     captureArguments: options.captureArguments ?? false,

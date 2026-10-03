@@ -63,6 +63,16 @@ export function newEvent(args: {
     status: status ?? null,
     latency_ms: latencyMs ?? null,
     error: error ?? null,
-    runtime: runtimeMetadata()
+    runtime: runtimeMetadata(),
+    run_environment: validRunEnvironment(config.runEnvironment)
   };
+}
+
+// 実行環境の札として許す値。受け取り側の値と同じ並びにする。
+const RUN_ENVIRONMENTS = new Set(["production", "staging", "test", "evaluation"]);
+
+export function validRunEnvironment(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const tag = value.trim().toLowerCase();
+  return RUN_ENVIRONMENTS.has(tag) ? tag : null;
 }

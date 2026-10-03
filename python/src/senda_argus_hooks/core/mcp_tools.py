@@ -200,3 +200,27 @@ def tool_names_of(response: Any) -> list[str]:
         if isinstance(name, str) and name:
             names.append(name)
     return names
+
+
+def read_only_tool_names_of(response: Any) -> list[str]:
+    """list_tools の応答から、提供元が読み取りだけと宣言したツールの名前を取り出す。"""
+    tools = getattr(response, "tools", None)
+    if tools is None and isinstance(response, dict):
+        tools = response.get("tools")
+    if tools is None and isinstance(response, (list, tuple)):
+        tools = response
+    names: list[str] = []
+    if not isinstance(tools, (list, tuple)):
+        return names
+    for tool in tools:
+        if isinstance(tool, dict):
+            name = tool.get("name")
+            annotations = tool.get("annotations")
+            hint = annotations.get("readOnlyHint") if isinstance(annotations, dict) else None
+        else:
+            name = getattr(tool, "name", None)
+            annotations = getattr(tool, "annotations", None)
+            hint = getattr(annotations, "readOnlyHint", None)
+        if isinstance(name, str) and name and hint is True:
+            names.append(name)
+    return names

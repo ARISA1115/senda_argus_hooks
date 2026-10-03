@@ -106,6 +106,7 @@ def bootstrap() -> dict[str, Any] | None:
         result = register(
             project=os.getenv("SENDA_ARGUS_PROJECT", "default"),
             environment=os.getenv("SENDA_ARGUS_ENVIRONMENT", "prod"),
+            run_environment=os.getenv("SENDA_ARGUS_RUN_ENVIRONMENT") or None,
             exporters=_exporters(),
             auto_instrument=True,
             instrument_openai=_bool("SENDA_ARGUS_INSTRUMENT_OPENAI", True),
