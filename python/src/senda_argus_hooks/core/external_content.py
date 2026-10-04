@@ -81,15 +81,26 @@ def _strings(value: Any) -> tuple[list[str], bool]:
 def content_digests(value: Any) -> tuple[set[str], bool]:
     """受け取った内容の行と語の組のダイジェストと、上限に収まらなかったかを返す。"""
     texts, cut = _strings(value)
-    digests: set[str] = set()
+    # **上限は文字列ごとでなく全体に掛ける。** 文字列ごとに上限まで集めると、短い文字列を多数
+    # 並べるだけで保持が文字列の数に比例して膨らむ。行と語の組のそれぞれに全体の枠を持ち、
+    # 残りの枠を各呼び出しへ渡す。枠を使い切ったら打ち切りの印を立てて終える。
+    lines: set[str] = set()
+    pairs: set[str] = set()
     overflow = cut
     for text in texts:
-        lines, lines_over = line_digests_with_overflow(text, limit=MAX_WRITE_DIGESTS)
-        pairs, pairs_over = token_pair_digests_with_overflow(text, limit=MAX_WRITE_DIGESTS)
-        digests.update(lines)
-        digests.update(pairs)
-        overflow = overflow or lines_over or pairs_over
-    return digests, overflow
+        line_room = MAX_WRITE_DIGESTS - len(lines)
+        pair_room = MAX_WRITE_DIGESTS - len(pairs)
+        if line_room <= 0 or pair_room <= 0:
+            overflow = True
+            break
+        got_lines, lines_over = line_digests_with_overflow(text, limit=line_room)
+        got_pairs, pairs_over = token_pair_digests_with_overflow(text, limit=pair_room)
+        lines.update(got_lines)
+        pairs.update(got_pairs)
+        if lines_over or pairs_over:
+            overflow = True
+            break
+    return lines | pairs, overflow
 
 
 class _Scope:
