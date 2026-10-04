@@ -18,7 +18,9 @@ from senda_argus_hooks.core.identity import (
     resolve_mcp_server_name,
     resolve_mcp_server_url,
 )
-from senda_argus_hooks.core.instruction_files import classify_instruction_write
+from senda_argus_hooks.core.acquisitions import acquisitions_with_overflow
+from senda_argus_hooks.core.external_content import get_external_content_ledger, local_instruction_digests
+from senda_argus_hooks.core.instruction_files import classify_instruction_write, instruction_file_name, instruction_file_path
 from senda_argus_hooks.core.mcp_tools import (
     MAX_TOOLS_PER_SERVER,
     get_mcp_tool_directory,
@@ -32,7 +34,7 @@ from senda_argus_hooks.core.resource_access import (
     classify_resource_access,
 )
 from senda_argus_hooks.core.result_scan import result_scan_fields, scan_source
-from senda_argus_hooks.core.runtime import emit_event, get_config
+from senda_argus_hooks.core.runtime import effective_agent_id, emit_event, get_config
 from senda_argus_hooks.core.tool_definitions import (
     normalize_provider_url,
     tool_definition_hashes,
@@ -58,6 +60,8 @@ class MCPPythonInstrumentor(BaseInstrumentor):
             candidates.append((ClientSession, "read_resource", "read_resource"))
             candidates.append((ClientSession, "list_tools", "list_tools"))
             candidates.append((ClientSession, "list_resources", "list_resources"))
+            # 提供元が返すプロンプトの本文も外部から来た内容である。指示ファイルの出所の印のために控える。
+            candidates.append((ClientSession, "get_prompt", "get_prompt"))
             # 初期化は事象を出さない。応答が名乗るサーバ名をセッションへ控えるだけにする。
             candidates.append((ClientSession, "initialize", "initialize"))
         patched = False
@@ -140,6 +144,22 @@ class MCPPythonInstrumentor(BaseInstrumentor):
                 is_error = tool_result_is_error(response)
                 if is_error is not None:
                     data["mcp"]["is_error"] = is_error
+            if operation in ("call_tool", "read_resource", "get_prompt"):
+                # 提供元から受け取った内容を控える。エラーの印が立った応答も本文はモデルへ渡るため控える。
+                # 指示ファイルの読み取りでは、手元に実在するそのファイルの今の中身にも在る行だけを控えない。
+                # 読んで書き戻すたびに、既に在った行が外部から来たことになるため。名前だけで除外すると、
+                # 提供元が資源や引数に指示ファイルの名前を付けるだけで控えを止められる。
+                if operation == "call_tool":
+                    target = instruction_file_path(arguments_of_call(args, kwargs))
+                elif operation == "read_resource":
+                    target = str(args[0] if args else kwargs.get("uri") or "")
+                else:
+                    target = None
+                if target and instruction_file_name(target.split("?", 1)[0]) is None:
+                    target = None
+                get_external_content_ledger().record(
+                    effective_agent_id(), scan_source(response), exclude=local_instruction_digests(target)
+                )
             if operation == "call_tool" and cfg.scan_result:
                 # 本文を送らない既定でも、戻り値に埋め込まれた指示が注入の規則に届くようにする。
                 data["mcp"].update(result_scan_fields(scan_source(response)))
@@ -272,6 +292,11 @@ def _remember_server_info_name(obj: Any, response: Any) -> None:
         setattr(obj, SERVER_INFO_NAME_ATTR, name.strip())
 
 
+def arguments_of_call(args, kwargs) -> Any:
+    """call_tool の引数の辞書を返す。"""
+    return _extract_arguments("call_tool", args, kwargs).get("arguments")
+
+
 def _extract_arguments(operation: str, args, kwargs) -> dict[str, Any]:
     if operation == "call_tool":
         return {"tool": args[0] if args else kwargs.get("name"), "arguments": args[1] if len(args) > 1 else kwargs.get("arguments")}
@@ -333,6 +358,17 @@ def _mcp_metadata(obj, operation: str, args, kwargs) -> dict[str, Any]:
         written = classify_instruction_write(arguments.get("arguments"))
         if written:
             meta.update(written)
+            # 書き込みのダイジェストのうち、提供元から受け取った内容に在ったもの。受け取り側は同じ主体の
+            # 指示に現れたこれを記憶の汚染として扱う。本文は載せない。
+            meta.update(get_external_content_ledger().classify(effective_agent_id(), written))
+        # 依存の導入と資源の取得の取得先。受け取り側と同じ規則で導き、名前と版と指定されたダイジェストを
+        # 記録に残す。判定は取得先の並びだけを読む。
+        acquisitions, acquisitions_truncated = acquisitions_with_overflow(arguments.get("arguments"))
+        if acquisitions:
+            meta["acquisitions"] = acquisitions
+            meta["acquisition_sources"] = [item["source"] for item in acquisitions]
+        if acquisitions_truncated:
+            meta["acquisition_sources_truncated"] = True
     elif operation == "read_resource":
         # 資源の直接読み取りは引数の形が違い、位置引数か uri に資源が直接入る。ここを通さないと
         # 同じ資源への読み取りがツール呼び出しの書き込みと結び付かず、往復として現れない。
