@@ -131,45 +131,25 @@ def describe_artifact(path: str) -> dict[str, Any]:
 
 
 
-def describe_open_artifact(fh: Any, path: str) -> dict[str, Any]:
-    """開いた成果物から、describe_artifact と同じ項目を求める。
-
-    読み込みの関数へ渡すのと同じ開いた対象から読むため、パスを差し替えられても、記録の形式と
-    ダイジェストは読み込んだ物と一致する。読み終えたら先頭へ戻す。
-    """
-    size = os.fstat(fh.fileno()).st_size
-    out: dict[str, Any] = {
-        "artifact_path": os.path.abspath(path),
-        "size_bytes": size,
-    }
-    fh.seek(0)
-    if size > _digest_max_bytes():
-        out["digest_truncated"] = True
-    else:
-        h = hashlib.sha256()
-        while True:
-            chunk = fh.read(_CHUNK)
-            if not chunk:
-                break
-            h.update(chunk)
-        out["artifact_hash"] = "sha256:" + h.hexdigest()
-    fh.seek(0)
-    head = fh.read(16)
-    fh.seek(0)
-    out["format"] = _sniff_head(head, fh)
-    fh.seek(0)
-    return out
-
-
-
 def read_artifact_bytes(fh: Any) -> bytes | None:
-    """開いた成果物を上限まで読む。上限を超えれば None。読んだ量で決め、fstat の後の伸長も見る。"""
+    """開いた成果物を上限まで読む。上限を超えれば None。
+
+    一定の大きさの塊で読み、合計が上限を超えた時点で打ち切る。上限の分を一度に確保すると、
+    小さな成果物でも既定の上限の大きさの確保を試みて失敗する。fstat の大きさは目安で、読んで
+    いる間の伸長も合計で見る。
+    """
     limit = _digest_max_bytes()
-    fh.seek(0)
-    data = fh.read(limit + 1)
-    if len(data) > limit:
+    if os.fstat(fh.fileno()).st_size > limit:
         return None
-    return data
+    fh.seek(0)
+    buf = bytearray()
+    while True:
+        chunk = fh.read(min(_CHUNK, limit + 1 - len(buf)))
+        if not chunk:
+            return bytes(buf)
+        buf += chunk
+        if len(buf) > limit:
+            return None
 
 
 def describe_artifact_bytes(data: bytes, path: str) -> dict[str, Any]:

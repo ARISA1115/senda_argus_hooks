@@ -214,21 +214,12 @@ def _model_events(path: Path):
 def test_joblib_swap_after_digest_loads_the_digested_artifact(tmp_path, monkeypatch):
     """ダイジェストの後と読み込みの前の間に差し替えても、読み込むのはダイジェストを取った物。"""
     joblib = pytest.importorskip("joblib")
-    from senda_argus_hooks.instrumentors import model_loading
-
     artifact = tmp_path / "m.joblib"
     joblib.dump({"v": "digested"}, artifact)
     digested_bytes = artifact.read_bytes()
     swapped = tmp_path / "other.joblib"
     joblib.dump({"v": "swapped"}, swapped)
-    real_describe = model_loading.describe_open_artifact
-
-    def describe_then_swap(fh, path):
-        out = real_describe(fh, path)
-        _swap_in(artifact, swapped.read_bytes())
-        return out
-
-    monkeypatch.setattr(model_loading, "describe_open_artifact", describe_then_swap)
+    _swap_after_bytes_digest(monkeypatch, artifact, swapped.read_bytes())
     events_path = tmp_path / "events.jsonl"
     _register(events_path)
     try:
@@ -243,21 +234,12 @@ def test_joblib_swap_after_digest_loads_the_digested_artifact(tmp_path, monkeypa
 
 def test_torch_swap_after_digest_loads_the_digested_artifact(tmp_path, monkeypatch):
     torch = pytest.importorskip("torch")
-    from senda_argus_hooks.instrumentors import model_loading
-
     artifact = tmp_path / "m.pt"
     torch.save({"w": torch.tensor([1.0])}, artifact)
     digested_bytes = artifact.read_bytes()
     swapped = tmp_path / "other.pt"
     torch.save({"w": torch.tensor([9.0])}, swapped)
-    real_describe = model_loading.describe_open_artifact
-
-    def describe_then_swap(fh, path):
-        out = real_describe(fh, path)
-        _swap_in(artifact, swapped.read_bytes())
-        return out
-
-    monkeypatch.setattr(model_loading, "describe_open_artifact", describe_then_swap)
+    _swap_after_bytes_digest(monkeypatch, artifact, swapped.read_bytes())
     events_path = tmp_path / "events.jsonl"
     _register(events_path)
     try:
@@ -425,3 +407,128 @@ def test_joblib_without_mmap_is_not_marked(tmp_path):
     finally:
         shutdown()
     assert "artifact_identity_changed" not in _model_events(events_path)[0]["data"]["model"]
+
+
+def _overwrite_in_place(path: Path, body: bytes) -> None:
+    """同じ inode を元のパスから上書きする。開いた記述子から読む側にも新しい内容が見える。"""
+    with open(path, "r+b") as fh:
+        fh.write(body)
+        fh.truncate()
+
+
+def _overwrite_after_bytes_digest(monkeypatch, artifact, body):
+    from senda_argus_hooks.instrumentors import model_loading
+
+    real = model_loading.describe_artifact_bytes
+
+    def describe_then_overwrite(data, path):
+        out = real(data, path)
+        _overwrite_in_place(artifact, body)
+        return out
+
+    monkeypatch.setattr(model_loading, "describe_artifact_bytes", describe_then_overwrite)
+
+
+def test_torch_in_place_overwrite_after_digest_loads_the_digested_bytes(tmp_path, monkeypatch):
+    """同じ inode の上書きでも、読み込むのはダイジェストを取ったバイト列。"""
+    torch = pytest.importorskip("torch")
+    artifact = tmp_path / "m.pt"
+    torch.save({"w": torch.tensor([1.0])}, artifact)
+    digested = artifact.read_bytes()
+    other = tmp_path / "other.pt"
+    torch.save({"w": torch.tensor([9.0])}, other)
+    _overwrite_after_bytes_digest(monkeypatch, artifact, other.read_bytes())
+    events_path = tmp_path / "events.jsonl"
+    _register(events_path)
+    try:
+        value = torch.load(artifact, weights_only=True)
+    finally:
+        shutdown()
+    assert artifact.read_bytes() == other.read_bytes()
+    assert value["w"].item() == 1.0
+    model = _model_events(events_path)[0]["data"]["model"]
+    assert model["artifact_hash"] == "sha256:" + hashlib.sha256(digested).hexdigest()
+
+
+def test_joblib_in_place_overwrite_after_digest_loads_the_digested_bytes(tmp_path, monkeypatch):
+    joblib = pytest.importorskip("joblib")
+    artifact = tmp_path / "m.joblib"
+    joblib.dump({"v": "digested"}, artifact, compress=3)
+    digested = artifact.read_bytes()
+    other = tmp_path / "other.joblib"
+    joblib.dump({"v": "overwritten"}, other, compress=3)
+    _overwrite_after_bytes_digest(monkeypatch, artifact, other.read_bytes())
+    events_path = tmp_path / "events.jsonl"
+    _register(events_path)
+    try:
+        value = joblib.load(artifact)
+    finally:
+        shutdown()
+    assert value == {"v": "digested"}
+    model = _model_events(events_path)[0]["data"]["model"]
+    assert model["artifact_hash"] == "sha256:" + hashlib.sha256(digested).hexdigest()
+    assert model["format"] == "joblib"
+
+
+def test_bytes_stream_returns_the_same_value_as_the_path(tmp_path):
+    """io.BytesIO を渡した読み込みは、パスを渡した読み込みと同じ値を返す。"""
+    torch = pytest.importorskip("torch")
+    joblib = pytest.importorskip("joblib")
+    pt = tmp_path / "m.pt"
+    torch.save({"w": torch.arange(4, dtype=torch.float16)}, pt)
+    jl = tmp_path / "m.joblib"
+    joblib.dump({"a": [1, 2], "b": "x"}, jl, compress=3)
+    expected_pt = torch.load(pt, weights_only=True)
+    expected_jl = joblib.load(jl)
+    events_path = tmp_path / "events.jsonl"
+    _register(events_path)
+    try:
+        got_pt = torch.load(pt, weights_only=True)
+        got_jl = joblib.load(jl)
+    finally:
+        shutdown()
+    assert got_pt["w"].dtype == expected_pt["w"].dtype
+    assert got_pt["w"].device == expected_pt["w"].device
+    assert torch.equal(got_pt["w"], expected_pt["w"])
+    assert got_jl == expected_jl
+    models = [e["data"]["model"] for e in _model_events(events_path)]
+    assert len(models) == 2
+    assert all("artifact_identity_changed" not in m for m in models)
+
+
+def test_a_huge_limit_does_not_allocate_the_limit_for_a_small_file(tmp_path, monkeypatch):
+    """上限が実際の大きさより遥かに大きくても、小さな成果物は読めてダイジェストが載る。"""
+    joblib = pytest.importorskip("joblib")
+    monkeypatch.setenv("SENDA_ARGUS_MODEL_DIGEST_MAX_BYTES", str(2**62))
+    artifact = tmp_path / "m.joblib"
+    joblib.dump({"v": 1}, artifact)
+    events_path = tmp_path / "events.jsonl"
+    _register(events_path)
+    try:
+        joblib.load(artifact)
+    finally:
+        shutdown()
+    model = _model_events(events_path)[0]["data"]["model"]
+    assert model["artifact_hash"] == "sha256:" + hashlib.sha256(artifact.read_bytes()).hexdigest()
+    assert "artifact_identity_changed" not in model
+
+
+def test_a_failed_snapshot_is_marked_and_the_load_still_runs(tmp_path, monkeypatch):
+    joblib = pytest.importorskip("joblib")
+    from senda_argus_hooks.instrumentors import model_loading
+
+    def failing(_fh):
+        raise MemoryError("snapshot")
+
+    monkeypatch.setattr(model_loading, "read_artifact_bytes", failing)
+    artifact = tmp_path / "m.joblib"
+    joblib.dump({"v": 1}, artifact)
+    events_path = tmp_path / "events.jsonl"
+    _register(events_path)
+    try:
+        assert joblib.load(artifact) == {"v": 1}
+    finally:
+        shutdown()
+    model = _model_events(events_path)[0]["data"]["model"]
+    assert model["artifact_identity_changed"] is True
+    assert model["artifact_path"] == str(artifact.resolve())
