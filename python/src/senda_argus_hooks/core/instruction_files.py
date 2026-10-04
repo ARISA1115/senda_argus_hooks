@@ -629,6 +629,16 @@ def _first_present(source: dict[str, Any], keys: tuple[str, ...]) -> Any:
     return None
 
 
+def instruction_file_path(arguments: Any) -> str | None:
+    """引数が指示ファイルを指していれば、指している場所をそのまま返す。指していなければ None。"""
+    if not isinstance(arguments, dict):
+        return None
+    raw = _first_present(arguments, _PATH_KEYS)
+    if not isinstance(raw, str) or instruction_file_name(raw) is None:
+        return None
+    return raw.strip()
+
+
 def classify_instruction_write(arguments: Any) -> dict[str, Any] | None:
     """指示ファイルへの書き込みなら、突合に使う情報を返す。該当しなければ None。
 
