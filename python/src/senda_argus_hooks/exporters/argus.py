@@ -20,10 +20,41 @@ from .base import BaseExporter
 # 単一ワーカーで FIFO を保ち、shutdown / atexit で積み残しを送り切る。
 _SEND_QUEUE_MAX = 1000
 _DRAIN_TIMEOUT = 3.0
+_STOP_GRACE = 0.5
 _SHUTDOWN = object()
 _DROP_WARN_INTERVAL = 60.0
 
+# 受け取り側の停止 (計画メンテナンスと障害の復旧の作業) の間の再送。503 と、前段の CloudFront が
+# 返す 502 と 504、接続の失敗だけを送り直す。それ以外の失敗は送り直しても結果が変わらない。
+# 送り直しは同じ本文を送るため、受け取り側は event_id で重複を除き、二重に記録しない。
+_RETRY_STATUSES = frozenset({502, 503, 504})
+_RETRY_MAX_ATTEMPTS = 5
+_RETRY_BASE_DELAY = 1.0
+_RETRY_MAX_DELAY = 30.0
+# 計画メンテナンスの印 (x-argus-maintenance) の付いた 503 は回数で打ち切らず、Retry-After に従って
+# 予定の最長 (7 日) まで送り直す。待つ間に積まれた分は送出キューの上限まで保ち、超えた分は破棄の件数に数える。
+_MAINTENANCE_MAX_WAIT = 7 * 24 * 3600.0
+_MAINTENANCE_MAX_DELAY = 900.0
+
 _logger = logging.getLogger("senda_argus_hooks.exporters.argus")
+
+# 受け取り側が送り直しても受けないと返す符号。組織が停止している間の記録は、送り直しても同じ
+# 403 になるため、引き取り型の収集でも取り直しの対象にしない。
+_TERMINAL_ERROR_CODES = frozenset({"organization_suspended"})
+
+
+def _terminal_rejection_code(exc: urllib.error.HTTPError) -> str | None:
+    """応答の本文が送り直しの対象外の符号を持てば、その符号を返す。読めなければ None。"""
+    try:
+        body = json.loads(exc.read(65536).decode("utf-8"))
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(body, dict):
+        return None
+    code = body.get("error_code")
+    if isinstance(code, str) and code in _TERMINAL_ERROR_CODES and body.get("retryable") is False:
+        return code
+    return None
 
 
 class ArgusExporter(BaseExporter):
@@ -39,7 +70,9 @@ class ArgusExporter(BaseExporter):
         }
 
     endpoint + "/v1/agent-runs/ingest" に POST する。
-    送信エラーは無視してパイプラインを継続する (fire-and-forget)。
+    送信エラーでパイプラインを止めない。503、502、504 と接続の失敗だけは、retry_max_attempts 回
+    (既定 5) まで間隔を伸ばして送り直し、届かなければ捨てた件数をログに出す。送り直しは同じ
+    event_id のまま送るため、受け取り側は重複を除いて 1 件として記録する。
 
     指示ファイルの伝播の検知を効かせるには、api_key に収集用の鍵を設定する。受け取り側は、通常の
     テナントの鍵で届いた記録から書き込みと指示の証拠を採らない。収集用の鍵は発行時に並べた agent_id
@@ -60,6 +93,14 @@ class ArgusExporter(BaseExporter):
         self._drop_lock = threading.Lock()
         self._dropped_events_count = 0
         self._last_drop_warn = 0.0
+        self._retry_max_attempts: int = max(1, int(config.get("retry_max_attempts", _RETRY_MAX_ATTEMPTS)))
+        self._retry_base_delay: float = max(0.0, float(config.get("retry_base_delay", _RETRY_BASE_DELAY)))
+        self._retry_max_delay: float = max(0.0, float(config.get("retry_max_delay", _RETRY_MAX_DELAY)))
+        self._maintenance_max_wait: float = max(0.0, float(config.get("retry_maintenance_max_wait", _MAINTENANCE_MAX_WAIT)))
+        self._maintenance_max_delay: float = max(0.0, float(config.get("retry_maintenance_max_delay", _MAINTENANCE_MAX_DELAY)))
+        self._stopping = threading.Event()
+        self._unsent_events_count = 0
+        self._last_unsent_warn = 0.0
 
     def _record_drop(self, count: int) -> None:
         """送出キュー満杯で捨てたイベント数を計数し、警告を一定間隔に間引いてログに残す。
@@ -78,6 +119,38 @@ class ArgusExporter(BaseExporter):
                 self._last_drop_warn = now
         if should_warn:
             _logger.warning("Argus 送出キューが満杯のためイベントを破棄しました。累計 %d 件", total)
+
+    def _record_unsent(self, count: int, reason: str) -> None:
+        """再送の上限まで送れずに捨てたイベント数を計数し、間引いてログに出す。"""
+        now = time.monotonic()
+        with self._drop_lock:
+            self._unsent_events_count += count
+            total = self._unsent_events_count
+            should_warn = self._last_unsent_warn == 0.0 or (now - self._last_unsent_warn) >= _DROP_WARN_INTERVAL
+            if should_warn:
+                self._last_unsent_warn = now
+        if should_warn:
+            _logger.warning(
+                "Argus へ %d 回送り直しても届かなかったためイベントを破棄しました。今回 %d 件、累計 %d 件: %s",
+                self._retry_max_attempts,
+                count,
+                total,
+                reason,
+            )
+
+    def unsent_events(self) -> int:
+        """再送の上限まで送れずに捨てたイベントの累計を返す。"""
+        with self._drop_lock:
+            return self._unsent_events_count
+
+    def _retry_delay(self, attempt: int, retry_after: str | None, *, maintenance: bool = False) -> float:
+        """attempt 回目の失敗の後に待つ秒数。Retry-After があればそれを上限の内で使う。"""
+        delay = self._retry_base_delay * (2 ** (attempt - 1))
+        if retry_after:
+            with contextlib.suppress(ValueError):
+                delay = float(int(retry_after.strip()))
+        cap = self._maintenance_max_delay if maintenance else self._retry_max_delay
+        return max(0.0, min(delay, cap))
 
     def dropped_events(self) -> int:
         """送出キュー満杯で捨てたバッチの累計を返す。"""
@@ -105,21 +178,61 @@ class ArgusExporter(BaseExporter):
             return None
 
     def _send(self, payload: bytes, headers: dict[str, str]) -> None:
+        count = self._event_count(payload) if self._log_http else None
+        suffix = f" events={count}" if count is not None else ""
+        attempt = 0
+        waited = 0.0
+        while True:
+            attempt += 1
+            reason, retry_after = self._send_once(payload, headers, suffix)
+            if reason is None:
+                return
+            maintenance = reason == "maintenance"
+            exhausted = (
+                waited >= self._maintenance_max_wait
+                if maintenance
+                else attempt >= self._retry_max_attempts
+            )
+            if exhausted or self._stopping.is_set():
+                self._record_unsent(self._event_count(payload) or 1, reason)
+                return
+            delay = self._retry_delay(attempt, retry_after, maintenance=maintenance)
+            # 待ちが 0 秒でも予定の最長を数え尽くすよう、1 回を 1 秒以上と数える。
+            waited += max(delay, 1.0)
+            # 終了の要求が来たら待つのをやめ、送れなかった分として数える。
+            if self._stopping.wait(delay):
+                self._record_unsent(self._event_count(payload) or 1, reason)
+                return
+
+    def _send_once(
+        self, payload: bytes, headers: dict[str, str], suffix: str
+    ) -> tuple[str | None, str | None]:
+        """1 回送る。送り直す失敗なら (理由, Retry-After) を、それ以外は (None, None) を返す。"""
         req = urllib.request.Request(
             self._url, data=payload, method="POST", headers=headers
         )
-        count = self._event_count(payload) if self._log_http else None
-        suffix = f" events={count}" if count is not None else ""
         self._http_log(f"POST {self._url}{suffix} bytes={len(payload)}")
         try:
             with urllib.request.urlopen(req, timeout=self._timeout) as response:
                 status = getattr(response, "status", None) or response.getcode()
             self._http_log(f"POST completed status={status} url={self._url}{suffix}")
+            return None, None
         except urllib.error.HTTPError as exc:
             self._http_log(f"POST failed status={exc.code} url={self._url}{suffix} error={exc.reason}")
+            # 組織の停止の符号は 403 で返る。送り直しの対象の状態と重ならないが、順に判定する。
+            code = _terminal_rejection_code(exc) if exc.code not in _RETRY_STATUSES else None
+            if code is not None:
+                _logger.warning("Argus が受信を拒みました。送り直しません: %s", code)
+                return None, None
+            if exc.code in _RETRY_STATUSES:
+                retry_after = exc.headers.get("Retry-After") if exc.headers is not None else None
+                marked = exc.headers is not None and bool((exc.headers.get("x-argus-maintenance") or "").strip())
+                return ("maintenance" if exc.code == 503 and marked else f"status={exc.code}"), retry_after
+            return None, None
         except (urllib.error.URLError, OSError) as exc:
             reason = getattr(exc, "reason", exc)
             self._http_log(f"POST failed url={self._url}{suffix} error={reason}")
+            return f"connection={type(reason).__name__}", None
 
     def _worker_loop(self) -> None:
         while True:
@@ -138,6 +251,7 @@ class ArgusExporter(BaseExporter):
         with self._worker_lock:
             if self._worker is not None and self._worker.is_alive():
                 return
+            self._stopping.clear()
             self._worker = threading.Thread(target=self._worker_loop, daemon=True)
             self._worker.start()
             if not self._atexit_registered:
@@ -159,6 +273,9 @@ class ArgusExporter(BaseExporter):
         引き取り型の収集は、届いたことを確かめてから取得位置を進める。キューへ積むだけの export では
         届かなかった記録を取り直せない。受け取り側は event_id で重複を除くため、送り直しても二重に
         数えない。
+
+        受け取り側が送り直しの対象外の符号 (組織の停止中) を返したときは、送り直しても同じ拒否になる
+        ため True を返して取得位置を進める。停止の間の記録は取り直さない。
         """
         if not events:
             return True
@@ -169,6 +286,10 @@ class ArgusExporter(BaseExporter):
                 status = getattr(response, "status", None) or response.getcode()
         except urllib.error.HTTPError as exc:
             self._http_log(f"POST failed status={exc.code} url={self._url}")
+            code = _terminal_rejection_code(exc)
+            if code is not None:
+                _logger.warning("Argus が受信を拒みました。送り直しません: %s", code)
+                return True
             return False
         except (urllib.error.URLError, OSError) as exc:
             self._http_log(f"POST failed url={self._url} error={getattr(exc, 'reason', exc)}")
@@ -197,3 +318,7 @@ class ArgusExporter(BaseExporter):
         with contextlib.suppress(queue.Full):
             self._queue.put_nowait(_SHUTDOWN)
         worker.join(timeout=_DRAIN_TIMEOUT)
+        # 待つ時間の内に送り切れなければ、送り直しの待ちを打ち切る。打ち切った分は送れなかった件数に
+        # 数えてログに出す。
+        self._stopping.set()
+        worker.join(timeout=_STOP_GRACE)
