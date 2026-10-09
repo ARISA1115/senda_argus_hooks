@@ -384,3 +384,21 @@ def test_planned_maintenance_is_retried_beyond_the_attempt_limit():
         assert exp.unsent_events() == 0
     finally:
         srv.shutdown()
+
+
+def test_retry_after_http_date_is_honored_up_to_the_cap():
+    import email.utils as _eu
+
+    exp = ArgusExporter({"endpoint": "http://127.0.0.1:9", "api_key": "k"})
+    try:
+        future = _eu.formatdate(time.time() + 600, usegmt=True)
+        delay = exp._retry_delay(1, future, maintenance=True)
+        assert 590 <= delay <= 600
+        far = _eu.formatdate(time.time() + 7200, usegmt=True)
+        assert exp._retry_delay(1, far, maintenance=True) == exp._maintenance_max_delay
+        past = _eu.formatdate(time.time() - 60, usegmt=True)
+        assert exp._retry_delay(1, past, maintenance=True) == 0.0
+        assert exp._retry_delay(1, "not a date") == exp._retry_base_delay
+        assert exp._retry_delay(1, "120", maintenance=True) == 120.0
+    finally:
+        exp.shutdown()

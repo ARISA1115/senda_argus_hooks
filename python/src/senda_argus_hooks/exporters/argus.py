@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import datetime
+import email.utils
 import json
 import logging
 import queue
@@ -35,6 +37,21 @@ _RETRY_MAX_DELAY = 30.0
 # 予定の最長 (7 日) まで送り直す。待つ間に積まれた分は送出キューの上限まで保ち、超えた分は破棄の件数に数える。
 _MAINTENANCE_MAX_WAIT = 7 * 24 * 3600.0
 _MAINTENANCE_MAX_DELAY = 900.0
+
+
+def _retry_after_seconds(value: str) -> float | None:
+    """Retry-After を待つ秒数にする。秒数と HTTP-date の両方を読み、読めなければ None を返す。"""
+    text = value.strip()
+    if text.isdigit():
+        return float(int(text))
+    try:
+        when = email.utils.parsedate_to_datetime(text)
+    except (TypeError, ValueError):
+        return None
+    if when.tzinfo is None:
+        # HTTP-date は常に GMT で書かれる。-0000 のときは時差の無い値として返るため UTC とみなす。
+        when = when.replace(tzinfo=datetime.timezone.utc)
+    return max(0.0, when.timestamp() - time.time())
 
 _logger = logging.getLogger("senda_argus_hooks.exporters.argus")
 
@@ -147,8 +164,9 @@ class ArgusExporter(BaseExporter):
         """attempt 回目の失敗の後に待つ秒数。Retry-After があればそれを上限の内で使う。"""
         delay = self._retry_base_delay * (2 ** (attempt - 1))
         if retry_after:
-            with contextlib.suppress(ValueError):
-                delay = float(int(retry_after.strip()))
+            parsed = _retry_after_seconds(retry_after)
+            if parsed is not None:
+                delay = parsed
         cap = self._maintenance_max_delay if maintenance else self._retry_max_delay
         return max(0.0, min(delay, cap))
 
