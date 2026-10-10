@@ -56,8 +56,25 @@ def _retry_after_seconds(value: str) -> float | None:
 _logger = logging.getLogger("senda_argus_hooks.exporters.argus")
 
 # 受け取り側が送り直しても受けないと返す符号。組織が停止している間の記録は、送り直しても同じ
-# 403 になるため、引き取り型の収集でも取り直しの対象にしない。
-_TERMINAL_ERROR_CODES = frozenset({"organization_suspended"})
+# 403 になるため、引き取り型の収集でも取り直しの対象にしない。判定できない時の扱いが止めるの
+# 符号、つまり Actions の不足、残量が分からない、閲覧専用も、送り直しても結果が変わらないため対象にしない。
+# 保留の符号は 503 で返り、既存の送り直しの経路に乗る。
+_TERMINAL_ERROR_CODES = frozenset(
+    {"organization_suspended", "actions_exhausted", "quota_unknown", "organization_read_only"}
+)
+_REJECT_WARN_INTERVAL = 60.0
+
+
+def _unjudged_reason_of_accepted(raw: bytes) -> str | None:
+    """2xx の応答が判定を省いて受け付けたことを表すなら、その理由の符号を返す。"""
+    try:
+        body = json.loads(raw.decode("utf-8"))
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(body, dict) or body.get("judged") is not False:
+        return None
+    reason = body.get("unjudged_reason")
+    return reason if isinstance(reason, str) and reason else "unknown"
 
 
 def _terminal_rejection_code(exc: urllib.error.HTTPError) -> str | None:
@@ -87,6 +104,9 @@ class ArgusExporter(BaseExporter):
         }
 
     endpoint + "/v1/agent-runs/ingest" に POST する。
+    受け取り側が判定できない時は、止めるの符号 actions_exhausted、quota_unknown、
+    organization_read_only を送り直さずに警告し、保留の 503 は送り直し、判定を省いた 202 は警告する。
+
     送信エラーでパイプラインを止めない。503、502、504 と接続の失敗だけは、retry_max_attempts 回
     (既定 5) まで間隔を伸ばして送り直し、届かなければ捨てた件数をログに出す。送り直しは同じ
     event_id のまま送るため、受け取り側は重複を除いて 1 件として記録する。
@@ -98,10 +118,14 @@ class ArgusExporter(BaseExporter):
 
     def __init__(self, config: dict[str, Any]) -> None:
         endpoint = config.get("endpoint", "http://localhost:8000").rstrip("/")
+        self.endpoint = endpoint
         self._url = endpoint + "/v1/agent-runs/ingest"
         self._api_key: str = config.get("api_key", "")
         self._run_id: str | None = config.get("run_id")
         self._timeout: int = int(config.get("timeout", 10))
+        # 行動の前の確認は行動を待たせるため、送出より短い時間で打ち切る。
+        self.admission_timeout: float = max(0.1, float(config.get("admission_timeout", min(3.0, float(self._timeout)))))
+        self._reject_warned: dict[str, float] = {}
         self._log_http: bool = bool(config.get("log_http", False))
         self._queue: queue.Queue = queue.Queue(maxsize=_SEND_QUEUE_MAX)
         self._worker: threading.Thread | None = None
@@ -154,6 +178,20 @@ class ArgusExporter(BaseExporter):
                 total,
                 reason,
             )
+
+    @property
+    def api_key(self) -> str:
+        return self._api_key
+
+    def _warn_rejection(self, message: str, code: str) -> None:
+        """受け取り側の拒否と判定の省略を、符号ごとに間引いて警告する。最初の 1 回は必ず出す。"""
+        now = time.monotonic()
+        with self._drop_lock:
+            last = self._reject_warned.get(code)
+            if last is not None and (now - last) < _REJECT_WARN_INTERVAL:
+                return
+            self._reject_warned[code] = now
+        _logger.warning(message, code)
 
     def unsent_events(self) -> int:
         """再送の上限まで送れずに捨てたイベントの累計を返す。"""
@@ -233,14 +271,17 @@ class ArgusExporter(BaseExporter):
         try:
             with urllib.request.urlopen(req, timeout=self._timeout) as response:
                 status = getattr(response, "status", None) or response.getcode()
+                raw = response.read(65536) if int(status) == 202 else b""
             self._http_log(f"POST completed status={status} url={self._url}{suffix}")
+            self._check_unjudged_accept(raw)
             return None, None
         except urllib.error.HTTPError as exc:
             self._http_log(f"POST failed status={exc.code} url={self._url}{suffix} error={exc.reason}")
-            # 組織の停止の符号は 403 で返る。送り直しの対象の状態と重ならないが、順に判定する。
+            # 組織の停止と、判定できない時の止めるの符号は 403 で返る。送り直しの対象の状態と重ならないが、
+            # 順に判定する。
             code = _terminal_rejection_code(exc) if exc.code not in _RETRY_STATUSES else None
             if code is not None:
-                _logger.warning("Argus が受信を拒みました。送り直しません: %s", code)
+                self._warn_rejection("Argus が受信を拒みました。送り直しません: %s", code)
                 return None, None
             if exc.code in _RETRY_STATUSES:
                 retry_after = exc.headers.get("Retry-After") if exc.headers is not None else None
@@ -302,17 +343,28 @@ class ArgusExporter(BaseExporter):
         try:
             with urllib.request.urlopen(req, timeout=self._timeout) as response:
                 status = getattr(response, "status", None) or response.getcode()
+                raw = response.read(65536) if int(status) == 202 else b""
         except urllib.error.HTTPError as exc:
             self._http_log(f"POST failed status={exc.code} url={self._url}")
-            code = _terminal_rejection_code(exc)
+            # 保留の符号は 503 で返り、False を返して取り直しの対象に残す。
+            code = _terminal_rejection_code(exc) if exc.code not in _RETRY_STATUSES else None
             if code is not None:
-                _logger.warning("Argus が受信を拒みました。送り直しません: %s", code)
+                self._warn_rejection("Argus が受信を拒みました。送り直しません: %s", code)
                 return True
             return False
         except (urllib.error.URLError, OSError) as exc:
             self._http_log(f"POST failed url={self._url} error={getattr(exc, 'reason', exc)}")
             return False
+        self._check_unjudged_accept(raw)
         return 200 <= int(status) < 300
+
+    def _check_unjudged_accept(self, raw: bytes) -> None:
+        """受け取り側が判定を省いて受け付けたときに、理由を警告する。"""
+        if not raw:
+            return
+        reason = _unjudged_reason_of_accepted(raw)
+        if reason is not None:
+            self._warn_rejection("Argus が判定を省いて記録を受け付けました: %s", reason)
 
     def export(self, events: list[dict[str, Any]]) -> None:
         if not events:
