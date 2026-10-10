@@ -96,6 +96,7 @@ def register(
     )
     bus = EventBus(exporters=exporter_instances, batch_size=batch_size)
     configure(cfg, bus)
+    _configure_unjudged_guard(exporter_instances)
 
     installed = {}
     if auto_instrument:
@@ -139,6 +140,18 @@ def register(
 
         restart_canary_from_env()
     return {"project": project, "environment": environment, "instrumentors": installed, "rag": rag_handle}
+
+
+def _configure_unjudged_guard(exporters: list[Any]) -> None:
+    """Argus の送出器があれば、行動の前の確認をその宛先で有効にする。無ければ無効にする。"""
+    from senda_argus_hooks.core.unjudged import configure_guard
+    from senda_argus_hooks.exporters.argus import ArgusExporter
+
+    argus = next((e for e in exporters if isinstance(e, ArgusExporter)), None)
+    if argus is None:
+        configure_guard(None)
+        return
+    configure_guard(argus.endpoint, argus.api_key, timeout=argus.admission_timeout)
 
 
 def _activate(instrumentor) -> bool:
