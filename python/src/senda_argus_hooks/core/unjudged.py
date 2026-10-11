@@ -219,6 +219,10 @@ class AdmissionGuard:
         self._lock = threading.Lock()
         self._cached: Admission | None = None
         self._cached_until = 0.0
+        # 照会に振る世代と、控えへ書いた最新の世代。遅れて返った古い照会は、後から始めた照会が
+        # 書いた控えと方針を上書きしない。
+        self._issued = 0
+        self._applied = 0
         self._server_policy: dict[str, str] | None = None
         self._legacy_logged = False
 
@@ -242,16 +246,24 @@ class AdmissionGuard:
             with self._lock:
                 if self._cached is not None and now < self._cached_until:
                     return self._cached
-        result, ttl = self._query()
         with self._lock:
-            self._cached = result
-            self._cached_until = self._clock() + ttl
+            self._issued += 1
+            generation = self._issued
+        result, ttl, server_policy = self._query()
+        with self._lock:
+            if generation > self._applied:
+                self._applied = generation
+                self._cached = result
+                self._cached_until = self._clock() + ttl
+                if server_policy is not None:
+                    self._server_policy = server_policy
         return result
 
     def _unavailable(self, ttl: float = FAILURE_TTL) -> tuple[Admission, float]:
         return Admission(False, ARGUS_UNAVAILABLE, self._action_for(ARGUS_UNAVAILABLE)), ttl
 
-    def _query(self) -> tuple[Admission, float]:
+    def _query(self) -> tuple[Admission, float, dict[str, str] | None]:
+        """照会の結果と控えの秒数と、受け取り側が返した方針を返す。控えと方針は呼び出し元が書く。"""
         headers = {"Accept": "application/json"}
         if self._api_key:
             headers["X-API-Key"] = self._api_key
@@ -260,31 +272,29 @@ class AdmissionGuard:
             with urllib.request.urlopen(req, timeout=self._timeout) as response:  # noqa: S310 - 送出器と同じ設定の宛先
                 raw = response.read(65536)
         except urllib.error.HTTPError as exc:
-            return self._from_http_error(exc)
+            return (*self._from_http_error(exc), None)
         except (urllib.error.URLError, OSError, ValueError):
             # 接続の失敗とタイムアウトは Argus に届かない状態として扱う。
-            return self._unavailable()
+            return (*self._unavailable(), None)
         try:
             body = json.loads(raw.decode("utf-8"))
         except Exception:  # noqa: BLE001
-            return self._unavailable()
+            return (*self._unavailable(), None)
         if not isinstance(body, dict) or not isinstance(body.get("admitted"), bool):
-            return self._unavailable()
+            return (*self._unavailable(), None)
         server_policy = policy_from_server(body.get("unjudged_policy"))
-        if server_policy is not None:
-            with self._lock:
-                self._server_policy = server_policy
         ttl = clamp_ttl(body.get("ttl_seconds", DEFAULT_TTL))
         if body["admitted"]:
-            return ADMITTED, ttl
+            return ADMITTED, ttl, server_policy
         reason = body.get("reason_code")
         if not isinstance(reason, str) or reason not in REASONS:
             # 判定できないと返したのに符号が分からないときは、Argus の障害と同じに扱う。
             reason = ARGUS_UNAVAILABLE
         action = body.get("action")
         if not isinstance(action, str) or action not in ACTIONS:
-            action = self._action_for(reason)
-        return Admission(False, reason, action), ttl
+            # 扱いが無ければ、この応答が返した方針を、控えに書く前でも優先する。
+            action = (server_policy or {}).get(reason) or self._action_for(reason)
+        return Admission(False, reason, action), ttl, server_policy
 
     def _from_http_error(self, exc: urllib.error.HTTPError) -> tuple[Admission, float]:
         if exc.code == 404:

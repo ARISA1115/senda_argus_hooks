@@ -175,6 +175,12 @@ def shutdown() -> None:
         from senda_argus_hooks.onboarding import stop_canary
 
         stop_canary()
+    # 行動の前の確認も外す。残すと、登録を解いた後も audit.mcp_tool_call が古い宛先へ照会し、
+    # 行動を止めうる。
+    with contextlib.suppress(Exception):
+        from senda_argus_hooks.core.unjudged import configure_guard
+
+        configure_guard(None)
     flush()
     for rag_handle in list(_ACTIVE_RAG_INSTRUMENTATIONS):  # noqa: PERF101 - 後始末の間に一覧が書き換わっても回す対象を固定する
         with contextlib.suppress(Exception):

@@ -292,6 +292,56 @@ def test_admission_cached_for_ttl_and_sends_key(fake_argus):
     assert httpd.admission_keys == ["test-key"]
 
 
+def test_a_late_older_answer_does_not_replace_a_newer_denial(fake_argus):
+    """先に始めた照会が許可を遅れて返しても、後から始めた照会の拒否の控えを上書きしない。"""
+    _, endpoint = fake_argus
+    guard = _guard(endpoint)
+    release = threading.Event()
+    started = threading.Event()
+    answers = iter(
+        [
+            ("late", uj.ADMITTED, 60.0, None),
+            ("now", uj.Admission(False, "read_only", "block"), 60.0, {"read_only": "block"}),
+        ]
+    )
+
+    def query():
+        name, result, ttl, policy = next(answers)
+        if name == "late":
+            started.set()
+            assert release.wait(5)
+        return result, ttl, policy
+
+    guard._query = query
+    late = threading.Thread(target=guard.admission)
+    late.start()
+    assert started.wait(5)
+    assert guard.admission().reason_code == "read_only"
+    release.set()
+    late.join(5)
+    assert not guard.admission().admitted
+    assert guard.admission().reason_code == "read_only"
+
+
+def test_shutdown_removes_the_guard(fake_argus):
+    """登録を解いた後に、公開の audit.mcp_tool_call が古い宛先へ照会して行動を止めない。"""
+    httpd, endpoint = fake_argus
+    httpd.admission = [_not_admitted("read_only", "block")]
+    from senda_argus_hooks import register, shutdown
+    from senda_argus_hooks.audit.api import mcp_tool_call
+
+    register(exporters=[{"type": "argus", "endpoint": endpoint, "api_key": "k"}], auto_instrument=False)
+    assert uj.get_guard() is not None
+    shutdown()
+    assert uj.get_guard() is None
+    calls = httpd.admission_calls
+    ran = []
+    with mcp_tool_call(server="s", tool="lookup", arguments={"q": 1}):
+        ran.append(True)
+    assert ran == [True]
+    assert httpd.admission_calls == calls
+
+
 def test_legacy_receiver_404_is_admitted_and_logged_once(fake_argus, caplog):
     caplog.set_level(logging.INFO)
     httpd, endpoint = fake_argus
