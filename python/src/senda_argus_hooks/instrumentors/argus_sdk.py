@@ -31,6 +31,7 @@ from senda_argus_hooks.core.purpose_registry import (
 from senda_argus_hooks.core.result_scan import result_scan_fields, scan_source
 from senda_argus_hooks.core.runtime import emit_event, get_config
 from senda_argus_hooks.core.tool_result import tool_result_is_error
+from senda_argus_hooks.core.unjudged import check_before_action
 
 from .base import BaseInstrumentor, audit_guard
 
@@ -198,6 +199,11 @@ class ArgusSDKInstrumentor(BaseInstrumentor):
                 "mcp_profile_id": mcp_profile_id,
                 "arguments_hash": sha256_value(raw_args_payload),
             }
+            # ツールの実行の前に Argus の判定の可否を確認する。止めるときは例外を投げ、実行しない。
+            unjudged = check_before_action(None if tool is None else str(tool))
+            if unjudged is not None:
+                # 判定を省いて実行する呼び出しには、その印と理由の符号を載せる。
+                base_mcp.update(unjudged.as_fields())
             # 組み込みの MCP 経路からも指示ファイルへの書き込みが起こる。別経路の計装だけに
             # 分類を置くと、こちらを通る書き込みが観測されず伝播の起点が欠ける。
             _written = classify_instruction_write(arguments)

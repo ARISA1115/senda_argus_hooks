@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import inspect
 import logging
 import time
 from collections.abc import Callable
@@ -40,6 +41,7 @@ from senda_argus_hooks.core.tool_definitions import (
     tool_definition_hashes,
 )
 from senda_argus_hooks.core.tool_result import tool_result_is_error
+from senda_argus_hooks.core.unjudged import Unjudged, get_guard
 
 from .base import BaseInstrumentor, audit_guard
 
@@ -77,7 +79,22 @@ class MCPPythonInstrumentor(BaseInstrumentor):
         return patched
 
     def _wrap(self, original: Callable, operation: str) -> Callable:
+        guarded = operation == "call_tool" and inspect.iscoroutinefunction(original)
+
         def sync_wrapper(obj, *args, **kwargs):
+            if guarded and get_guard() is not None:
+                # ツールの実行の前に Argus の判定の可否を確認する。止めるときは元の呼び出しの
+                # コルーチンを作らずに例外を投げ、ツールを実行しない。
+                async def checked():
+                    guard = get_guard()
+                    unjudged = None
+                    if guard is not None:
+                        unjudged = await guard.before_action_async(_tool_name_of_call(args, kwargs))
+                    result = original(obj, *args, **kwargs)
+                    return await self._observe_async_call(
+                        original_result=result, operation=operation, obj=obj, args=args, kwargs=kwargs, unjudged=unjudged
+                    )
+                return checked()
             result = original(obj, *args, **kwargs)
             if hasattr(result, "__await__"):
                 async def awaited():
@@ -103,10 +120,13 @@ class MCPPythonInstrumentor(BaseInstrumentor):
 
         return sync_wrapper
 
-    async def _observe_async_call(self, *, original_result, operation: str, obj, args, kwargs):
+    async def _observe_async_call(self, *, original_result, operation: str, obj, args, kwargs, unjudged: Unjudged | None = None):
         cfg = get_config()
         started = time.perf_counter()
         meta = _mcp_metadata(obj, operation, args, kwargs)
+        if unjudged is not None:
+            # 判定を省いて実行した呼び出しには、その印と理由の符号を載せる。
+            meta.update(unjudged.as_fields())
         purpose_id = meta["purpose_id"]
         if operation == "call_tool":
             emit_event(
@@ -290,6 +310,11 @@ def _remember_server_info_name(obj: Any, response: Any) -> None:
         and get_mcp_tool_directory().claim(name.strip(), obj)
     ):
         setattr(obj, SERVER_INFO_NAME_ATTR, name.strip())
+
+
+def _tool_name_of_call(args, kwargs) -> str | None:
+    name = _extract_arguments("call_tool", args, kwargs).get("tool")
+    return None if name is None else str(name)
 
 
 def arguments_of_call(args, kwargs) -> Any:

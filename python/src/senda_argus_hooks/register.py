@@ -96,6 +96,7 @@ def register(
     )
     bus = EventBus(exporters=exporter_instances, batch_size=batch_size)
     configure(cfg, bus)
+    _configure_unjudged_guard(exporter_instances)
 
     installed = {}
     if auto_instrument:
@@ -141,6 +142,18 @@ def register(
     return {"project": project, "environment": environment, "instrumentors": installed, "rag": rag_handle}
 
 
+def _configure_unjudged_guard(exporters: list[Any]) -> None:
+    """Argus の送出器があれば、行動の前の確認をその宛先で有効にする。無ければ無効にする。"""
+    from senda_argus_hooks.core.unjudged import configure_guard
+    from senda_argus_hooks.exporters.argus import ArgusExporter
+
+    argus = next((e for e in exporters if isinstance(e, ArgusExporter)), None)
+    if argus is None:
+        configure_guard(None)
+        return
+    configure_guard(argus.endpoint, argus.api_key, timeout=argus.admission_timeout)
+
+
 def _activate(instrumentor) -> bool:
     try:
         result = instrumentor.instrument()
@@ -162,6 +175,12 @@ def shutdown() -> None:
         from senda_argus_hooks.onboarding import stop_canary
 
         stop_canary()
+    # 行動の前の確認も外す。残すと、登録を解いた後も audit.mcp_tool_call が古い宛先へ照会し、
+    # 行動を止めうる。
+    with contextlib.suppress(Exception):
+        from senda_argus_hooks.core.unjudged import configure_guard
+
+        configure_guard(None)
     flush()
     for rag_handle in list(_ACTIVE_RAG_INSTRUMENTATIONS):  # noqa: PERF101 - 後始末の間に一覧が書き換わっても回す対象を固定する
         with contextlib.suppress(Exception):

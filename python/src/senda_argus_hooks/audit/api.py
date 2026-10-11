@@ -5,6 +5,7 @@ from typing import Any
 
 from senda_argus_hooks.core.hashing import sha256_value
 from senda_argus_hooks.core.runtime import emit_event, span_context
+from senda_argus_hooks.core.unjudged import check_before_action
 
 
 def event(event_type: str, data: dict[str, Any] | None = None, source: dict[str, Any] | None = None, status: str | None = "success") -> dict[str, Any]:
@@ -42,18 +43,25 @@ def span(event_type: str, data: dict[str, Any] | None = None, source: dict[str, 
 
 @contextmanager
 def mcp_tool_call(*, server: str, tool: str, arguments: dict[str, Any] | None = None, capability: str | None = None):
+    """利用者が自分で実行する MCP の呼び出しを囲む。
+
+    囲んだ処理を実行する前に Argus の判定の可否を確認する。止めるときは
+    ``UnjudgedActionBlocked`` を投げ、囲んだ処理を実行しない。
+    """
     args = arguments or {}
+    mcp = {
+        "server": server,
+        "tool": tool,
+        "capability": capability,
+        "arguments": args,
+        "arguments_hash": sha256_value(args),
+    }
+    unjudged = check_before_action(tool)
+    if unjudged is not None:
+        mcp.update(unjudged.as_fields())
     with span_context(
         "mcp.tool_call",
-        data={
-            "mcp": {
-                "server": server,
-                "tool": tool,
-                "capability": capability,
-                "arguments": args,
-                "arguments_hash": sha256_value(args),
-            }
-        },
+        data={"mcp": mcp},
         source={"component": "custom_mcp"},
     ):
         yield

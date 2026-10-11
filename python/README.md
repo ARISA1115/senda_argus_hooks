@@ -875,6 +875,57 @@ Parquet support requires the `parquet` extra.
 python -m pip install -e ".[parquet]"
 ```
 
+## Argus が判定できない時の扱い
+
+Argus の送出器を設定した処理では、エージェントの行動を実行する前に、Argus が新しい判定を行えるかを確認する。
+判定できない時は、理由の符号ごとに決めた扱いに従い、黙って許可しない。
+
+理由の符号:
+
+| 符号 | 意味 | 既定の扱い |
+| --- | --- | --- |
+| `actions_exhausted` | 判定に使う Actions が不足している | `block` |
+| `quota_unknown` | 残量の照会先へ届かず、残量が分からない | `hold` |
+| `read_only` | 組織が閲覧専用になっている | `block` |
+| `argus_unavailable` | Argus に届かない、または Argus が応答しない | `pass` |
+
+扱い:
+
+- `block`: 行動を実行せず、`senda_argus_hooks.core.unjudged.UnjudgedActionBlocked` を投げる。例外は `reason_code` と `action` を属性に持つ。
+- `hold`: 判定ができるようになるまで照会を繰り返して待つ。できるようになれば通常どおり実行し、上限に達したら `block` と同じく止める。
+- `pass`: 警告のログを出して実行する。実行の記録には `unjudged`、`unjudged_reason`、`unjudged_action` を載せる。
+
+いずれの扱いでも、判定を省いたときは種別 `argus.unjudged` の記録を送出のキューへ積む。本文は理由の符号、扱い、時刻、ツールの名前のダイジェストだけで、プロンプトや引数の本文は載せない。
+
+確認を入れている場所は、MCP の Python のクライアントの `ClientSession.call_tool`、SDK の `MockMCPClient.call_tool`、`audit.mcp_tool_call` で囲んだ処理である。
+
+設定:
+
+| 環境変数 | 内容 | 既定の値 |
+| --- | --- | --- |
+| `SENDA_ARGUS_UNJUDGED_POLICY` | `reason=action,reason=action` の形で符号ごとの扱いを書く。知らない符号と扱いの項目は警告して捨て、他の項目は活かす | 上の表の既定の扱い |
+| `SENDA_ARGUS_UNJUDGED_HOLD_SECONDS` | `hold` で待つ秒数の上限 | `30` |
+| `SENDA_ARGUS_UNJUDGED_GUARD` | `off` で確認を無効にする。無効にした時は起動時に 1 回警告する | 有効 |
+
+```bash
+export SENDA_ARGUS_UNJUDGED_POLICY="quota_unknown=block,argus_unavailable=hold"
+export SENDA_ARGUS_UNJUDGED_HOLD_SECONDS=60
+```
+
+方針の優先の順:
+
+1. Argus が `GET /v1/usage/admission` で返す `unjudged_policy`
+2. Argus に届かない時は、最後に受け取った `unjudged_policy`
+3. それも無ければ `SENDA_ARGUS_UNJUDGED_POLICY`
+
+照会の結果は応答の `ttl_seconds` の間だけ控える。控えの秒数は 1 以上 300 以下に丸める。照会の扱い:
+
+- 接続の失敗、タイムアウト、5xx は `argus_unavailable` とする。
+- 404 は照会を持たない古い Argus として許可し、1 回だけ情報のログを出す。
+- 401 と 403 は、拒否の符号が `organization_read_only`、`actions_exhausted`、`quota_unknown` ならその理由とし、組織の停止や鍵の誤りは `argus_unavailable` とする。組織の停止で行動を止めない既存の扱いと揃え、既定では警告と記録を残して実行する。止めるには `argus_unavailable=block` を設定する。
+
+送出の側では、取り込みが `actions_exhausted`、`quota_unknown`、`organization_read_only` を `retryable: false` で返した記録を送り直さず、警告のログに理由を出す。`hold` の 503 は既存の送り直しの経路に乗る。判定を省いて受け付けた 202 は、警告のログに理由を出す。
+
 ## Capture and redaction controls
 
 Senda-Argus Hooks can capture or suppress sensitive data.
