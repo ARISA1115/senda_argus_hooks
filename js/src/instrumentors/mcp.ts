@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import { sha256Value } from "../core/hashing.js";
 import { newTraceId, runWithContext } from "../core/context.js";
@@ -58,6 +59,30 @@ function instrumentListTools(client: any, metadata: McpMetadata): boolean {
   return true;
 }
 
+// 呼び出しごとの相関の識別子。要求の _meta に載せ、中継が同じ値を自分の記録へ載せる。
+// 2 つの記録を、セッションの識別子に頼らず呼び出し単位で突き合わせる鍵になる。
+export const CALL_ID_META_KEY = "argus/call_id";
+const CALL_ID_FORMAT = /^[A-Za-z0-9._:-]{8,128}$/;
+
+/**
+ * 要求の _meta に識別子を載せた要求と、載せた値を返す。載せられないときは要求をそのまま返す。
+ * 呼び出し元が形の合う識別子を既に載せていれば、それを使う。呼び出し元の他の _meta は保つ。
+ * 失敗しても本来の呼び出しは止めない。
+ */
+export function withCallId(request: any): { request: any; callId?: string } {
+  try {
+    if (request === null || typeof request !== "object" || Array.isArray(request)) return { request };
+    const held = request._meta;
+    if (held !== undefined && (held === null || typeof held !== "object" || Array.isArray(held))) return { request };
+    const existing = held?.[CALL_ID_META_KEY];
+    if (typeof existing === "string" && CALL_ID_FORMAT.test(existing)) return { request, callId: existing };
+    const callId = `call_${randomUUID().replace(/-/g, "")}`;
+    return { request: { ...request, _meta: { ...(held ?? {}), [CALL_ID_META_KEY]: callId } }, callId };
+  } catch {
+    return { request };
+  }
+}
+
 export function instrumentMCP(client: any, metadata: McpMetadata = {}): boolean {
   const listed = instrumentListTools(client, metadata);
   if (!client || typeof client.callTool !== "function" || client.callTool[patched]) return listed;
@@ -80,10 +105,14 @@ export function instrumentMCP(client: any, metadata: McpMetadata = {}): boolean 
         data_source_hash: dataSourceHash(purposeProfile), arguments_hash: sha256Value(request)
       };
       if (cfg.captureArguments) meta.arguments = request;
+      // 識別子は引数のダイジェストと記録した引数を作った後に載せる。載せる前の要求で作るので、
+      // 同じ呼び出しのダイジェストが識別子の値で変わらない。
+      const attached = withCallId(request);
+      if (attached.callId) meta.call_id = attached.callId;
       emitEvent("mcp.tool_call.requested", { source: { component: "instrumentor", sdk: "mcp_js", operation: "callTool" }, data: { mcp: meta }, status: "start", purposeId });
       let result: any;
       try {
-        result = await original.call(this, request, ...rest);
+        result = await original.call(this, attached.request, ...rest);
       } catch (error: any) {
         observe(() => emitEvent("mcp.tool_call.failed", { source: { component: "instrumentor", sdk: "mcp_js", operation: "callTool" }, data: { mcp: meta }, status: "error", latencyMs: Math.round(performance.now() - started), purposeId, error: { type: error?.constructor?.name ?? "Error", message: String(error?.message ?? error) } }));
         throw error;
