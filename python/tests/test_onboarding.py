@@ -57,6 +57,8 @@ def collecting(server, monkeypatch):
     runtime.configure(RuntimeConfig(), EventBus(exporters=[exporter]))
     monkeypatch.setattr(register_module, "_ACTIVE_INSTRUMENTORS", [object()])
     yield server
+    # 受け側を閉じる前に送出を終える。残したままだと、閉じた先へ送り直して破棄の警告が出る。
+    exporter.shutdown()
     runtime.configure(*previous)
 
 
