@@ -61,6 +61,7 @@ _ENV_RE: Final[Any] = re.compile(
     r"(?i)(?<![A-Za-z0-9_])("
     r"(?:SENDA_ARGUS|ARGUS|MCP_AUDIT_LOG)_[A-Za-z0-9_]+"
     r"|MCP_AGENT_ALLOWLIST_PATH|MCP_CPE_MAP_PATH|MCP_DEFAULT_AGENT_ID"
+    r"|CLAUDE_CODE_ENABLE_TELEMETRY|OTEL_LOGS_EXPORTER|OTEL_EXPORTER_OTLP_[A-Za-z0-9_]*"
     r")(?![A-Za-z0-9_])"
 )
 

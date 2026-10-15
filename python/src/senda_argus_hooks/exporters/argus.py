@@ -25,6 +25,13 @@ _DRAIN_TIMEOUT = 3.0
 _STOP_GRACE = 0.5
 _SHUTDOWN = object()
 _DROP_WARN_INTERVAL = 60.0
+# 捨てた記録の時間帯を報告する宛先と、持つ時間帯の数と、前の時間帯へ寄せる間隔。
+_DISCARD_PATH = "/v1/hooks/discards"
+_MAX_DISCARD_WINDOWS = 32
+_DISCARD_MERGE_SEC = 60.0
+# 受け取り側が受ける時間帯の範囲。送る前に同じ範囲へ切り詰め、範囲外で報告ごと拒まれないようにする。
+_DISCARD_MAX_SPAN = 7 * 86400.0
+_DISCARD_MAX_AGE = 30 * 86400.0
 
 # 受け取り側の停止 (計画メンテナンスと障害の復旧の作業) の間の再送。503 と、前段の CloudFront が
 # 返す 502 と 504、接続の失敗だけを送り直す。それ以外の失敗は送り直しても結果が変わらない。
@@ -142,6 +149,10 @@ class ArgusExporter(BaseExporter):
         self._stopping = threading.Event()
         self._unsent_events_count = 0
         self._last_unsent_warn = 0.0
+        # 捨てた記録の時間帯 [始まり, 終わり, 件数]。送信が回復した後に Argus へ報告する。受け取り側は
+        # この時間帯の中継にだけある記録を、hooks の記録の欠落ではなく取り込みの欠落として数える。
+        self._discard_url = endpoint + _DISCARD_PATH
+        self._discards: list[list[float]] = []
 
     def _record_drop(self, count: int) -> None:
         """送出キュー満杯で捨てたイベント数を計数し、警告を一定間隔に間引いてログに残す。
@@ -160,6 +171,71 @@ class ArgusExporter(BaseExporter):
                 self._last_drop_warn = now
         if should_warn:
             _logger.warning("Argus 送出キューが満杯のためイベントを破棄しました。累計 %d 件", total)
+
+    def _note_discard(self, times: list[float], count: int) -> None:
+        """捨てた記録の時刻の範囲を持つ。直前の時間帯に近ければ寄せ、数に上限を置く。"""
+        lo, hi = (min(times), max(times)) if times else (time.time(), time.time())
+        with self._drop_lock:
+            last = self._discards[-1] if self._discards else None
+            if last is not None and lo <= last[1] + _DISCARD_MERGE_SEC:
+                last[0] = min(last[0], lo)
+                last[1] = max(last[1], hi)
+                last[2] += count
+            else:
+                self._discards.append([lo, hi, float(count)])
+            while len(self._discards) > _MAX_DISCARD_WINDOWS:
+                oldest = self._discards.pop(0)
+                head = self._discards[0]
+                head[0] = min(head[0], oldest[0])
+                head[1] = max(head[1], oldest[1])
+                head[2] += oldest[2]
+
+    @staticmethod
+    def _clip_windows(windows: list[list[float]], now: float) -> list[list[float]]:
+        """受け取り側の範囲へ切り詰める。未来の終わりは今へ、長すぎる時間帯は終わりから 7 日へ寄せ、
+        30 日より古い時間帯は捨てる。"""
+        out: list[list[float]] = []
+        for start, end, count in windows:
+            end = min(end, now)
+            start = min(max(start, end - _DISCARD_MAX_SPAN), end)
+            if start < now - _DISCARD_MAX_AGE:
+                continue
+            out.append([start, end, count])
+        return out
+
+    def _report_discards(self, headers: dict[str, str]) -> None:
+        """持っている時間帯を 1 回だけ報告する。届かなければ戻し、次の成功で送る。
+
+        4xx は送り直しても同じ拒否になるので戻さない。
+        """
+        with self._drop_lock:
+            windows, self._discards = self._discards, []
+        windows = self._clip_windows(windows, time.time())
+        if not windows:
+            return
+        body = json.dumps(
+            {"windows": [{"from": w[0], "to": w[1], "count": int(w[2])} for w in windows]}
+        ).encode("utf-8")
+        req = urllib.request.Request(self._discard_url, data=body, method="POST", headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=self._timeout) as response:
+                status = int(getattr(response, "status", None) or response.getcode())
+            if 200 <= status < 300:
+                return
+        except urllib.error.HTTPError as exc:
+            if 400 <= exc.code < 500:
+                _logger.warning("Argus が破棄の時間帯の報告を拒みました。送り直しません: status=%d", exc.code)
+                return
+        except (urllib.error.URLError, OSError, ValueError):
+            pass
+        with self._drop_lock:
+            self._discards = windows + self._discards
+            while len(self._discards) > _MAX_DISCARD_WINDOWS:
+                oldest = self._discards.pop(0)
+                head = self._discards[0]
+                head[0] = min(head[0], oldest[0])
+                head[1] = max(head[1], oldest[1])
+                head[2] += oldest[2]
 
     def _record_unsent(self, count: int, reason: str) -> None:
         """再送の上限まで送れずに捨てたイベント数を計数し、間引いてログに出す。"""
@@ -225,6 +301,28 @@ class ArgusExporter(BaseExporter):
         print(f"[senda-argus-http] {message}", file=sys.stderr, flush=True)
 
     @staticmethod
+    def _event_times(events: Any) -> list[float]:
+        """記録の timestamp を epoch 秒で返す。読めない記録は数えない。"""
+        out: list[float] = []
+        for ev in events if isinstance(events, list) else []:
+            raw = ev.get("timestamp") if isinstance(ev, dict) else None
+            if not isinstance(raw, str):
+                continue
+            try:
+                out.append(datetime.datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp())
+            except ValueError:
+                continue
+        return out
+
+    @classmethod
+    def _payload_times(cls, payload: bytes) -> list[float]:
+        try:
+            body = json.loads(payload.decode("utf-8"))
+        except Exception:  # noqa: BLE001
+            return []
+        return cls._event_times(body.get("events") if isinstance(body, dict) else None)
+
+    @staticmethod
     def _event_count(payload: bytes) -> int | None:
         try:
             body = json.loads(payload.decode("utf-8"))
@@ -242,6 +340,7 @@ class ArgusExporter(BaseExporter):
             attempt += 1
             reason, retry_after = self._send_once(payload, headers, suffix)
             if reason is None:
+                self._report_discards(headers)
                 return
             maintenance = reason == "maintenance"
             exhausted = (
@@ -251,6 +350,7 @@ class ArgusExporter(BaseExporter):
             )
             if exhausted or self._stopping.is_set():
                 self._record_unsent(self._event_count(payload) or 1, reason)
+                self._note_discard(self._payload_times(payload), self._event_count(payload) or 1)
                 return
             delay = self._retry_delay(attempt, retry_after, maintenance=maintenance)
             # 待ちが 0 秒でも予定の最長を数え尽くすよう、1 回を 1 秒以上と数える。
@@ -258,6 +358,7 @@ class ArgusExporter(BaseExporter):
             # 終了の要求が来たら待つのをやめ、送れなかった分として数える。
             if self._stopping.wait(delay):
                 self._record_unsent(self._event_count(payload) or 1, reason)
+                self._note_discard(self._payload_times(payload), self._event_count(payload) or 1)
                 return
 
     def _send_once(
@@ -356,7 +457,10 @@ class ArgusExporter(BaseExporter):
             self._http_log(f"POST failed url={self._url} error={getattr(exc, 'reason', exc)}")
             return False
         self._check_unjudged_accept(raw)
-        return 200 <= int(status) < 300
+        ok = 200 <= int(status) < 300
+        if ok:
+            self._report_discards(headers)
+        return ok
 
     def _check_unjudged_accept(self, raw: bytes) -> None:
         """受け取り側が判定を省いて受け付けたときに、理由を警告する。"""
@@ -377,6 +481,7 @@ class ArgusExporter(BaseExporter):
             self._queue.put_nowait((payload, headers))
         except queue.Full:
             self._record_drop(len(events))
+            self._note_discard(self._event_times(events), len(events))
 
     def shutdown(self) -> None:
         # 終了時に積み残したバッチを送り切る。daemon ワーカーは通常終了で待たれないため、

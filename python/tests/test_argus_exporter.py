@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import datetime
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -414,3 +415,108 @@ def test_retry_after_http_date_is_honored_up_to_the_cap():
         assert exp._retry_delay(1, "120", maintenance=True) == 120.0
     finally:
         exp.shutdown()
+
+
+class _DiscardIngest:
+    """先頭の fail 回の取り込みを 503 で返し、その後は 200 を返す。捨てた時間帯の報告を控える。"""
+
+    def __init__(self, fail: int, discard_status: int = 200):
+        import http.server
+        import threading as _threading
+
+        self.ingests = 0
+        self.reports: list[dict] = []
+        outer = self
+
+        class _H(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):  # noqa: N802
+                body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)))
+                if self.path == "/v1/hooks/discards":
+                    outer.reports.append(body)
+                    code = discard_status
+                else:
+                    outer.ingests += 1
+                    code = 503 if outer.ingests <= fail else 200
+                self.send_response(code)
+                self.send_header("Retry-After", "0")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *a):
+                pass
+
+        self.srv = http.server.HTTPServer(("127.0.0.1", 0), _H)
+        _threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{self.srv.server_port}"
+
+
+# 送る前に今より先と 30 日より前を切り詰めるので、今から数える。
+_BASE = float(int(time.time()) - 3600)
+
+
+def _at(sec: int) -> str:
+    return datetime.datetime.fromtimestamp(_BASE + sec, tz=datetime.timezone.utc).isoformat()
+
+
+def test_discarded_records_are_reported_after_the_next_success():
+    srv = _DiscardIngest(fail=3)
+    try:
+        exp = _fast_exporter(srv.url, retry_max_attempts=3)
+        exp.export([{"event_id": "a", "timestamp": _at(0)}, {"event_id": "b", "timestamp": _at(30)}])
+        exp.export([{"event_id": "c", "timestamp": _at(90)}])
+        exp.shutdown()
+        assert exp.unsent_events() == 2
+        assert srv.reports == [{"windows": [{"from": _BASE, "to": _BASE + 30, "count": 2}]}]
+    finally:
+        srv.srv.shutdown()
+
+
+def test_a_report_that_does_not_arrive_is_kept_for_the_next_success():
+    srv = _DiscardIngest(fail=3, discard_status=503)
+    try:
+        exp = _fast_exporter(srv.url, retry_max_attempts=3)
+        exp.export([{"event_id": "a", "timestamp": _at(0)}])
+        exp.export([{"event_id": "b", "timestamp": _at(500)}])
+        exp.export([{"event_id": "c", "timestamp": _at(600)}])
+        exp.shutdown()
+        # 報告が 2 回とも 503 でも、時間帯は捨てずに持っている。
+        assert len(srv.reports) == 2
+        assert srv.reports[0] == srv.reports[1]
+        assert exp._discards == [[_BASE, _BASE, 1.0]]
+    finally:
+        srv.srv.shutdown()
+
+
+def test_discard_windows_are_bounded():
+    exp = ArgusExporter({"endpoint": "http://127.0.0.1:9"})
+    for i in range(100):
+        exp._note_discard([1_800_000_000.0 + i * 1000], 1)
+    assert len(exp._discards) == 32
+    assert sum(w[2] for w in exp._discards) == 100
+
+
+def test_a_rejected_report_is_not_sent_again():
+    srv = _DiscardIngest(fail=3, discard_status=400)
+    try:
+        exp = _fast_exporter(srv.url, retry_max_attempts=3)
+        exp.export([{"event_id": "a", "timestamp": _at(0)}])
+        exp.export([{"event_id": "b", "timestamp": _at(500)}])
+        exp.export([{"event_id": "c", "timestamp": _at(600)}])
+        exp.shutdown()
+        assert len(srv.reports) == 1
+        assert exp._discards == []
+    finally:
+        srv.srv.shutdown()
+
+
+def test_windows_are_clipped_to_the_receivers_range():
+    now = 1_900_000_000.0
+    clipped = ArgusExporter._clip_windows(
+        [
+            [now - 40 * 86400, now - 35 * 86400, 1.0],
+            [now - 20 * 86400, now - 1, 2.0],
+            [now - 10, now + 600, 3.0],
+        ],
+        now,
+    )
+    assert clipped == [[now - 1 - 7 * 86400, now - 1, 2.0], [now - 10, now, 3.0]]
