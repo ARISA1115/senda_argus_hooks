@@ -3,8 +3,10 @@ from __future__ import annotations
 import contextlib
 import inspect
 import logging
+import re
 import time
-from collections.abc import Callable
+import uuid
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from senda_argus_hooks.core.hashing import sha256_value
@@ -47,6 +49,59 @@ from .base import BaseInstrumentor, audit_guard
 
 _LOGGER = logging.getLogger(__name__)
 
+# 呼び出しごとの相関の識別子。要求の _meta に載せ、中継が同じ値を自分の記録へ載せる。
+# 2 つの記録を、セッションの識別子に頼らず呼び出し単位で突き合わせる鍵になる。
+CALL_ID_META_KEY = "argus/call_id"
+_CALL_ID_FORMAT = re.compile(r"^[A-Za-z0-9._:\-]{8,128}$")
+
+
+def _accepts_meta(func: Callable) -> bool:
+    """元の関数が meta を受けるか。受けない版へ渡すと呼び出し自体が失敗する。"""
+    try:
+        params = inspect.signature(func).parameters
+    except (TypeError, ValueError):
+        return False
+    return "meta" in params or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+
+def _meta_as_dict(meta: Any) -> dict[str, Any] | None:
+    """呼び出し元の meta を辞書にする。変換できない型は None。
+
+    SDK の v1 は RequestParams.Meta という pydantic のモデルを渡せる。モデルを辞書へ直して他の項目を
+    保ち、v2 の TypedDict と通常の辞書はそのまま写す。
+    """
+    if meta is None:
+        return {}
+    if isinstance(meta, Mapping):
+        return dict(meta)
+    dump = getattr(meta, "model_dump", None)
+    if callable(dump):
+        dumped = dump(by_alias=True, exclude_none=True)
+        return dict(dumped) if isinstance(dumped, Mapping) else None
+    return None
+
+
+def _attach_call_id(kwargs: dict[str, Any], accepts_meta: bool) -> str | None:
+    """要求の _meta に識別子を載せ、載せた値を返す。載せられないときは None。
+
+    呼び出し元が形の合う識別子を既に載せていれば、それを使う。呼び出し元の他の _meta は保つ。
+    失敗しても本来の呼び出しは止めない。
+    """
+    if not accepts_meta:
+        return None
+    try:
+        meta = _meta_as_dict(kwargs.get("meta"))
+        if meta is None:
+            return None
+        held = meta.get(CALL_ID_META_KEY)
+        if isinstance(held, str) and _CALL_ID_FORMAT.fullmatch(held):
+            return held
+        call_id = f"call_{uuid.uuid4().hex}"
+        kwargs["meta"] = {**meta, CALL_ID_META_KEY: call_id}
+        return call_id
+    except Exception:  # noqa: BLE001
+        return None
+
 
 class MCPPythonInstrumentor(BaseInstrumentor):
     name = "mcp_python"
@@ -80,8 +135,10 @@ class MCPPythonInstrumentor(BaseInstrumentor):
 
     def _wrap(self, original: Callable, operation: str) -> Callable:
         guarded = operation == "call_tool" and inspect.iscoroutinefunction(original)
+        accepts_meta = operation == "call_tool" and _accepts_meta(original)
 
         def sync_wrapper(obj, *args, **kwargs):
+            call_id = _attach_call_id(kwargs, accepts_meta) if operation == "call_tool" else None
             if guarded and get_guard() is not None:
                 # ツールの実行の前に Argus の判定の可否を確認する。止めるときは元の呼び出しの
                 # コルーチンを作らずに例外を投げ、ツールを実行しない。
@@ -92,13 +149,13 @@ class MCPPythonInstrumentor(BaseInstrumentor):
                         unjudged = await guard.before_action_async(_tool_name_of_call(args, kwargs))
                     result = original(obj, *args, **kwargs)
                     return await self._observe_async_call(
-                        original_result=result, operation=operation, obj=obj, args=args, kwargs=kwargs, unjudged=unjudged
+                        original_result=result, operation=operation, obj=obj, args=args, kwargs=kwargs, unjudged=unjudged, call_id=call_id
                     )
                 return checked()
             result = original(obj, *args, **kwargs)
             if hasattr(result, "__await__"):
                 async def awaited():
-                    return await self._observe_async_call(original_result=result, operation=operation, obj=obj, args=args, kwargs=kwargs)
+                    return await self._observe_async_call(original_result=result, operation=operation, obj=obj, args=args, kwargs=kwargs, call_id=call_id)
                 return awaited()
             return result
         return sync_wrapper
@@ -120,10 +177,12 @@ class MCPPythonInstrumentor(BaseInstrumentor):
 
         return sync_wrapper
 
-    async def _observe_async_call(self, *, original_result, operation: str, obj, args, kwargs, unjudged: Unjudged | None = None):
+    async def _observe_async_call(self, *, original_result, operation: str, obj, args, kwargs, unjudged: Unjudged | None = None, call_id: str | None = None):
         cfg = get_config()
         started = time.perf_counter()
         meta = _mcp_metadata(obj, operation, args, kwargs)
+        if call_id:
+            meta["call_id"] = call_id
         if unjudged is not None:
             # 判定を省いて実行した呼び出しには、その印と理由の符号を載せる。
             meta.update(unjudged.as_fields())

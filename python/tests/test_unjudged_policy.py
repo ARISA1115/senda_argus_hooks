@@ -340,6 +340,8 @@ def test_shutdown_removes_the_guard(fake_argus):
         ran.append(True)
     assert ran == [True]
     assert httpd.admission_calls == calls
+    # 受け側を閉じる前に、後から出た記録の送出を終える。残すと閉じた先へ送り直して破棄の警告が出る。
+    shutdown()
 
 
 def test_legacy_receiver_404_is_admitted_and_logged_once(fake_argus, caplog):

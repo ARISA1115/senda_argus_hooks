@@ -88,3 +88,123 @@ def test_mcp_python_instrumentor_emits_requested_completed_failed_and_unpatches(
     assert "result" not in completed["data"]["mcp"]
     assert failed["status"] == "error"
     assert failed["error"]["type"] == "RuntimeError"
+
+
+def _install_fake_mcp_with_meta(monkeypatch):
+    seen = {}
+
+    class ClientSession:
+        server = "fake_mcp"
+        server_url = "https://mcp.example.com/mcp"
+
+        async def call_tool(self, name, arguments=None, read_timeout_seconds=None, progress_callback=None, *, meta=None):
+            seen["meta"] = meta
+            return {"ok": True}
+
+    fake_mcp = types.ModuleType("mcp")
+    fake_mcp.ClientSession = ClientSession
+    monkeypatch.setitem(sys.modules, "mcp", fake_mcp)
+    return ClientSession, seen
+
+
+def _register(path):
+    return register(
+        project="test-mcp",
+        exporters=[{"type": "jsonl", "path": str(path)}],
+        auto_instrument=True,
+        instrument_openai=False,
+        instrument_anthropic=False,
+        instrument_litellm=False,
+        instrument_argus_sdk=False,
+        capture_arguments=True,
+        capture_result=False,
+    )
+
+
+def test_call_tool_carries_one_call_id_in_the_request_meta_and_the_record(tmp_path, monkeypatch):
+    ClientSession, seen = _install_fake_mcp_with_meta(monkeypatch)
+    path = tmp_path / "events.jsonl"
+    _register(path)
+    asyncio.run(ClientSession().call_tool("lookup", {"q": 1}, meta={"other": "kept"}))
+    shutdown()
+    sent = seen["meta"]["argus/call_id"]
+    assert sent.startswith("call_") and seen["meta"]["other"] == "kept"
+    requested = [e for e in _read_events(path) if e["event_type"] == "mcp.tool_call.requested"]
+    assert requested and requested[0]["data"]["mcp"]["call_id"] == sent
+
+
+def test_a_well_formed_call_id_from_the_caller_is_reused(tmp_path, monkeypatch):
+    ClientSession, seen = _install_fake_mcp_with_meta(monkeypatch)
+    path = tmp_path / "events.jsonl"
+    _register(path)
+    asyncio.run(ClientSession().call_tool("lookup", {}, meta={"argus/call_id": "call_caller_0001"}))
+    shutdown()
+    assert seen["meta"]["argus/call_id"] == "call_caller_0001"
+
+
+class _ModelMeta:
+    """SDK の v1 が渡せる pydantic のモデルと同じく model_dump で辞書になる meta。"""
+
+    def __init__(self, **fields):
+        self._fields = fields
+
+    def model_dump(self, by_alias=False, exclude_none=False):
+        assert by_alias and exclude_none
+        return {k: v for k, v in self._fields.items() if v is not None}
+
+
+def test_a_model_typed_meta_keeps_its_fields_and_gets_the_call_id(tmp_path, monkeypatch):
+    ClientSession, seen = _install_fake_mcp_with_meta(monkeypatch)
+    path = tmp_path / "events.jsonl"
+    _register(path)
+    asyncio.run(ClientSession().call_tool("lookup", {}, meta=_ModelMeta(progressToken="t-1", unused=None)))
+    shutdown()
+    assert seen["meta"]["progressToken"] == "t-1" and "unused" not in seen["meta"]
+    sent = seen["meta"]["argus/call_id"]
+    requested = [e for e in _read_events(path) if e["event_type"] == "mcp.tool_call.requested"]
+    assert requested[0]["data"]["mcp"]["call_id"] == sent
+
+
+def test_a_mapping_meta_that_is_not_a_dict_gets_the_call_id(tmp_path, monkeypatch):
+    from types import MappingProxyType
+
+    ClientSession, seen = _install_fake_mcp_with_meta(monkeypatch)
+    path = tmp_path / "events.jsonl"
+    _register(path)
+    asyncio.run(ClientSession().call_tool("lookup", {}, meta=MappingProxyType({"other": "kept"})))
+    shutdown()
+    assert seen["meta"]["other"] == "kept" and seen["meta"]["argus/call_id"].startswith("call_")
+
+
+def test_a_meta_of_an_unknown_type_is_passed_through_untouched(tmp_path, monkeypatch):
+    ClientSession, seen = _install_fake_mcp_with_meta(monkeypatch)
+    path = tmp_path / "events.jsonl"
+    _register(path)
+    odd = object()
+    asyncio.run(ClientSession().call_tool("lookup", {}, meta=odd))
+    shutdown()
+    assert seen["meta"] is odd
+    requested = [e for e in _read_events(path) if e["event_type"] == "mcp.tool_call.requested"]
+    assert "call_id" not in requested[0]["data"]["mcp"]
+
+
+def test_a_session_that_does_not_accept_meta_is_called_unchanged(tmp_path, monkeypatch):
+    seen = {}
+
+    class ClientSession:
+        server = "fake_mcp"
+        server_url = "https://mcp.example.com/mcp"
+
+        async def call_tool(self, name, arguments=None):
+            seen["called"] = True
+            return {"ok": True}
+
+    fake_mcp = types.ModuleType("mcp")
+    fake_mcp.ClientSession = ClientSession
+    monkeypatch.setitem(sys.modules, "mcp", fake_mcp)
+    path = tmp_path / "events.jsonl"
+    _register(path)
+    assert asyncio.run(ClientSession().call_tool("lookup", {}))["ok"] is True
+    shutdown()
+    requested = [e for e in _read_events(path) if e["event_type"] == "mcp.tool_call.requested"]
+    assert seen["called"] and "call_id" not in requested[0]["data"]["mcp"]

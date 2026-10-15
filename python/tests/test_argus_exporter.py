@@ -88,9 +88,21 @@ def test_existing_run_id_not_overwritten(capture_server):
     assert httpd.captured[0]["events"][0]["run_id"] == "original-run"
 
 
-def test_export_ignores_connection_error():
-    exporter = ArgusExporter({"type": "argus", "endpoint": "http://localhost:19999", "timeout": 1})
+def test_export_ignores_connection_error(caplog):
+    exporter = ArgusExporter(
+        {
+            "type": "argus",
+            "endpoint": "http://localhost:19999",
+            "timeout": 1,
+            "retry_max_attempts": 2,
+            "retry_base_delay": 0,
+        }
+    )
     exporter.export([{"event_id": "e1", "event_type": "llm.request", "data": {}}])
+    # 送出を終えてから確認する。残すと、後の試験の最中に破棄の警告が出る。
+    exporter.shutdown()
+    assert exporter.unsent_events() == 1
+    assert "送り直しても届かなかった" in caplog.text
 
 
 def test_registry_creates_argus_exporter(capture_server):
