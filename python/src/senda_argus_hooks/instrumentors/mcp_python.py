@@ -6,7 +6,7 @@ import logging
 import re
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from senda_argus_hooks.core.hashing import sha256_value
@@ -64,6 +64,23 @@ def _accepts_meta(func: Callable) -> bool:
     return "meta" in params or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
 
 
+def _meta_as_dict(meta: Any) -> dict[str, Any] | None:
+    """呼び出し元の meta を辞書にする。変換できない型は None。
+
+    SDK の v1 は RequestParams.Meta という pydantic のモデルを渡せる。モデルを辞書へ直して他の項目を
+    保ち、v2 の TypedDict と通常の辞書はそのまま写す。
+    """
+    if meta is None:
+        return {}
+    if isinstance(meta, Mapping):
+        return dict(meta)
+    dump = getattr(meta, "model_dump", None)
+    if callable(dump):
+        dumped = dump(by_alias=True, exclude_none=True)
+        return dict(dumped) if isinstance(dumped, Mapping) else None
+    return None
+
+
 def _attach_call_id(kwargs: dict[str, Any], accepts_meta: bool) -> str | None:
     """要求の _meta に識別子を載せ、載せた値を返す。載せられないときは None。
 
@@ -73,10 +90,8 @@ def _attach_call_id(kwargs: dict[str, Any], accepts_meta: bool) -> str | None:
     if not accepts_meta:
         return None
     try:
-        meta = kwargs.get("meta")
+        meta = _meta_as_dict(kwargs.get("meta"))
         if meta is None:
-            meta = {}
-        elif not isinstance(meta, dict):
             return None
         held = meta.get(CALL_ID_META_KEY)
         if isinstance(held, str) and _CALL_ID_FORMAT.fullmatch(held):

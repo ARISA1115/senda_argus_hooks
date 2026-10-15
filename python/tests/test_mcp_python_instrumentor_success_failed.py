@@ -142,6 +142,52 @@ def test_a_well_formed_call_id_from_the_caller_is_reused(tmp_path, monkeypatch):
     assert seen["meta"]["argus/call_id"] == "call_caller_0001"
 
 
+class _ModelMeta:
+    """SDK の v1 が渡せる pydantic のモデルと同じく model_dump で辞書になる meta。"""
+
+    def __init__(self, **fields):
+        self._fields = fields
+
+    def model_dump(self, by_alias=False, exclude_none=False):
+        assert by_alias and exclude_none
+        return {k: v for k, v in self._fields.items() if v is not None}
+
+
+def test_a_model_typed_meta_keeps_its_fields_and_gets_the_call_id(tmp_path, monkeypatch):
+    ClientSession, seen = _install_fake_mcp_with_meta(monkeypatch)
+    path = tmp_path / "events.jsonl"
+    _register(path)
+    asyncio.run(ClientSession().call_tool("lookup", {}, meta=_ModelMeta(progressToken="t-1", unused=None)))
+    shutdown()
+    assert seen["meta"]["progressToken"] == "t-1" and "unused" not in seen["meta"]
+    sent = seen["meta"]["argus/call_id"]
+    requested = [e for e in _read_events(path) if e["event_type"] == "mcp.tool_call.requested"]
+    assert requested[0]["data"]["mcp"]["call_id"] == sent
+
+
+def test_a_mapping_meta_that_is_not_a_dict_gets_the_call_id(tmp_path, monkeypatch):
+    from types import MappingProxyType
+
+    ClientSession, seen = _install_fake_mcp_with_meta(monkeypatch)
+    path = tmp_path / "events.jsonl"
+    _register(path)
+    asyncio.run(ClientSession().call_tool("lookup", {}, meta=MappingProxyType({"other": "kept"})))
+    shutdown()
+    assert seen["meta"]["other"] == "kept" and seen["meta"]["argus/call_id"].startswith("call_")
+
+
+def test_a_meta_of_an_unknown_type_is_passed_through_untouched(tmp_path, monkeypatch):
+    ClientSession, seen = _install_fake_mcp_with_meta(monkeypatch)
+    path = tmp_path / "events.jsonl"
+    _register(path)
+    odd = object()
+    asyncio.run(ClientSession().call_tool("lookup", {}, meta=odd))
+    shutdown()
+    assert seen["meta"] is odd
+    requested = [e for e in _read_events(path) if e["event_type"] == "mcp.tool_call.requested"]
+    assert "call_id" not in requested[0]["data"]["mcp"]
+
+
 def test_a_session_that_does_not_accept_meta_is_called_unchanged(tmp_path, monkeypatch):
     seen = {}
 
