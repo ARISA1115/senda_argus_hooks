@@ -33,6 +33,13 @@ def parse_claude_style(
     if with_response:
         call.tool_response = data.get("tool_response")
         call.has_response = "tool_response" in data
+        # PostToolUseFailure は tool_response を持たず、error と中断の印を持つ。
+        if not call.has_response and "error" in data:
+            call.tool_response = {
+                "error": data.get("error"),
+                "is_interrupt": data.get("is_interrupt"),
+            }
+            call.has_response = True
     return call
 
 

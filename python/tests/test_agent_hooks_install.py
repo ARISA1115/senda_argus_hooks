@@ -346,3 +346,37 @@ def test_hook_command_is_not_hijacked_by_module_in_project_dir(tmp_path):
     )
     assert "HIJACK" not in result.stdout
     assert result.returncode == 2
+
+
+def test_failure_events_are_registered_with_the_post_adapter(tmp_path):
+    # 失敗と中断で終わった実行は成功のイベントに届かない。Cursor と同じく失敗のイベントも登録する。
+    claude = _read(_install("claude_code", "managed", tmp_path))["hooks"]
+    assert claude["PostToolUseFailure"][0]["hooks"][0]["command"].endswith(
+        "hook claude_code post --config /etc/senda-argus/hooks.env"
+    )
+    copilot = _read(_install("copilot_cli", "managed", tmp_path))["hooks"]
+    assert copilot["postToolUseFailure"][0]["bash"].endswith(
+        "hook copilot_cli post --config /etc/senda-argus/hooks.env"
+    )
+    again = _read(_install("claude_code", "managed", tmp_path))["hooks"]
+    assert len(again["PostToolUseFailure"]) == 1
+
+
+def test_user_scope_keeps_user_site_packages_importable(monkeypatch):
+    # -I は利用者の site-packages を外す。pip install --user で入れた物が読めなくなるので、
+    # 利用者の階層の導入は作業ディレクトリだけを外す -P を使う。-P は 3.11 以降。
+    monkeypatch.setattr(inst.sys, "version_info", (3, 12, 0))
+    assert " -P -m " in inst.hook_command("claude_code", "pre", "user", python=PY)
+    assert " -I -m " in inst.hook_command("claude_code", "pre", "managed", python=PY)
+    monkeypatch.setattr(inst.sys, "version_info", (3, 10, 0))
+    assert " -I -m " in inst.hook_command("claude_code", "pre", "user", python=PY)
+
+
+def test_all_with_an_unsupported_product_writes_nothing(monkeypatch):
+    written: list[str] = []
+    monkeypatch.setattr(
+        inst, "install_product", lambda product, *a, **k: written.append(product)
+    )
+    with pytest.raises(InstallError):
+        inst.run_install(list(inst.PRODUCTS), "managed", dry_run=False)
+    assert written == []

@@ -100,15 +100,26 @@ def settings_path(
     raise InstallError(f"未対応の組み合わせ: {product} {scope}")
 
 
+def _isolation_flag(scope: str) -> str:
+    """hook の python に付ける、読み込み先を絞る引数。
+
+    作業ディレクトリを読み込み先から外さないと、エージェントがプロジェクトに同じ名前のモジュールを
+    置くだけで hook の代わりに動く。管理の導入は -I で、作業ディレクトリと PYTHONPATH と利用者の
+    site-packages を外す。利用者の階層の導入は pip install --user のパッケージを読めなければ動かないので、
+    利用者の site-packages を残す -P を使う。-P は Python 3.11 以降で、それより前は -I にする。
+    """
+    if scope == "user" and sys.version_info >= (3, 11):
+        return "-P"
+    return "-I"
+
+
 def hook_command(
     product: str, phase: str, scope: str, *, python: str | None = None
 ) -> str:
     """製品の hook に書く command。管理の導入では、管理の設定ファイルだけを読ませる。"""
     parts = [
         python or sys.executable,
-        # -I は作業ディレクトリ、PYTHONPATH、利用者の site-packages を読み込み先から外す。外さないと、
-        # エージェントがプロジェクトに同じ名前のモジュールを置くだけで hook の代わりに動く。
-        "-I",
+        _isolation_flag(scope),
         "-m",
         "senda_argus_hooks.cli.main",
         "hook",
@@ -173,6 +184,11 @@ def _hook_entries(
                 "matcher": "*",
                 "hooks": [{"type": "command", "command": post, "timeout": timeout}],
             },
+            # 失敗と中断で終わった実行は PostToolUse に届かない。記録が欠けると静かな欠落に見える。
+            "PostToolUseFailure": {
+                "matcher": "*",
+                "hooks": [{"type": "command", "command": post, "timeout": timeout}],
+            },
         }
     if product == "codex":
         return {
@@ -190,6 +206,11 @@ def _hook_entries(
         return {
             "preToolUse": {"type": "command", "bash": pre, "timeoutSec": timeout},
             "postToolUse": {"type": "command", "bash": post, "timeoutSec": timeout},
+            "postToolUseFailure": {
+                "type": "command",
+                "bash": post,
+                "timeoutSec": timeout,
+            },
         }
     if product == "cursor":
         return {
@@ -330,10 +351,26 @@ def install_product(
     return InstallResult(product, scope, str(path), changed=True, backup=backup)
 
 
+def preflight_install(products: list[str], scope: str) -> None:
+    """書き込みの前に、製品と方式の組が全て対応していることを確認する。"""
+    platform = current_platform()
+    if platform not in PLATFORMS:
+        raise InstallError(f"未対応の OS: {platform}")
+    for product in products:
+        if product not in PRODUCTS:
+            raise InstallError(f"未対応の製品: {product}")
+        if scope not in SCOPES:
+            raise InstallError(f"未対応の方式: {scope}")
+        settings_path(product, scope, platform, home=Path.home(), system_root=Path("/"))
+
+
 def run_install(
     products: list[str], scope: str, *, dry_run: bool = False, stream=None
 ) -> list[InstallResult]:
     out = stream if stream is not None else sys.stderr
+    # 書き込みの前に、全ての製品と方式の組を検証する。途中で失敗すると、先の製品だけ書かれて
+    # 残りが書かれない中途半端な状態になる。
+    preflight_install(products, scope)
     results = [install_product(product, scope, dry_run=dry_run) for product in products]
     if scope == "user":
         print(USER_SCOPE_NOTICE, file=out)

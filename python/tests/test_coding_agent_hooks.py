@@ -618,3 +618,15 @@ def test_postcall_is_not_retried_on_a_client_error(monkeypatch):
     monkeypatch.setattr(hooks, "post_json", server)
     assert hooks.send_postcall(call, _config()) is False
     assert len(server.calls) == 1
+
+
+def test_claude_failure_event_is_recorded_with_its_error():
+    data = dict(CLAUDE_POST, hook_event_name="PostToolUseFailure")
+    data.pop("tool_response", None)
+    data.update(error="Command exited with non-zero status code 1", is_interrupt=False)
+    call = adapter_for("claude_code").parse_post(data)
+    assert call.has_response is True
+    assert call.tool_response == {
+        "error": "Command exited with non-zero status code 1",
+        "is_interrupt": False,
+    }
