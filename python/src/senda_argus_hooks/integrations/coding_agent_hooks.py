@@ -1,12 +1,12 @@
 """コーディングエージェントの hook と Argus の実行の前の判定をつなぐ共通の部分。
 
-Claude Code、Codex、GitHub Copilot CLI、Cursor の hook から呼ばれ、製品の入力を読み、
-POST /v1/hooks/precheck の判定を製品の応答の形へ写す。製品ごとの違いは入力の読み方と応答の
-書き方だけで、判定の待ち方、時間の上限、失敗の扱いはここに 1 つだけ置く。
+PRODUCTS の各製品の hook から呼ばれ、製品の入力を読み、POST /v1/hooks/precheck の判定を製品の
+応答の形へ写す。製品ごとの違いは入力の読み方と応答の書き方だけで、判定の待ち方、時間の上限、
+失敗の扱いはここに 1 つだけ置く。
 
 失敗の扱い:
-- 内部の上限に達したら、製品の時間切れを待たずにアダプタ自身が deny を返す。4 製品とも、
-  製品の側の時間切れは許可に倒れるため
+- 内部の上限に達したら、製品の時間切れを待たずにアダプタ自身が deny を返す。製品の側の時間切れは、
+  許可に倒れると公式に書かれた製品と、扱いが公式に書かれていない製品があるため
 - 接続できない、503 などの判定できない応答、形の不正な応答は、組織の設定 fail_open が true の
   ときだけ allow にする。既定は deny
 - 400、401、403 はサーバーが要求を拒んだ応答で、判定できない状態ではない。fail_open に
@@ -29,7 +29,25 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TextIO
 
-PRODUCTS = ("claude_code", "codex", "copilot_cli", "cursor")
+PRODUCTS = (
+    "claude_code",
+    "codex",
+    "copilot_cli",
+    "cursor",
+    "vscode_copilot",
+    "windsurf",
+    "gemini_cli",
+    "qwen_code",
+    "kiro",
+    "amazon_q_cli",
+    "factory_droid",
+    "crush",
+    "goose",
+    "augment_code",
+    "junie_cli",
+    "cline",
+    "antigravity_cli",
+)
 DECISIONS = frozenset({"allow", "deny", "pending"})
 
 PRECHECK_PATH = "/v1/hooks/precheck"
@@ -42,13 +60,9 @@ MANAGED_CONFIG_PATH = Path("/etc/senda-argus/hooks.env")
 PRODUCT_HOOK_TIMEOUT_SEC = 30
 # 製品の時間の上限から引く余裕。Python の起動と応答の書き出しの分。
 _PRODUCT_TIMEOUT_MARGIN_SEC = 8
-# 製品の時間の上限。Cursor は文書に秒数が無いため、導入のコマンドが書く値を上限とみなす。
-PRODUCT_TIMEOUT_SEC: dict[str, int] = {
-    "claude_code": PRODUCT_HOOK_TIMEOUT_SEC,
-    "codex": PRODUCT_HOOK_TIMEOUT_SEC,
-    "copilot_cli": PRODUCT_HOOK_TIMEOUT_SEC,
-    "cursor": PRODUCT_HOOK_TIMEOUT_SEC,
-}
+# 製品の時間の上限。導入のコマンドが時間を書く製品はその値、書けない製品は公式の既定のうち最も短い
+# 30 秒 (Amazon Q と Cline と VS Code)。Windsurf と Cursor は文書に秒数が無いため、同じ 30 秒を上限とみなす。
+PRODUCT_TIMEOUT_SEC: dict[str, int] = dict.fromkeys(PRODUCTS, PRODUCT_HOOK_TIMEOUT_SEC)
 # 承認を待つ全体の上限の既定と、1 回の要求の上限の既定。
 DEFAULT_WAIT_LIMIT_SEC = 20.0
 DEFAULT_REQUEST_TIMEOUT_SEC = 10.0
@@ -523,19 +537,30 @@ class ProductAdapter:
     def parse_post(self, data: dict[str, Any]) -> ToolCall:
         raise NotImplementedError
 
-    def render_deny(self, reason: str) -> dict[str, Any]:
+    # 遮断の終了コード。終了コード 2 を遮断と公式に書く製品は 2。標準出力の JSON だけが公式の遮断の
+    # 返し方で、終了コードの意味が書かれていない製品は 0 にする。0 以外を hook の失敗として標準出力を
+    # 捨てる製品で、遮断の JSON を読ませずに許可へ倒さないため。
+    deny_exit_code: int = 2
+
+    def render_deny(self, reason: str) -> dict[str, Any] | None:
+        """遮断のときの標準出力。None は何も書かず、終了コードと標準エラー出力だけで遮断を返す。"""
         raise NotImplementedError
 
     def render_allow(self) -> dict[str, Any] | None:
         """許可のときの出力。None は何も書かず、製品の通常の許可の流れへ進める。"""
         return None
 
+    def render_post(self) -> dict[str, Any] | None:
+        """実行の後の hook の標準出力。応答を必ず返すと公式に書かれた製品だけが書く。"""
+        return None
+
     def deny_output(self, reason: str) -> HookOutput:
-        # 遮断は deny の JSON と終了コード 2 の両方で返す。終了コード 2 では stderr を理由として読む製品がある。
+        # 遮断は製品の deny の JSON と終了コードで返す。終了コード 2 では stderr を理由として読む製品がある。
+        rendered = self.render_deny(reason)
         return HookOutput(
-            stdout=json.dumps(self.render_deny(reason), ensure_ascii=False),
+            stdout="" if rendered is None else json.dumps(rendered, ensure_ascii=False),
             stderr=reason,
-            exit_code=2,
+            exit_code=self.deny_exit_code,
         )
 
     def allow_output(self) -> HookOutput:
@@ -585,27 +610,21 @@ def run_post(
         send_postcall(call, config)
     except Exception:  # noqa: BLE001, S110 - 記録の失敗で製品の実行を止めない
         pass
-    return HookOutput(stdout="", stderr="", exit_code=0)
+    rendered = adapter.render_post()
+    return HookOutput(
+        stdout="" if rendered is None else json.dumps(rendered, ensure_ascii=False),
+        stderr="",
+        exit_code=0,
+    )
 
 
 def adapter_for(product: str) -> ProductAdapter:
-    if product == "claude_code":
-        from .claude_code_hook import ClaudeCodeAdapter
+    from .hook_products import ADAPTERS
 
-        return ClaudeCodeAdapter()
-    if product == "codex":
-        from .codex_hook import CodexAdapter
-
-        return CodexAdapter()
-    if product == "copilot_cli":
-        from .copilot_cli_hook import CopilotCliAdapter
-
-        return CopilotCliAdapter()
-    if product == "cursor":
-        from .cursor_hook import CursorAdapter
-
-        return CursorAdapter()
-    raise ValueError(f"未対応の製品: {product}")
+    factory = ADAPTERS.get(product)
+    if factory is None:
+        raise ValueError(f"未対応の製品: {product}")
+    return factory()
 
 
 def main(

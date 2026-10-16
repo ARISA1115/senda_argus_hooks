@@ -331,15 +331,30 @@ def cmd_hook(args) -> int:
 
 def cmd_hooks_install(args) -> int:
     """コーディングエージェントの hook の設定を書き込む。"""
-    from senda_argus_hooks.cli.agent_hooks_install import PRODUCTS, run_install
+    from senda_argus_hooks.cli.agent_hooks_install import (
+        InstallError,
+        run_install,
+        supported_products,
+    )
 
-    products = list(PRODUCTS) if args.product == "all" else [args.product]
+    if args.product == "all":
+        products, skipped = supported_products(args.scope)
+        for name, reason in skipped.items():
+            print(f"飛ばした製品 {name}: {reason}", file=sys.stderr)
+        if not products:
+            raise InstallError(f"方式 {args.scope} で導入できる製品が無い")
+    else:
+        products = [args.product]
     results = run_install(products, args.scope, dry_run=args.dry_run)
     print(json.dumps([r.__dict__ for r in results], ensure_ascii=False, indent=2))
     return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
+    from senda_argus_hooks.integrations.coding_agent_hooks import (
+        PRODUCTS as HOOK_PRODUCTS,
+    )
+
     parser = argparse.ArgumentParser(prog="senda-hooks", description="Inspect, validate, and convert Senda-Argus hook event files.")
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -409,9 +424,7 @@ def build_parser() -> argparse.ArgumentParser:
     hook_p = sub.add_parser(
         "hook", help="Run as a coding agent hook and return the Argus decision"
     )
-    hook_p.add_argument(
-        "product", choices=["claude_code", "codex", "copilot_cli", "cursor"]
-    )
+    hook_p.add_argument("product", choices=list(HOOK_PRODUCTS))
     hook_p.add_argument("phase", choices=["pre", "post"])
     hook_p.add_argument(
         "--config", help="Managed config file; when set, only this file is read"
@@ -423,7 +436,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     hooks_install_p.add_argument(
         "--product",
-        choices=["claude_code", "codex", "copilot_cli", "cursor", "all"],
+        choices=[*HOOK_PRODUCTS, "all"],
         required=True,
     )
     hooks_install_p.add_argument(
