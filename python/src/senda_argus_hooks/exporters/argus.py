@@ -4,6 +4,7 @@ import atexit
 import contextlib
 import datetime
 import email.utils
+import http.client
 import json
 import logging
 import queue
@@ -99,6 +100,18 @@ def _terminal_rejection_code(exc: urllib.error.HTTPError) -> str | None:
     if isinstance(code, str) and code in _TERMINAL_ERROR_CODES and body.get("retryable") is False:
         return code
     return None
+
+
+def _read_body(response: Any) -> bytes | None:
+    """応答の本文を上限つきで読む。読めなければ None を返す。読めなくても、送信の結果は変えない。
+
+    分割転送の途中で切れた応答は、OSError でなく http.client.HTTPException の IncompleteRead になる。
+    受けないと例外が送出のワーカーを止め、後の記録が送られず、持っている時間帯も戻されない。
+    """
+    try:
+        return response.read(65536)
+    except (http.client.HTTPException, OSError):
+        return None
 
 
 def _add_window(windows: list[list[float]], lo: float, hi: float, count: float) -> list[list[float]]:
@@ -240,7 +253,7 @@ class ArgusExporter(BaseExporter):
         try:
             with urllib.request.urlopen(req, timeout=self._timeout) as response:
                 status = int(getattr(response, "status", None) or response.getcode())
-                raw = response.read(65536)
+                raw = _read_body(response) or b""
             if 200 <= status < 300:
                 self._log_rejected_windows(raw)
                 return
@@ -248,13 +261,25 @@ class ArgusExporter(BaseExporter):
             if 400 <= exc.code < 500:
                 _logger.warning("Argus が破棄の時間帯の報告を拒みました。送り直しません: status=%d", exc.code)
                 return
-        except (urllib.error.URLError, OSError, ValueError):
+        except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError):
             pass
         with self._drop_lock:
             merged = self._discards
             for w in windows:
                 merged = _add_window(merged, w[0], w[1], w[2])
             self._discards = _bound_windows(merged)
+
+    def _read_accepted(self, response: Any, status: Any) -> bytes:
+        """202 の本文を読む。判定を省いた受け付けかは本文にあるので、読めなければ見落とさず警告する。"""
+        if int(status) != 202:
+            return b""
+        raw = _read_body(response)
+        if raw is None:
+            self._warn_rejection(
+                "Argus の受け付けの本文を読めませんでした。判定を省いたかを確認できません: %s", "unreadable_accept"
+            )
+            return b""
+        return raw
 
     @staticmethod
     def _log_rejected_windows(raw: bytes) -> None:
@@ -414,7 +439,7 @@ class ArgusExporter(BaseExporter):
         try:
             with urllib.request.urlopen(req, timeout=self._timeout) as response:
                 status = getattr(response, "status", None) or response.getcode()
-                raw = response.read(65536) if int(status) == 202 else b""
+                raw = self._read_accepted(response, status)
             self._http_log(f"POST completed status={status} url={self._url}{suffix}")
             self._check_unjudged_accept(raw)
             self._last_ingest_ok = 200 <= int(status) < 300
@@ -432,7 +457,7 @@ class ArgusExporter(BaseExporter):
                 marked = exc.headers is not None and bool((exc.headers.get("x-argus-maintenance") or "").strip())
                 return ("maintenance" if exc.code == 503 and marked else f"status={exc.code}"), retry_after
             return None, None
-        except (urllib.error.URLError, OSError) as exc:
+        except (urllib.error.URLError, http.client.HTTPException, OSError) as exc:
             reason = getattr(exc, "reason", exc)
             self._http_log(f"POST failed url={self._url}{suffix} error={reason}")
             return f"connection={type(reason).__name__}", None
@@ -487,7 +512,7 @@ class ArgusExporter(BaseExporter):
         try:
             with urllib.request.urlopen(req, timeout=self._timeout) as response:
                 status = getattr(response, "status", None) or response.getcode()
-                raw = response.read(65536) if int(status) == 202 else b""
+                raw = self._read_accepted(response, status)
         except urllib.error.HTTPError as exc:
             self._http_log(f"POST failed status={exc.code} url={self._url}")
             # 保留の符号は 503 で返り、False を返して取り直しの対象に残す。
@@ -496,7 +521,7 @@ class ArgusExporter(BaseExporter):
                 self._warn_rejection("Argus が受信を拒みました。送り直しません: %s", code)
                 return True
             return False
-        except (urllib.error.URLError, OSError) as exc:
+        except (urllib.error.URLError, http.client.HTTPException, OSError) as exc:
             self._http_log(f"POST failed url={self._url} error={getattr(exc, 'reason', exc)}")
             return False
         self._check_unjudged_accept(raw)

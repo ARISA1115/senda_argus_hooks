@@ -1,6 +1,7 @@
 """ArgusExporter の単体テスト。"""
 from __future__ import annotations
 
+import http.client
 import json
 import datetime
 import threading
@@ -427,6 +428,8 @@ class _DiscardIngest:
         ingest_status: int = 200,
         fail_status: int = 503,
         ingest_body: dict | None = None,
+        truncated_reports: bool = False,
+        bad_status_ingest: bool = False,
     ):
         import http.server
         import threading as _threading
@@ -440,9 +443,22 @@ class _DiscardIngest:
                 body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)))
                 if self.path == "/v1/hooks/discards":
                     outer.reports.append(body)
+                    if truncated_reports:
+                        # 分割転送の途中で切れた応答。本文を読むと IncompleteRead になる。
+                        self.send_response(200)
+                        self.send_header("Transfer-Encoding", "chunked")
+                        self.end_headers()
+                        self.wfile.write(b"10\r\nab")
+                        self.close_connection = True
+                        return
                     code = discard_status
                 else:
                     outer.ingests += 1
+                    if bad_status_ingest:
+                        # 状態行が壊れた応答。urlopen 自体が BadStatusLine を出す。
+                        self.wfile.write(b"NOT HTTP\r\n\r\n")
+                        self.close_connection = True
+                        return
                     code = fail_status if outer.ingests <= fail else ingest_status
                 payload = b""
                 if self.path != "/v1/hooks/discards" and code == ingest_status and ingest_body:
@@ -534,6 +550,59 @@ def test_discards_are_not_reported_after_a_rejected_ingest():
         assert exp._discards == [[_BASE, _BASE, 1.0], [_BASE + 500, _BASE + 500, 1.0]]
     finally:
         srv.srv.shutdown()
+
+
+def test_a_truncated_report_response_does_not_stop_the_worker():
+    # 本文が途中で切れた 2xx で例外を逃がすと、報告が受けられているのに時間帯が戻され、同じ報告が重ねて
+    # 送られる。応答の本文は任意の情報で、2xx なら報告は受けられているので、時間帯は戻さない。
+    srv = _DiscardIngest(fail=3, truncated_reports=True)
+    try:
+        exp = _fast_exporter(srv.url, retry_max_attempts=3)
+        exp.export([{"event_id": "a", "timestamp": _at(0)}])
+        exp.export([{"event_id": "b", "timestamp": _at(500)}])
+        exp.export([{"event_id": "c", "timestamp": _at(600)}])
+        exp.shutdown()
+        assert srv.ingests == 5
+        assert len(srv.reports) == 1
+        assert exp._discards == []
+    finally:
+        srv.srv.shutdown()
+
+
+def test_a_broken_status_line_is_retried_then_counted_as_discarded_without_raising():
+    srv = _DiscardIngest(fail=0, bad_status_ingest=True)
+    try:
+        exp = _fast_exporter(srv.url, retry_max_attempts=3)
+        exp.export([{"event_id": "a", "timestamp": _at(0)}])
+        exp.export([{"event_id": "b", "timestamp": _at(500)}])
+        exp.shutdown()
+        # 2 件とも 3 回ずつ試し、例外でワーカーが止まらず、どちらも時間帯に数える。
+        assert srv.ingests == 6
+        assert len(exp._discards) == 2
+    finally:
+        srv.srv.shutdown()
+
+
+def test_a_broken_status_line_does_not_raise_from_send_sync():
+    srv = _DiscardIngest(fail=0, bad_status_ingest=True)
+    try:
+        exp = _fast_exporter(srv.url)
+        assert exp.send_sync([{"event_id": "a", "timestamp": _at(0)}]) is False
+    finally:
+        srv.srv.shutdown()
+
+
+def test_an_unreadable_202_body_warns_that_the_judgment_cannot_be_confirmed(caplog):
+    class _Response:
+        status = 202
+
+        def read(self, n):
+            raise http.client.IncompleteRead(b"ab", 10)
+
+    exp = ArgusExporter({"endpoint": "http://127.0.0.1:9"})
+    with caplog.at_level("WARNING"):
+        assert exp._read_accepted(_Response(), 202) == b""
+    assert "判定を省いたかを確認できません" in caplog.text
 
 
 def test_a_429_is_retried_with_the_same_payload_and_not_counted_as_discarded():
