@@ -322,6 +322,23 @@ def cmd_devin_collect(args) -> int:
         time.sleep(interval)
 
 
+def cmd_hook(args) -> int:
+    """コーディングエージェントの hook の入口。製品の応答を標準出力へ書く。"""
+    from senda_argus_hooks.integrations.coding_agent_hooks import main as hook_main
+
+    return hook_main(args.product, args.phase, args.config)
+
+
+def cmd_hooks_install(args) -> int:
+    """コーディングエージェントの hook の設定を書き込む。"""
+    from senda_argus_hooks.cli.agent_hooks_install import PRODUCTS, run_install
+
+    products = list(PRODUCTS) if args.product == "all" else [args.product]
+    results = run_install(products, args.scope, dry_run=args.dry_run)
+    print(json.dumps([r.__dict__ for r in results], ensure_ascii=False, indent=2))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="senda-hooks", description="Inspect, validate, and convert Senda-Argus hook event files.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -388,6 +405,32 @@ def build_parser() -> argparse.ArgumentParser:
     devin_p.add_argument("--once", action="store_true", help="Pull once and exit")
     devin_p.add_argument("--interval", type=int, default=60, help="Seconds between pulls")
     devin_p.set_defaults(func=cmd_devin_collect)
+
+    hook_p = sub.add_parser(
+        "hook", help="Run as a coding agent hook and return the Argus decision"
+    )
+    hook_p.add_argument(
+        "product", choices=["claude_code", "codex", "copilot_cli", "cursor"]
+    )
+    hook_p.add_argument("phase", choices=["pre", "post"])
+    hook_p.add_argument(
+        "--config", help="Managed config file; when set, only this file is read"
+    )
+    hook_p.set_defaults(func=cmd_hook)
+
+    hooks_install_p = sub.add_parser(
+        "hooks-install", help="Write coding agent hook settings"
+    )
+    hooks_install_p.add_argument(
+        "--product",
+        choices=["claude_code", "codex", "copilot_cli", "cursor", "all"],
+        required=True,
+    )
+    hooks_install_p.add_argument(
+        "--scope", choices=["managed", "user"], default="managed"
+    )
+    hooks_install_p.add_argument("--dry-run", action="store_true")
+    hooks_install_p.set_defaults(func=cmd_hooks_install)
 
     return parser
 
