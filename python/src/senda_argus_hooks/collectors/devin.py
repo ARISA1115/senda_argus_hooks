@@ -28,6 +28,7 @@ Devin はクラウドの仮想機で動き、計装を差せない。外へ通�
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import logging
 import os
@@ -131,7 +132,7 @@ def _urllib_fetch(url: str, headers: dict[str, str]) -> Any:
             body = resp.read(8 * 1024 * 1024 + 1)
     except urllib.error.HTTPError as exc:
         raise DevinApiError(f"Devin API returned {exc.code}") from None
-    except (urllib.error.URLError, OSError):
+    except (urllib.error.URLError, http.client.HTTPException, OSError):
         raise DevinApiError("Devin API is unreachable") from None
     if len(body) > 8 * 1024 * 1024:
         raise DevinApiError("Devin API response too large")

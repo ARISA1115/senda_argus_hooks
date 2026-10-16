@@ -21,6 +21,7 @@ Argus が新しい判定を行えない理由を符号で表し、符号ごと�
 from __future__ import annotations
 
 import asyncio
+import http.client
 import json
 import logging
 import os
@@ -273,8 +274,8 @@ class AdmissionGuard:
                 raw = response.read(65536)
         except urllib.error.HTTPError as exc:
             return (*self._from_http_error(exc), None)
-        except (urllib.error.URLError, OSError, ValueError):
-            # 接続の失敗とタイムアウトは Argus に届かない状態として扱う。
+        except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError):
+            # 接続の失敗とタイムアウトと、本文や状態行が壊れた応答は Argus に届かない状態として扱う。
             return (*self._unavailable(), None)
         try:
             body = json.loads(raw.decode("utf-8"))

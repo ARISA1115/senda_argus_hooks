@@ -8,10 +8,44 @@ const DISCARD_MERGE_SEC = 60;
 // 受け取り側が受ける時間帯の範囲。送る前に同じ範囲へ切り詰め、範囲外で報告ごと拒まれないようにする。
 const DISCARD_MAX_SPAN = 7 * 86400;
 const DISCARD_MAX_AGE = 30 * 86400;
-// 届かなかったとして数える応答。Python の送出が送り直す状態と揃える。
-const RETRY_STATUSES = new Set([502, 503, 504]);
+// 受け取り側が 1 つの時間帯に受ける件数の上限。超えた時間帯は、他が受かる報告でも黙って捨てられる。
+const DISCARD_MAX_COUNT = 100_000;
 
 type DiscardWindow = { from: number; to: number; count: number };
+
+// 時間帯を開始の順を保って足す。前後 DISCARD_MERGE_SEC の内で重なる時間帯は 1 つにまとめる。末尾へ足す
+// だけだと、遅れた記録や時計の補正で古い範囲が来たとき並びが時刻の順でなくなり、上限での退避が離れた 2 つを寄せる。
+function addWindow(windows: DiscardWindow[], from: number, to: number, count: number): DiscardWindow[] {
+  const kept: DiscardWindow[] = [];
+  let lo = from;
+  let hi = to;
+  let n = count;
+  for (const w of windows) {
+    if (lo <= w.to + DISCARD_MERGE_SEC && hi >= w.from - DISCARD_MERGE_SEC) {
+      lo = Math.min(lo, w.from);
+      hi = Math.max(hi, w.to);
+      n += w.count;
+    } else {
+      kept.push(w);
+    }
+  }
+  kept.push({ from: lo, to: hi, count: n });
+  return kept.sort((a, b) => a.from - b.from);
+}
+
+// 数が上限を超えたら、時刻の間隔が最も狭い隣り合う 2 つを 1 つにまとめる。件数は失わない。
+function boundWindows(windows: DiscardWindow[]): DiscardWindow[] {
+  while (windows.length > MAX_DISCARD_WINDOWS) {
+    let best = 0;
+    for (let i = 1; i < windows.length - 1; i += 1) {
+      if (windows[i + 1].from - windows[i].to < windows[best + 1].from - windows[best].to) best = i;
+    }
+    const a = windows[best];
+    const b = windows[best + 1];
+    windows.splice(best, 2, { from: Math.min(a.from, b.from), to: Math.max(a.to, b.to), count: a.count + b.count });
+  }
+  return windows;
+}
 
 export class ArgusExporter implements Exporter {
   private readonly url: string;
@@ -60,25 +94,7 @@ export class ArgusExporter implements Exporter {
   noteDiscard(timestamp: unknown): void {
     const parsed = typeof timestamp === "string" ? Date.parse(timestamp) / 1000 : Number.NaN;
     const at = Number.isFinite(parsed) ? parsed : Date.now() / 1000;
-    const last = this.discards.at(-1);
-    if (last && at >= last.from - DISCARD_MERGE_SEC && at <= last.to + DISCARD_MERGE_SEC) {
-      last.from = Math.min(last.from, at);
-      last.to = Math.max(last.to, at);
-      last.count += 1;
-    } else {
-      this.discards.push({ from: at, to: at, count: 1 });
-    }
-    this.bound();
-  }
-
-  private bound(): void {
-    while (this.discards.length > MAX_DISCARD_WINDOWS) {
-      const oldest = this.discards.shift() as DiscardWindow;
-      const head = this.discards[0];
-      head.from = Math.min(head.from, oldest.from);
-      head.to = Math.max(head.to, oldest.to);
-      head.count += oldest.count;
-    }
+    this.discards = boundWindows(addWindow(this.discards, at, at, 1));
   }
 
   // 持っている時間帯を 1 回だけ報告する。届かなければ戻し、次の成功で送る。
@@ -88,7 +104,8 @@ export class ArgusExporter implements Exporter {
       const to = Math.min(w.to, now);
       const from = Math.min(Math.max(w.from, to - DISCARD_MAX_SPAN), to);
       if (from < now - DISCARD_MAX_AGE) continue;
-      out.push({ from, to, count: w.count });
+      // 件数が上限を超えると、受け取り側は時間帯ごと捨てる。上限へ切り詰めて時間帯を残す。
+      out.push({ from, to, count: Math.min(Math.max(w.count, 1), DISCARD_MAX_COUNT) });
     }
     return out;
   }
@@ -120,8 +137,9 @@ export class ArgusExporter implements Exporter {
     } finally {
       clearTimeout(timer);
       if (!delivered) {
-        this.discards = [...windows, ...this.discards];
-        this.bound();
+        let merged = this.discards;
+        for (const w of windows) merged = addWindow(merged, w.from, w.to, w.count);
+        this.discards = boundWindows(merged);
       }
       this.reporting = false;
     }
@@ -133,7 +151,6 @@ export class ArgusExporter implements Exporter {
     const timer = setTimeout(() => controller.abort(), untracked ? Math.min(this.timeoutMs, 5000) : this.timeoutMs);
     if (untracked) timer?.unref?.();
     let delivered = false;
-    let lost = false;
     try {
       const res = await fetch(this.url, {
         method: "POST",
@@ -142,17 +159,17 @@ export class ArgusExporter implements Exporter {
         signal: controller.signal,
       });
       delivered = res.ok;
-      lost = RETRY_STATUSES.has(res.status);
     } catch {
       // Fail open: observability must not break the agent.
-      lost = true;
     } finally {
       clearTimeout(timer);
     }
     if (untracked) return;
     if (delivered) {
       await this.reportDiscards();
-    } else if (lost) {
+    } else {
+      // 接続の失敗と、401、403、429 など拒まれた送信。どちらも届かなかった記録として数え、取り込みが
+      // 回復した後に時間帯を報告する。数えないと、受け取り側がその間の中継にだけある記録を hooks の欠落として警報にする。
       this.noteDiscard((event as { timestamp?: unknown }).timestamp);
     }
   }

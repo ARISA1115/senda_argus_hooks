@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import http.client
 import json
 import logging
 import socket
@@ -12,6 +13,7 @@ import sys
 import threading
 import time
 import types
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
@@ -22,6 +24,7 @@ from senda_argus_hooks.core.unjudged import (
     clamp_ttl,
     parse_policy,
 )
+from senda_argus_hooks.collectors.devin import DevinApiError, _urllib_fetch
 from senda_argus_hooks.exporters.argus import ArgusExporter
 
 ALL_LOCAL = {"actions_exhausted": "block", "quota_unknown": "hold", "read_only": "block", "argus_unavailable": "pass"}
@@ -633,3 +636,31 @@ def test_export_accepted_without_judgment_warns(fake_argus, caplog):
     exporter.export([{"event_id": "e1", "event_type": "x"}])
     exporter.shutdown()
     assert "判定を省いて記録を受け付けました: quota_unknown" in caplog.text
+
+
+# 本文が途中で切れた応答の IncompleteRead と、状態行が壊れた応答の BadStatusLine は、OSError でなく
+# http.client.HTTPException。受けないと、判定の照会ではエージェントのツール呼び出しへ、Devin の収集では
+# 収集の周期へ例外が出る。
+BROKEN = [http.client.BadStatusLine("NOT HTTP"), http.client.IncompleteRead(b"ab", 10)]
+
+
+@pytest.mark.parametrize("exc", BROKEN, ids=["bad_status_line", "incomplete_read"])
+def test_a_broken_admission_response_is_unavailable_not_an_exception(monkeypatch, exc):
+    def broken(*args, **kwargs):
+        raise exc
+
+    monkeypatch.setattr(urllib.request, "urlopen", broken)
+    guard = _guard("http://127.0.0.1:9", policy={**ALL_LOCAL, "argus_unavailable": "block"})
+    with pytest.raises(UnjudgedActionBlocked) as info:
+        guard.before_action("lookup")
+    assert info.value.reason_code == "argus_unavailable"
+
+
+@pytest.mark.parametrize("exc", BROKEN, ids=["bad_status_line", "incomplete_read"])
+def test_a_broken_devin_response_is_an_api_error(monkeypatch, exc):
+    def broken(*args, **kwargs):
+        raise exc
+
+    monkeypatch.setattr(urllib.request, "urlopen", broken)
+    with pytest.raises(DevinApiError):
+        _urllib_fetch("http://127.0.0.1:9/x", {})
