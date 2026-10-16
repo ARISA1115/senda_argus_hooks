@@ -420,7 +420,14 @@ def test_retry_after_http_date_is_honored_up_to_the_cap():
 class _DiscardIngest:
     """先頭の fail 回の取り込みを 503 で返し、その後は 200 を返す。捨てた時間帯の報告を控える。"""
 
-    def __init__(self, fail: int, discard_status: int = 200, ingest_status: int = 200):
+    def __init__(
+        self,
+        fail: int,
+        discard_status: int = 200,
+        ingest_status: int = 200,
+        fail_status: int = 503,
+        ingest_body: dict | None = None,
+    ):
         import http.server
         import threading as _threading
 
@@ -436,11 +443,15 @@ class _DiscardIngest:
                     code = discard_status
                 else:
                     outer.ingests += 1
-                    code = 503 if outer.ingests <= fail else ingest_status
+                    code = fail_status if outer.ingests <= fail else ingest_status
+                payload = b""
+                if self.path != "/v1/hooks/discards" and code == ingest_status and ingest_body:
+                    payload = json.dumps(ingest_body).encode("utf-8")
                 self.send_response(code)
                 self.send_header("Retry-After", "0")
-                self.send_header("Content-Length", "0")
+                self.send_header("Content-Length", str(len(payload)))
                 self.end_headers()
+                self.wfile.write(payload)
 
             def log_message(self, *a):
                 pass
@@ -518,8 +529,37 @@ def test_discards_are_not_reported_after_a_rejected_ingest():
         exp.export([{"event_id": "a", "timestamp": _at(0)}])
         exp.export([{"event_id": "b", "timestamp": _at(500)}])
         exp.shutdown()
+        # 拒まれた記録も届かなかった記録として数え、報告は取り込みが 2xx で受けられるまで送らない。
         assert srv.reports == []
-        assert exp._discards == [[_BASE, _BASE, 1.0]]
+        assert exp._discards == [[_BASE, _BASE, 1.0], [_BASE + 500, _BASE + 500, 1.0]]
+    finally:
+        srv.srv.shutdown()
+
+
+def test_a_429_is_retried_with_the_same_payload_and_not_counted_as_discarded():
+    srv = _DiscardIngest(fail=2, fail_status=429)
+    try:
+        exp = _fast_exporter(srv.url, retry_max_attempts=3)
+        exp.export([{"event_id": "a", "timestamp": _at(0)}])
+        exp.shutdown()
+        assert srv.ingests == 3
+        assert exp._discards == []
+        assert exp.unsent_events() == 0
+    finally:
+        srv.srv.shutdown()
+
+
+def test_a_rejected_payload_is_reported_once_ingest_recovers():
+    srv = _DiscardIngest(fail=2, fail_status=400)
+    try:
+        exp = _fast_exporter(srv.url, retry_max_attempts=3)
+        exp.export([{"event_id": "a", "timestamp": _at(0)}, {"event_id": "b", "timestamp": _at(10)}])
+        exp.export([{"event_id": "c", "timestamp": _at(20)}])
+        exp.export([{"event_id": "d", "timestamp": _at(900)}])
+        exp.shutdown()
+        # 先の 2 回は 400 で拒まれたので、2 つの時間帯が 1 つにまとまり、3 回目の成功の後に 1 回だけ報告される。
+        assert srv.reports == [{"windows": [{"from": _BASE, "to": _BASE + 20, "count": 3}]}]
+        assert exp._discards == []
     finally:
         srv.srv.shutdown()
 
@@ -538,13 +578,17 @@ def test_discards_are_not_reported_after_a_rejected_sync_ingest():
 
 def test_discards_are_not_reported_after_an_organization_rejection():
     # 組織の停止の符号は 403 で返る。再送しない拒否で、報告の宛先も同じ組織の状態で拒まれる。
-    srv = _DiscardIngest(fail=0, ingest_status=403)
+    # 止める符号は本文に error_code と retryable=false を持つ。本文が無い 403 とは別の分岐を通る。
+    body = {"error_code": "organization_read_only", "retryable": False}
+    srv = _DiscardIngest(fail=0, ingest_status=403, ingest_body=body)
     try:
         exp = _fast_exporter(srv.url, retry_max_attempts=3)
         exp._note_discard([_BASE], 1)
         exp.export([{"event_id": "b", "timestamp": _at(500)}])
         exp.shutdown()
         assert srv.reports == []
+        assert exp.unsent_events() == 0
+        assert len(exp._discards) == 2
     finally:
         srv.srv.shutdown()
 
@@ -557,6 +601,35 @@ def test_a_distant_older_discard_keeps_its_own_window():
     exp._note_discard([old], 2)
     # 遠い過去の記録を、最近の時間帯へ寄せて件数を付け替えない。
     assert sorted(exp._discards) == [[old, old, 2.0], [recent, recent, 5.0]]
+
+
+def test_a_window_count_over_the_receivers_limit_is_clipped_not_dropped():
+    now = 1_900_000_000.0
+    clipped = ArgusExporter._clip_windows([[now - 100, now - 50, 250_000.0], [now - 20, now - 10, 0.0]], now)
+    assert [w[2] for w in clipped] == [100_000.0, 1.0]
+
+
+def test_windows_stay_in_time_order_and_the_bound_merges_the_closest_pair():
+    exp = ArgusExporter({"endpoint": "http://127.0.0.1:9"})
+    base = 1_800_000_000.0
+    # 32 の時間帯を 1000 秒おきに置き、あと 1 つを、最も新しい時間帯のすぐ後に足す。
+    for i in range(32):
+        exp._note_discard([base + i * 1000.0], 1)
+    exp._note_discard([base + 31 * 1000.0 + 200.0], 1)
+    starts = [w[0] for w in exp._discards]
+    assert starts == sorted(starts)
+    assert len(exp._discards) == 32
+    # 時刻で最も近い 2 つがまとまり、遠い 2 つを寄せて件数を付け替えない。
+    assert exp._discards[-1][2] == 2.0
+    assert sum(w[2] for w in exp._discards) == 33
+
+
+def test_an_older_discard_added_late_is_inserted_in_order():
+    exp = ArgusExporter({"endpoint": "http://127.0.0.1:9"})
+    exp._note_discard([1_800_100_000.0], 1)
+    exp._note_discard([1_800_000_000.0], 1)
+    exp._note_discard([1_800_050_000.0], 1)
+    assert [w[0] for w in exp._discards] == [1_800_000_000.0, 1_800_050_000.0, 1_800_100_000.0]
 
 
 def test_an_older_discard_within_the_margin_is_merged():

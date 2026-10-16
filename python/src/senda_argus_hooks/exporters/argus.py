@@ -32,11 +32,14 @@ _DISCARD_MERGE_SEC = 60.0
 # 受け取り側が受ける時間帯の範囲。送る前に同じ範囲へ切り詰め、範囲外で報告ごと拒まれないようにする。
 _DISCARD_MAX_SPAN = 7 * 86400.0
 _DISCARD_MAX_AGE = 30 * 86400.0
+# 受け取り側が 1 つの時間帯に受ける件数の上限。超えた時間帯は、他が受かる報告でも黙って捨てられる。
+_DISCARD_MAX_COUNT = 100_000
 
 # 受け取り側の停止 (計画メンテナンスと障害の復旧の作業) の間の再送。503 と、前段の CloudFront が
-# 返す 502 と 504、接続の失敗だけを送り直す。それ以外の失敗は送り直しても結果が変わらない。
+# 返す 502 と 504、IP の流量制限の 429、接続の失敗だけを送り直す。それ以外の失敗は送り直しても結果が
+# 変わらない。送り直さない拒否で届かなかった記録は、破棄と同じ時間帯に数える。
 # 送り直しは同じ本文を送るため、受け取り側は event_id で重複を除き、二重に記録しない。
-_RETRY_STATUSES = frozenset({502, 503, 504})
+_RETRY_STATUSES = frozenset({429, 502, 503, 504})
 _RETRY_MAX_ATTEMPTS = 5
 _RETRY_BASE_DELAY = 1.0
 _RETRY_MAX_DELAY = 30.0
@@ -96,6 +99,32 @@ def _terminal_rejection_code(exc: urllib.error.HTTPError) -> str | None:
     if isinstance(code, str) and code in _TERMINAL_ERROR_CODES and body.get("retryable") is False:
         return code
     return None
+
+
+def _add_window(windows: list[list[float]], lo: float, hi: float, count: float) -> list[list[float]]:
+    """時間帯を、開始の順を保って足す。前後 _DISCARD_MERGE_SEC の内で重なる時間帯は 1 つにまとめる。
+
+    末尾へ足すだけだと、遅れた記録や時計の補正で古い範囲が来たとき並びが時刻の順でなくなり、上限での
+    退避が時刻で離れた 2 つを寄せてしまう。
+    """
+    kept: list[list[float]] = []
+    for w in windows:
+        if lo <= w[1] + _DISCARD_MERGE_SEC and hi >= w[0] - _DISCARD_MERGE_SEC:
+            lo, hi, count = min(lo, w[0]), max(hi, w[1]), count + w[2]
+        else:
+            kept.append(w)
+    kept.append([lo, hi, count])
+    kept.sort(key=lambda w: w[0])
+    return kept
+
+
+def _bound_windows(windows: list[list[float]]) -> list[list[float]]:
+    """数が上限を超えたら、時刻の間隔が最も狭い隣り合う 2 つを 1 つにまとめる。件数は失わない。"""
+    while len(windows) > _MAX_DISCARD_WINDOWS:
+        i = min(range(len(windows) - 1), key=lambda k: windows[k + 1][0] - windows[k][1])
+        a, b = windows[i], windows[i + 1]
+        windows[i : i + 2] = [[min(a[0], b[0]), max(a[1], b[1]), a[2] + b[2]]]
+    return windows
 
 
 class ArgusExporter(BaseExporter):
@@ -178,25 +207,7 @@ class ArgusExporter(BaseExporter):
         """捨てた記録の時刻の範囲を持つ。直前の時間帯に近ければ寄せ、数に上限を置く。"""
         lo, hi = (min(times), max(times)) if times else (time.time(), time.time())
         with self._drop_lock:
-            last = self._discards[-1] if self._discards else None
-            # 前の時間帯の前後 _DISCARD_MERGE_SEC の内にある範囲だけ寄せる。下の側も見ないと、時計の補正や
-            # 遅れた記録で遠い過去の範囲が来たとき、最近の時間帯へ寄せて件数を付け替えてしまう。
-            if (
-                last is not None
-                and lo <= last[1] + _DISCARD_MERGE_SEC
-                and hi >= last[0] - _DISCARD_MERGE_SEC
-            ):
-                last[0] = min(last[0], lo)
-                last[1] = max(last[1], hi)
-                last[2] += count
-            else:
-                self._discards.append([lo, hi, float(count)])
-            while len(self._discards) > _MAX_DISCARD_WINDOWS:
-                oldest = self._discards.pop(0)
-                head = self._discards[0]
-                head[0] = min(head[0], oldest[0])
-                head[1] = max(head[1], oldest[1])
-                head[2] += oldest[2]
+            self._discards = _bound_windows(_add_window(self._discards, lo, hi, float(count)))
 
     @staticmethod
     def _clip_windows(windows: list[list[float]], now: float) -> list[list[float]]:
@@ -208,7 +219,8 @@ class ArgusExporter(BaseExporter):
             start = min(max(start, end - _DISCARD_MAX_SPAN), end)
             if start < now - _DISCARD_MAX_AGE:
                 continue
-            out.append([start, end, count])
+            # 件数が上限を超えると、受け取り側は時間帯ごと捨てる。上限へ切り詰めて時間帯を残す。
+            out.append([start, end, min(max(count, 1.0), float(_DISCARD_MAX_COUNT))])
         return out
 
     def _report_discards(self, headers: dict[str, str]) -> None:
@@ -228,7 +240,9 @@ class ArgusExporter(BaseExporter):
         try:
             with urllib.request.urlopen(req, timeout=self._timeout) as response:
                 status = int(getattr(response, "status", None) or response.getcode())
+                raw = response.read(65536)
             if 200 <= status < 300:
+                self._log_rejected_windows(raw)
                 return
         except urllib.error.HTTPError as exc:
             if 400 <= exc.code < 500:
@@ -237,13 +251,21 @@ class ArgusExporter(BaseExporter):
         except (urllib.error.URLError, OSError, ValueError):
             pass
         with self._drop_lock:
-            self._discards = windows + self._discards
-            while len(self._discards) > _MAX_DISCARD_WINDOWS:
-                oldest = self._discards.pop(0)
-                head = self._discards[0]
-                head[0] = min(head[0], oldest[0])
-                head[1] = max(head[1], oldest[1])
-                head[2] += oldest[2]
+            merged = self._discards
+            for w in windows:
+                merged = _add_window(merged, w[0], w[1], w[2])
+            self._discards = _bound_windows(merged)
+
+    @staticmethod
+    def _log_rejected_windows(raw: bytes) -> None:
+        """受け取り側が範囲外として受けなかった時間帯があれば、ログに残す。"""
+        try:
+            body = json.loads(raw.decode("utf-8"))
+        except Exception:  # noqa: BLE001
+            return
+        rejected = body.get("rejected") if isinstance(body, dict) else None
+        if isinstance(rejected, int) and not isinstance(rejected, bool) and rejected > 0:
+            _logger.warning("Argus が破棄の時間帯 %d 件を範囲外として受け付けませんでした", rejected)
 
     def _record_unsent(self, count: int, reason: str) -> None:
         """再送の上限まで送れずに捨てたイベント数を計数し、間引いてログに出す。"""
@@ -352,6 +374,11 @@ class ArgusExporter(BaseExporter):
                 # 同じ 4xx で拒まれて持っている時間帯が戻されずに消える。
                 if self._last_ingest_ok:
                     self._report_discards(headers)
+                else:
+                    # 再送しない拒否 (401、403、400 など)。届かなかった記録を破棄と同じに数え、取り込みが
+                    # 回復した後に時間帯を報告する。数えないと、受け取り側がその間の中継にだけある記録を
+                    # hooks の欠落として警報にする。
+                    self._note_discard(self._payload_times(payload), self._event_count(payload) or 1)
                 return
             maintenance = reason == "maintenance"
             exhausted = (
