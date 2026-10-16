@@ -420,7 +420,7 @@ def test_retry_after_http_date_is_honored_up_to_the_cap():
 class _DiscardIngest:
     """先頭の fail 回の取り込みを 503 で返し、その後は 200 を返す。捨てた時間帯の報告を控える。"""
 
-    def __init__(self, fail: int, discard_status: int = 200):
+    def __init__(self, fail: int, discard_status: int = 200, ingest_status: int = 200):
         import http.server
         import threading as _threading
 
@@ -436,7 +436,7 @@ class _DiscardIngest:
                     code = discard_status
                 else:
                     outer.ingests += 1
-                    code = 503 if outer.ingests <= fail else 200
+                    code = 503 if outer.ingests <= fail else ingest_status
                 self.send_response(code)
                 self.send_header("Retry-After", "0")
                 self.send_header("Content-Length", "0")
@@ -507,6 +507,63 @@ def test_a_rejected_report_is_not_sent_again():
         assert exp._discards == []
     finally:
         srv.srv.shutdown()
+
+
+def test_discards_are_not_reported_after_a_rejected_ingest():
+    # 鍵の更新中の 401 は再送しないが、取り込みが回復したわけではない。報告を送ると同じ 4xx で
+    # 拒まれ、持っている時間帯が戻されずに消える。
+    srv = _DiscardIngest(fail=3, ingest_status=401)
+    try:
+        exp = _fast_exporter(srv.url, retry_max_attempts=3)
+        exp.export([{"event_id": "a", "timestamp": _at(0)}])
+        exp.export([{"event_id": "b", "timestamp": _at(500)}])
+        exp.shutdown()
+        assert srv.reports == []
+        assert exp._discards == [[_BASE, _BASE, 1.0]]
+    finally:
+        srv.srv.shutdown()
+
+
+def test_discards_are_not_reported_after_a_rejected_sync_ingest():
+    srv = _DiscardIngest(fail=0, ingest_status=401)
+    try:
+        exp = _fast_exporter(srv.url, retry_max_attempts=3)
+        exp._note_discard([_BASE], 1)
+        exp.send_sync([{"event_id": "b", "timestamp": _at(500)}])
+        assert srv.reports == []
+        assert exp._discards == [[_BASE, _BASE, 1.0]]
+    finally:
+        srv.srv.shutdown()
+
+
+def test_discards_are_not_reported_after_an_organization_rejection():
+    # 組織の停止の符号は 403 で返る。再送しない拒否で、報告の宛先も同じ組織の状態で拒まれる。
+    srv = _DiscardIngest(fail=0, ingest_status=403)
+    try:
+        exp = _fast_exporter(srv.url, retry_max_attempts=3)
+        exp._note_discard([_BASE], 1)
+        exp.export([{"event_id": "b", "timestamp": _at(500)}])
+        exp.shutdown()
+        assert srv.reports == []
+    finally:
+        srv.srv.shutdown()
+
+
+def test_a_distant_older_discard_keeps_its_own_window():
+    exp = ArgusExporter({"endpoint": "http://127.0.0.1:9"})
+    recent = 1_800_000_000.0
+    old = recent - 20 * 86400
+    exp._note_discard([recent], 5)
+    exp._note_discard([old], 2)
+    # 遠い過去の記録を、最近の時間帯へ寄せて件数を付け替えない。
+    assert sorted(exp._discards) == [[old, old, 2.0], [recent, recent, 5.0]]
+
+
+def test_an_older_discard_within_the_margin_is_merged():
+    exp = ArgusExporter({"endpoint": "http://127.0.0.1:9"})
+    exp._note_discard([1_800_000_100.0], 5)
+    exp._note_discard([1_800_000_070.0], 2)
+    assert exp._discards == [[1_800_000_070.0, 1_800_000_100.0, 7.0]]
 
 
 def test_windows_are_clipped_to_the_receivers_range():

@@ -153,6 +153,8 @@ class ArgusExporter(BaseExporter):
         # この時間帯の中継にだけある記録を、hooks の記録の欠落ではなく取り込みの欠落として数える。
         self._discard_url = endpoint + _DISCARD_PATH
         self._discards: list[list[float]] = []
+        # 直近の _send_once が 2xx で受けられたか。再送しない拒否も (None, None) で返るので別に持つ。
+        self._last_ingest_ok = False
 
     def _record_drop(self, count: int) -> None:
         """送出キュー満杯で捨てたイベント数を計数し、警告を一定間隔に間引いてログに残す。
@@ -177,7 +179,13 @@ class ArgusExporter(BaseExporter):
         lo, hi = (min(times), max(times)) if times else (time.time(), time.time())
         with self._drop_lock:
             last = self._discards[-1] if self._discards else None
-            if last is not None and lo <= last[1] + _DISCARD_MERGE_SEC:
+            # 前の時間帯の前後 _DISCARD_MERGE_SEC の内にある範囲だけ寄せる。下の側も見ないと、時計の補正や
+            # 遅れた記録で遠い過去の範囲が来たとき、最近の時間帯へ寄せて件数を付け替えてしまう。
+            if (
+                last is not None
+                and lo <= last[1] + _DISCARD_MERGE_SEC
+                and hi >= last[0] - _DISCARD_MERGE_SEC
+            ):
                 last[0] = min(last[0], lo)
                 last[1] = max(last[1], hi)
                 last[2] += count
@@ -340,7 +348,10 @@ class ArgusExporter(BaseExporter):
             attempt += 1
             reason, retry_after = self._send_once(payload, headers, suffix)
             if reason is None:
-                self._report_discards(headers)
+                # 報告するのは取り込みが 2xx で受けたときだけ。401 など再送しない拒否は回復ではなく、報告も
+                # 同じ 4xx で拒まれて持っている時間帯が戻されずに消える。
+                if self._last_ingest_ok:
+                    self._report_discards(headers)
                 return
             maintenance = reason == "maintenance"
             exhausted = (
@@ -364,7 +375,11 @@ class ArgusExporter(BaseExporter):
     def _send_once(
         self, payload: bytes, headers: dict[str, str], suffix: str
     ) -> tuple[str | None, str | None]:
-        """1 回送る。送り直す失敗なら (理由, Retry-After) を、それ以外は (None, None) を返す。"""
+        """1 回送る。送り直す失敗なら (理由, Retry-After) を、それ以外は (None, None) を返す。
+
+        (None, None) は成功と、再送しない拒否の両方を含む。成功かどうかは self._last_ingest_ok が持つ。
+        """
+        self._last_ingest_ok = False
         req = urllib.request.Request(
             self._url, data=payload, method="POST", headers=headers
         )
@@ -375,6 +390,7 @@ class ArgusExporter(BaseExporter):
                 raw = response.read(65536) if int(status) == 202 else b""
             self._http_log(f"POST completed status={status} url={self._url}{suffix}")
             self._check_unjudged_accept(raw)
+            self._last_ingest_ok = 200 <= int(status) < 300
             return None, None
         except urllib.error.HTTPError as exc:
             self._http_log(f"POST failed status={exc.code} url={self._url}{suffix} error={exc.reason}")
