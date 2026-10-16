@@ -19,6 +19,7 @@ PY = "/opt/argus/bin/python"
 def _runtime_owned_by_root(monkeypatch):
     # 試験の python とパッケージは root の所有でない。所有の検査は専用の試験で見る。
     monkeypatch.setattr(inst, "managed_runtime_check", lambda python: None)
+    monkeypatch.setattr(inst, "managed_dir_check", lambda path: None)
 
 
 def _install(product, scope, tmp_path, platform="linux", **kw):
@@ -250,7 +251,8 @@ def test_user_scope_prints_trial_notice(tmp_path, monkeypatch):
     stream = io.StringIO()
     inst.run_install(["cursor"], "managed", stream=stream)
     assert "試用" not in stream.getvalue()
-    assert calls == [("cursor", "user"), ("cursor", "managed")]
+    # 書く前に全ての製品で書く物を決める段と、書く段で 2 回ずつ呼ぶ。
+    assert calls == [("cursor", "user")] * 2 + [("cursor", "managed")] * 2
 
 
 def test_cli_hooks_install_managed_failure_exit_code(tmp_path, monkeypatch, capsys):
@@ -379,4 +381,513 @@ def test_all_with_an_unsupported_product_writes_nothing(monkeypatch):
     )
     with pytest.raises(InstallError):
         inst.run_install(list(inst.PRODUCTS), "managed", dry_run=False)
+    assert written == []
+
+
+# 13 製品の導入
+
+
+@pytest.mark.parametrize(
+    ("product", "platform", "rel"),
+    [
+        ("windsurf", "linux", "root/etc/devin/hooks.json"),
+        ("windsurf", "darwin", "root/Library/Application Support/Devin/hooks.json"),
+        ("gemini_cli", "linux", "root/etc/gemini-cli/settings.json"),
+        (
+            "gemini_cli",
+            "darwin",
+            "root/Library/Application Support/GeminiCli/settings.json",
+        ),
+        ("augment_code", "linux", "root/etc/augment/settings.json"),
+        ("augment_code", "darwin", "root/etc/augment/settings.json"),
+    ],
+)
+def test_new_managed_paths_per_os(tmp_path, product, platform, rel):
+    result = _install(product, "managed", tmp_path, platform=platform)
+    assert result.path == str(tmp_path / rel)
+    assert os.stat(result.path).st_mode & 0o022 == 0
+
+
+NO_MANAGED = [
+    "vscode_copilot",
+    "qwen_code",
+    "kiro",
+    "amazon_q_cli",
+    "factory_droid",
+    "crush",
+    "goose",
+    "junie_cli",
+    "cline",
+    "antigravity_cli",
+]
+NO_USER = ["vscode_copilot", "qwen_code", "amazon_q_cli"]
+
+
+@pytest.mark.parametrize("product", NO_MANAGED)
+def test_managed_is_refused_without_an_official_location(tmp_path, product):
+    with pytest.raises(InstallError):
+        _install(product, "managed", tmp_path)
+    assert not (tmp_path / "root").exists()
+    assert not (tmp_path / "home").exists()
+
+
+@pytest.mark.parametrize("product", NO_USER)
+def test_user_is_refused_without_an_official_location(tmp_path, product):
+    with pytest.raises(InstallError):
+        _install(product, "user", tmp_path)
+    assert not (tmp_path / "home").exists()
+
+
+USER_PATHS = {
+    "windsurf": "home/.codeium/windsurf/hooks.json",
+    "gemini_cli": "home/.gemini/settings.json",
+    "kiro": "home/.kiro/hooks/senda-argus.json",
+    "factory_droid": "home/.factory/hooks.json",
+    "crush": "home/.config/crush/crush.json",
+    "goose": "home/.agents/plugins/senda-argus/hooks/hooks.json",
+    "augment_code": "home/.augment/settings.json",
+    "junie_cli": "home/.junie/config.json",
+    "cline": "home/Documents/Cline/Hooks/PreToolUse",
+    "antigravity_cli": "home/.gemini/config/hooks.json",
+}
+
+
+@pytest.mark.parametrize("product", list(USER_PATHS))
+def test_new_user_paths_and_idempotent(tmp_path, product):
+    first = _install(product, "user", tmp_path)
+    assert first.path == str(tmp_path / USER_PATHS[product])
+    assert first.changed is True
+    snapshot = {f: open(f, encoding="utf-8").read() for f in first.files}
+    second = _install(product, "user", tmp_path)
+    assert second.changed is False
+    assert second.backup is None
+    # 導入し直しで項目を重ねない。2 回目は 1 回目と同じ中身のまま。
+    assert {f: open(f, encoding="utf-8").read() for f in second.files} == snapshot
+
+
+def _commands(data):
+    """設定の中の全ての command を集める。"""
+    found = []
+
+    def walk(value):
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key in ("command", "bash") and isinstance(item, str):
+                    found.append(item)
+                else:
+                    walk(item)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item)
+
+    walk(data)
+    return found
+
+
+def test_windsurf_registers_every_tool_hook(tmp_path):
+    hooks_ = _read(_install("windsurf", "managed", tmp_path))["hooks"]
+    for action in ("run_command", "read_code", "write_code", "mcp_tool_use"):
+        assert hooks_[f"pre_{action}"][0]["command"].endswith(
+            "hook windsurf pre --config /etc/senda-argus/hooks.env"
+        )
+        assert hooks_[f"post_{action}"][0]["command"].endswith(
+            "hook windsurf post --config /etc/senda-argus/hooks.env"
+        )
+    assert "pre_user_prompt" not in hooks_
+
+
+def test_gemini_shape_timeout_in_milliseconds(tmp_path):
+    hooks_ = _read(_install("gemini_cli", "managed", tmp_path))["hooks"]
+    pre = hooks_["BeforeTool"][0]
+    assert pre["matcher"] == ".*"
+    assert pre["hooks"][0]["timeout"] == inst.PRODUCT_HOOK_TIMEOUT_SEC * 1000
+    assert pre["hooks"][0]["command"].endswith(
+        "hook gemini_cli pre --config /etc/senda-argus/hooks.env"
+    )
+    assert hooks_["AfterTool"][0]["hooks"][0]["command"].endswith(
+        "hook gemini_cli post --config /etc/senda-argus/hooks.env"
+    )
+
+
+def test_goose_pre_hook_fails_closed_and_plugin_manifest_is_written(tmp_path):
+    result = _install("goose", "user", tmp_path)
+    hooks_ = _read(result)["hooks"]
+    pre = hooks_["PreToolUse"][0]
+    # "*" 単独の matcher は無効で、規則ごと飛ばされる。
+    assert "matcher" not in pre
+    assert pre["hooks"][0]["on_failure"] == "block"
+    assert pre["hooks"][0]["timeout"] == inst.PRODUCT_HOOK_TIMEOUT_SEC
+    assert "on_failure" not in hooks_["PostToolUse"][0]["hooks"][0]
+    manifest = tmp_path / "home/.agents/plugins/senda-argus/plugin.json"
+    assert json.loads(manifest.read_text())["name"] == "senda-argus"
+    assert str(manifest) in result.files
+
+
+def test_goose_existing_plugin_manifest_is_kept(tmp_path):
+    manifest = tmp_path / "home/.agents/plugins/senda-argus/plugin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{"name": "senda-argus", "version": "9"}')
+    _install("goose", "user", tmp_path)
+    assert manifest.read_text() == '{"name": "senda-argus", "version": "9"}'
+
+
+def test_augment_uses_wrapper_scripts_and_user_context(tmp_path):
+    result = _install("augment_code", "managed", tmp_path)
+    pre = _read(result)["hooks"]["PreToolUse"][0]["hooks"][0]
+    script = tmp_path / "root/etc/augment/hooks/senda-argus-hook-pre.sh"
+    # command は拡張子のある script の場所だけを受ける。
+    assert pre["command"] == str(script)
+    assert pre["timeout"] == inst.PRODUCT_HOOK_TIMEOUT_SEC * 1000
+    assert pre["metadata"] == {"includeUserContext": True}
+    text = script.read_text()
+    assert text.startswith("#!/bin/sh\nexec ")
+    assert "hook augment_code pre --config /etc/senda-argus/hooks.env" in text
+    assert os.stat(script).st_mode & 0o777 == 0o755
+    post = tmp_path / "root/etc/augment/hooks/senda-argus-hook-post.sh"
+    assert "hook augment_code post" in post.read_text()
+    assert str(script) in result.files
+
+
+def test_augment_reinstall_replaces_its_wrapper_entry(tmp_path):
+    path = tmp_path / "home/.augment/settings.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps(
+            {
+                "model": "x",
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": "/opt/old/senda-argus-hook-pre.sh",
+                                },
+                                {"type": "command", "command": "/opt/dlp.sh"},
+                            ]
+                        }
+                    ]
+                },
+            }
+        )
+    )
+    data = _read(_install("augment_code", "user", tmp_path))
+    assert data["model"] == "x"
+    commands = _commands(data["hooks"]["PreToolUse"])
+    assert "/opt/dlp.sh" in commands
+    assert "/opt/old/senda-argus-hook-pre.sh" not in commands
+    assert sum("senda-argus-hook-pre.sh" in c for c in commands) == 1
+
+
+def test_cline_writes_executable_scripts(tmp_path):
+    result = _install("cline", "user", tmp_path)
+    pre = tmp_path / "home/Documents/Cline/Hooks/PreToolUse"
+    post = tmp_path / "home/Documents/Cline/Hooks/PostToolUse"
+    assert "hook cline pre" in pre.read_text()
+    assert "hook cline post" in post.read_text()
+    assert os.stat(pre).st_mode & 0o100
+    assert result.files == [str(pre), str(post)]
+
+
+def test_cline_does_not_overwrite_a_foreign_hook(tmp_path):
+    pre = tmp_path / "home/Documents/Cline/Hooks/PreToolUse"
+    pre.parent.mkdir(parents=True)
+    pre.write_text("#!/bin/sh\necho '{\"cancel\": false}'\n")
+    with pytest.raises(InstallError, match="Argus でない"):
+        _install("cline", "user", tmp_path)
+    assert pre.read_text() == "#!/bin/sh\necho '{\"cancel\": false}'\n"
+    # 書き込みの前に失敗し、もう片方のファイルも書かない。
+    assert not (tmp_path / "home/Documents/Cline/Hooks/PostToolUse").exists()
+
+
+def test_kiro_hook_file_shape_and_keeps_other_hooks(tmp_path):
+    path = tmp_path / "home/.kiro/hooks/senda-argus.json"
+    path.parent.mkdir(parents=True)
+    other = {
+        "name": "lint",
+        "trigger": "PostFileSave",
+        "action": {"type": "command", "command": "npx eslint --fix"},
+    }
+    old = {
+        "name": "senda-argus-pre",
+        "trigger": "PreToolUse",
+        "action": {
+            "type": "command",
+            "command": "/old/py -m senda_argus_hooks.cli.main hook kiro pre",
+        },
+    }
+    path.write_text(json.dumps({"version": "v1", "hooks": [other, old]}))
+    data = _read(_install("kiro", "user", tmp_path))
+    assert data["version"] == "v1"
+    assert data["hooks"][0] == other
+    ours = [h for h in data["hooks"] if h["name"].startswith("senda-argus")]
+    assert [h["trigger"] for h in ours] == ["PreToolUse", "PostToolUse"]
+    assert ours[0]["timeout"] == inst.PRODUCT_HOOK_TIMEOUT_SEC
+    assert "matcher" not in ours[0]
+    assert "/old/py" not in json.dumps(data)
+
+
+def test_factory_events_are_at_the_top_level(tmp_path):
+    path = tmp_path / "home/.factory/hooks.json"
+    path.parent.mkdir(parents=True)
+    other = {
+        "matcher": "Execute",
+        "hooks": [{"type": "command", "command": "/usr/local/bin/audit.sh"}],
+    }
+    path.write_text(json.dumps({"PreToolUse": [other]}))
+    data = _read(_install("factory_droid", "user", tmp_path))
+    assert "hooks" not in data
+    assert data["PreToolUse"][0] == other
+    assert data["PreToolUse"][1]["hooks"][0]["command"].endswith(
+        "hook factory_droid pre"
+    )
+    assert data["PostToolUse"][0]["hooks"][0]["command"].endswith(
+        "hook factory_droid post"
+    )
+
+
+def test_crush_and_junie_have_only_a_pre_hook(tmp_path):
+    crush = _read(_install("crush", "user", tmp_path))["hooks"]
+    assert list(crush) == ["PreToolUse"]
+    assert crush["PreToolUse"][0]["matcher"] == ".*"
+    assert crush["PreToolUse"][0]["timeout"] == inst.PRODUCT_HOOK_TIMEOUT_SEC
+    junie = _read(_install("junie_cli", "user", tmp_path))["hooks"]
+    assert list(junie) == ["PreToolUse"]
+    assert (
+        junie["PreToolUse"][0]["hooks"][0]["timeout"] == inst.PRODUCT_HOOK_TIMEOUT_SEC
+    )
+
+
+def test_antigravity_named_entry_keeps_other_named_hooks(tmp_path):
+    path = tmp_path / "home/.gemini/config/hooks.json"
+    path.parent.mkdir(parents=True)
+    other = {
+        "PostToolUse": [{"matcher": "run_command", "hooks": [{"command": "./lint.sh"}]}]
+    }
+    path.write_text(json.dumps({"my-linter-hook": other}))
+    result = _install("antigravity_cli", "user", tmp_path)
+    data = _read(result)
+    assert data["my-linter-hook"] == other
+    ours = data["senda-argus"]
+    assert ours["PreToolUse"][0]["matcher"] == ".*"
+    assert ours["PreToolUse"][0]["hooks"][0]["command"].endswith(
+        "hook antigravity_cli pre"
+    )
+    assert result.backup is not None
+    assert json.loads(open(result.backup, encoding="utf-8").read()) == {
+        "my-linter-hook": other
+    }
+
+
+@pytest.mark.parametrize(
+    ("product", "existing"),
+    [
+        (
+            "windsurf",
+            {"hooks": {"pre_run_command": [{"command": "/opt/guard.sh"}]}, "x": 1},
+        ),
+        (
+            "gemini_cli",
+            {
+                "theme": "dark",
+                "hooks": {
+                    "BeforeTool": [
+                        {"hooks": [{"type": "command", "command": "/opt/g.sh"}]}
+                    ]
+                },
+            },
+        ),
+        (
+            "crush",
+            {
+                "options": {"debug": True},
+                "hooks": {"PreToolUse": [{"command": "/opt/c.sh"}]},
+            },
+        ),
+        (
+            "junie_cli",
+            {
+                "model": "m",
+                "hooks": {
+                    "PreToolUse": [
+                        {"hooks": [{"type": "command", "command": "/opt/j.sh"}]}
+                    ]
+                },
+            },
+        ),
+        (
+            "goose",
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {"hooks": [{"type": "command", "command": "/opt/o.sh"}]}
+                    ]
+                }
+            },
+        ),
+    ],
+)
+def test_existing_settings_are_kept(tmp_path, product, existing):
+    path = tmp_path / USER_PATHS[product]
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(existing))
+    result = _install(product, "user", tmp_path)
+    data = _read(result)
+    for key, value in existing.items():
+        if key != "hooks":
+            assert data[key] == value
+    for event, entries in existing["hooks"].items():
+        assert data["hooks"][event][0] == entries[0]
+    assert sum(HOOK_MARKER in c for c in _commands(data)) >= 1
+    assert json.loads(open(result.backup, encoding="utf-8").read()) == existing
+
+
+def test_all_user_scope_writes_nothing_when_a_product_has_no_location(monkeypatch):
+    # Qwen Code と Amazon Q と VS Code は利用者の置き場所を持たない。all は書く前に失敗する。
+    written: list[str] = []
+    monkeypatch.setattr(
+        inst, "install_product", lambda product, *a, **k: written.append(product)
+    )
+    with pytest.raises(InstallError):
+        inst.run_install(list(inst.PRODUCTS), "user", dry_run=False)
+    assert written == []
+
+
+def test_cli_offers_every_product(capsys):
+    from senda_argus_hooks.cli.main import build_parser
+
+    parser = build_parser()
+    for product in [*inst.PRODUCTS, "all"]:
+        args = parser.parse_args(["hooks-install", "--product", product, "--dry-run"])
+        assert args.product == product
+    assert len(inst.PRODUCTS) == 17
+
+
+def test_gemini_managed_prints_the_override_notice(monkeypatch):
+    import io
+
+    monkeypatch.setattr(
+        inst, "install_product", lambda product, scope, dry_run=False: None
+    )
+    stream = io.StringIO()
+    inst.run_install(["gemini_cli"], "managed", stream=stream)
+    assert "GEMINI_CLI_SYSTEM_SETTINGS_PATH" in stream.getvalue()
+    stream = io.StringIO()
+    inst.run_install(["cursor"], "managed", stream=stream)
+    assert "GEMINI_CLI_SYSTEM_SETTINGS_PATH" not in stream.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("rel", "content"),
+    [
+        (".factory/settings.json", {"model": "m", "hooks": {"PreToolUse": []}}),
+        (".factory/hooks/hooks.json", {"PreToolUse": []}),
+    ],
+)
+def test_factory_refuses_to_shadow_hooks_read_only_without_hooks_json(
+    tmp_path, rel, content
+):
+    other = tmp_path / "home" / rel
+    other.parent.mkdir(parents=True)
+    other.write_text(json.dumps(content))
+    with pytest.raises(InstallError, match="読まなくなる"):
+        _install("factory_droid", "user", tmp_path)
+    assert not (tmp_path / "home/.factory/hooks.json").exists()
+
+
+def test_factory_settings_without_hooks_does_not_block(tmp_path):
+    other = tmp_path / "home/.factory/settings.json"
+    other.parent.mkdir(parents=True)
+    other.write_text(json.dumps({"model": "m"}))
+    result = _install("factory_droid", "user", tmp_path)
+    assert result.changed is True
+
+
+def test_factory_existing_hooks_json_is_merged_even_with_settings_hooks(tmp_path):
+    # hooks.json が在れば製品は settings.json を読まないため、今の読まれ方は変わらない。
+    (tmp_path / "home/.factory").mkdir(parents=True)
+    (tmp_path / "home/.factory/settings.json").write_text('{"hooks": {}}')
+    (tmp_path / "home/.factory/hooks.json").write_text("{}")
+    assert _install("factory_droid", "user", tmp_path).changed is True
+
+
+@pytest.mark.parametrize(
+    ("platform", "rel"),
+    [
+        ("linux", "etc/windsurf/hooks.json"),
+        ("darwin", "Library/Application Support/Windsurf/hooks.json"),
+    ],
+)
+def test_windsurf_managed_refuses_to_shadow_the_legacy_system_file(
+    tmp_path, platform, rel
+):
+    legacy = tmp_path / "root" / rel
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text('{"hooks": {}}')
+    with pytest.raises(InstallError, match="読まなくなる"):
+        _install("windsurf", "managed", tmp_path, platform=platform)
+    assert not (tmp_path / "root/etc/devin/hooks.json").exists()
+
+
+def test_augment_managed_refuses_a_wrapper_dir_writable_by_others(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(inst, "managed_dir_check", inst._check_root_owned)
+    hooks_dir = tmp_path / "root/etc/augment/hooks"
+    hooks_dir.mkdir(parents=True)
+    # テストの利用者の所有で、root の所有でない。
+    with pytest.raises(InstallError, match="root の所有でない"):
+        _install("augment_code", "managed", tmp_path)
+    assert not (tmp_path / "root/etc/augment/settings.json").exists()
+    assert list(hooks_dir.iterdir()) == []
+
+
+def test_run_install_plans_every_product_before_writing(tmp_path, monkeypatch):
+    # 後の製品で他者の hook と衝突するときは、先の製品も書かない。
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    foreign = tmp_path / "home/Documents/Cline/Hooks/PreToolUse"
+    foreign.parent.mkdir(parents=True)
+    foreign.write_text("#!/bin/sh\necho '{\"cancel\": false}'\n")
+    with pytest.raises(InstallError, match="Argus でない"):
+        inst.run_install(["kiro", "cline"], "user")
+    assert not (tmp_path / "home/.kiro").exists()
+
+
+def test_supported_products_lists_what_the_scope_can_install_and_why_the_rest_cannot():
+    supported, skipped = inst.supported_products("user")
+    assert set(supported) | set(skipped) == set(inst.PRODUCTS)
+    assert not set(supported) & set(skipped)
+    for product in ("qwen_code", "amazon_q_cli", "vscode_copilot"):
+        assert product in skipped and skipped[product]
+    for product in ("claude_code", "cursor", "kiro", "goose"):
+        assert product in supported
+
+
+def test_all_installs_only_the_products_the_scope_supports(monkeypatch, capsys):
+    from senda_argus_hooks.cli import main as cli_main
+
+    written: list[list[str]] = []
+    monkeypatch.setattr(
+        inst,
+        "run_install",
+        lambda products, scope, **k: written.append(list(products)) or [],
+    )
+    args = cli_main.build_parser().parse_args(
+        ["hooks-install", "--product", "all", "--scope", "user", "--dry-run"]
+    )
+    assert cli_main.cmd_hooks_install(args) == 0
+    supported, skipped = inst.supported_products("user")
+    assert written == [supported]
+    err = capsys.readouterr().err
+    for product in skipped:
+        assert f"飛ばした製品 {product}" in err
+
+
+def test_a_named_product_without_a_location_still_fails_before_writing(monkeypatch):
+    written: list[str] = []
+    monkeypatch.setattr(
+        inst, "install_product", lambda product, *a, **k: written.append(product)
+    )
+    with pytest.raises(InstallError):
+        inst.run_install(["claude_code", "qwen_code"], "user", dry_run=False)
     assert written == []
