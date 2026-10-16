@@ -891,3 +891,29 @@ def test_a_named_product_without_a_location_still_fails_before_writing(monkeypat
     with pytest.raises(InstallError):
         inst.run_install(["claude_code", "qwen_code"], "user", dry_run=False)
     assert written == []
+
+
+def test_a_foreign_antigravity_hook_under_our_name_is_not_overwritten(tmp_path):
+    path = tmp_path / "home" / ".gemini" / "config" / "hooks.json"
+    path.parent.mkdir(parents=True)
+    foreign = {"senda-argus": {"PreToolUse": [{"command": "/opt/other/check.sh"}]}}
+    path.write_text(json.dumps(foreign), encoding="utf-8")
+    with pytest.raises(InstallError):
+        _install("antigravity_cli", "user", tmp_path)
+    assert json.loads(path.read_text(encoding="utf-8")) == foreign
+
+
+def test_our_own_antigravity_hook_is_replaced_on_reinstall(tmp_path):
+    _install("antigravity_cli", "user", tmp_path)
+    again = _install("antigravity_cli", "user", tmp_path)
+    data = json.loads(open(again.path, encoding="utf-8").read())
+    assert list(data) == ["senda-argus"]
+
+
+def test_cline_install_reports_the_manual_enable_step(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(inst.Path, "home", lambda: tmp_path / "home")
+    results = inst.run_install(["cline"], "user", dry_run=True)
+    assert "Enable Hooks" in results[0].notice
+    assert "Enable Hooks" in capsys.readouterr().err
+    other = inst.run_install(["kiro"], "user", dry_run=True)
+    assert other[0].notice == ""

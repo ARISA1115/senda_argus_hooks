@@ -326,6 +326,9 @@ ADAPTERS: dict[str, Callable[[], ProductAdapter]] = {
     # https://junie.jetbrains.com/docs/junie-cli-hooks.html
     # 許可は何も書かない。決定を省いた出力は許可と書かれている。PreToolUse の入力の例は tool_name と
     # tool_input だけで、session_id は持たないことがある。
+    # 許可は何も書かず終了コード 0 で返す。公式の文書は、PreToolUse の decision を省くと allow と同じで
+    # 元の入力で tool が動くと書き、確認を省くとは書いていない。判断を省いたときに製品の許可の確認が
+    # 省かれるのは PermissionRequest の説明で、PreToolUse には当たらない。
     "junie_cli": lambda: DecisionAdapter(
         "junie_cli", InputSpec(cwd=("cwd",), session_from_process=True)
     ),

@@ -58,6 +58,8 @@ class InstallResult:
     backup: str | None
     # 書いた、または確認したファイルの全て。設定の他に包みの .sh と付随のファイルを含む。
     files: list[str] = field(default_factory=list)
+    # 導入のコマンドでは済まず、利用者が製品の側で行う操作。空なら無い。
+    notice: str = ""
 
 
 def current_platform() -> str:
@@ -91,6 +93,8 @@ class ProductInstall:
     # 設定と同じ場所に、無いときだけ書く付随のファイル。相対の場所と中身。
     companions: dict[str, Any] = field(default_factory=dict)
     managed_notice: str = ""
+    # 利用者の階層の導入で、導入のコマンドでは済まず、利用者が製品の側で行う操作。
+    user_notice: str = ""
     # 設定のファイルが無いときだけ製品が読む、別の置き場所。"方式:OS" ごとに、base (管理は system_root、
     # 利用者は home) からの相対の場所と、中身の JSON で hook を運ぶ鍵 (None はファイルの有無だけを見る)。
     # 設定のファイルを新しく作ると、ここに置かれた既存の hook が読まれなくなるため、導入しない。
@@ -409,6 +413,12 @@ INSTALLS: dict[str, ProductInstall] = {
         layout="script",
         managed_refusal=_NO_MANAGED,
         user="Documents/Cline/Hooks/PreToolUse",
+        # Enable Hooks は Cline の設定の画面のチェックボックスで、ファイルやコマンドから設定する方法は
+        # 公式に書かれていない。入れないと hook は実行されず、判定も記録も起きない。
+        user_notice=(
+            "Cline の設定の画面の Feature Settings で、Enable Hooks を有効にする必要がある。"
+            " 有効にするまで hook は実行されず、Argus の判定と記録は起きない。"
+        ),
     ),
     "antigravity_cli": ProductInstall(
         _antigravity_entries,
@@ -469,6 +479,17 @@ def hook_command(
     if scope == "managed":
         parts += ["--config", str(MANAGED_CONFIG_PATH)]
     return " ".join(shlex.quote(p) for p in parts)
+
+
+def _contains_ours(value: Any) -> bool:
+    """入れ子の定義のどこかの文字列が Argus の hook の command か。"""
+    if isinstance(value, str):
+        return HOOK_MARKER in value or WRAPPER_PREFIX in value
+    if isinstance(value, dict):
+        return any(_contains_ours(v) for v in value.values())
+    if isinstance(value, list):
+        return any(_contains_ours(v) for v in value)
+    return False
 
 
 def _is_ours(entry: Any) -> bool:
@@ -555,6 +576,13 @@ def merge_settings(
         if current is not None and not isinstance(current, dict):
             raise InstallError(
                 f"既存の設定の {_NAMED_KEY} がオブジェクトでないため書き換えない"
+            )
+        # 名前は利用者が自由に付けるので、同じ名前が別の hook のこともある。Argus の hook を含まない
+        # 既存の定義は、丸ごと入れ替えると消えてしまうため、書き換えない。
+        if current and not _contains_ours(current):
+            raise InstallError(
+                f"既存の設定の {_NAMED_KEY} は Argus の hook を含まないため書き換えない。"
+                " 別の名前に変えてから導入し直す"
             )
         # Argus の名前の下は Argus だけが書く。導入し直しで丸ごと入れ替える。
         merged[_NAMED_KEY] = {event: [entry] for event, entry in entries.items()}
@@ -883,6 +911,14 @@ def run_install(
     results = [install_product(product, scope, dry_run=dry_run) for product in products]
     if scope == "user":
         print(USER_SCOPE_NOTICE, file=out)
+        # 導入のコマンドでは済まない操作は、成功の表示と一緒に出す。出さないと、導入が済んだと読まれて
+        # hook が実行されない状態に気付けない。
+        for product, result in zip(products, results, strict=True):
+            notice = INSTALLS[product].user_notice
+            if notice:
+                if isinstance(result, InstallResult):
+                    result.notice = notice
+                print(f"{product}: {notice}", file=out)
         return results
     print(
         f"管理の置き場所へ書いた。hook は {MANAGED_CONFIG_PATH} だけから送信先と鍵と fail_open を読む。"
