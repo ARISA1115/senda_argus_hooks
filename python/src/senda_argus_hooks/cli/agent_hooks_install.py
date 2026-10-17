@@ -71,6 +71,28 @@ def current_platform() -> str:
 
 
 @dataclass(frozen=True)
+class McpSource:
+    """製品が MCP サーバの定義を置くファイル 1 つ。scan-mcp が読むだけで、導入では書かない。
+
+    paths は OS ごとの、base からの相対の場所。None は hook の設定と同じファイル (settings_path の
+    全ての方式) を指す。base は home (利用者の家のディレクトリ) か cwd (コマンドを実行した
+    ディレクトリだけで、親をたどらない)。key は定義の対応を置く鍵の並び。per_project は、
+    key の下がプロジェクトの場所ごとの表で、各表の mcpServers に定義を置く形。
+    """
+
+    key: tuple[str, ...]
+    paths: dict[str, str] | None = None
+    base: str = "home"
+    fmt: str = "json"
+    scope: str = "user"
+    per_project: bool = False
+
+
+def _home_paths(rel: str) -> dict[str, str]:
+    return {"linux": rel, "darwin": rel}
+
+
+@dataclass(frozen=True)
 class ProductInstall:
     """製品ごとの、設定の置き場所と書き方。
 
@@ -101,6 +123,12 @@ class ProductInstall:
     shadowed: dict[str, tuple[tuple[str, str | None], ...]] = field(
         default_factory=dict
     )
+    # MCP サーバの定義の置き場所。出典は各行の上に書く。公式に書かれていない置き場所は読まず、
+    # 理由を mcp_refusal に書く。mcp_platform_refusal は、その OS に対応する置き場所が 1 つも無いときだけ
+    # 使う理由。
+    mcp_sources: tuple[McpSource, ...] = ()
+    mcp_refusal: str = ""
+    mcp_platform_refusal: str = ""
 
 
 _NO_MANAGED = "管理者用の置き場所は公式の文書に書かれていないため、管理の導入はできない。利用者の階層へは切り替えない"
@@ -273,6 +301,12 @@ def _cline_entries(pre: str, post: str, timeout: int) -> dict[str, Any]:
     return {"PreToolUse": pre, "PostToolUse": post}
 
 
+def _no_hook_entries(pre: str, post: str, timeout: int) -> dict[str, Any]:
+    raise InstallError("hook を持たない製品")
+
+
+_MCP_SERVERS = ("mcpServers",)
+
 INSTALLS: dict[str, ProductInstall] = {
     "claude_code": ProductInstall(
         _claude_entries,
@@ -281,6 +315,12 @@ INSTALLS: dict[str, ProductInstall] = {
             "darwin": "Library/Application Support/ClaudeCode/managed-settings.json",
         },
         user=".claude/settings.json",
+        # https://code.claude.com/docs/en/mcp.md の Local scope、Project scope、User scope
+        mcp_sources=(
+            McpSource(_MCP_SERVERS, _home_paths(".claude.json")),
+            McpSource(("projects",), _home_paths(".claude.json"), per_project=True),
+            McpSource(_MCP_SERVERS, _home_paths(".mcp.json"), base="cwd", scope="cwd"),
+        ),
     ),
     "codex": ProductInstall(
         _codex_entries,
@@ -289,6 +329,10 @@ INSTALLS: dict[str, ProductInstall] = {
             " 利用者の階層へは切り替えない"
         ),
         user=".codex/hooks.json",
+        # https://developers.openai.com/codex/mcp.md の Configure with config.toml
+        mcp_sources=(
+            McpSource(("mcp_servers",), _home_paths(".codex/config.toml"), fmt="toml"),
+        ),
     ),
     "copilot_cli": ProductInstall(
         _copilot_entries,
@@ -307,6 +351,13 @@ INSTALLS: dict[str, ProductInstall] = {
         },
         user=".cursor/hooks.json",
         defaults={"version": 1},
+        # https://cursor.com/docs/mcp.md の Using mcp.json
+        mcp_sources=(
+            McpSource(_MCP_SERVERS, _home_paths(".cursor/mcp.json")),
+            McpSource(
+                _MCP_SERVERS, _home_paths(".cursor/mcp.json"), base="cwd", scope="cwd"
+            ),
+        ),
     ),
     # 利用者の置き場所 ~/.copilot/hooks/*.json は Copilot CLI も読むため、書くと 1 回の呼び出しで両方の
     # 製品の hook が動く。VS Code だけが読む利用者の置き場所は公式に書かれていない。
@@ -317,6 +368,15 @@ INSTALLS: dict[str, ProductInstall] = {
             "VS Code の利用者の置き場所 ~/.copilot/hooks/*.json は GitHub Copilot CLI も読むため、書くと両方の製品で"
             " 同じ hook が二重に動く。VS Code だけが読む置き場所は公式の文書に書かれていないため、導入しない"
         ),
+        # https://github.com/microsoft/vscode-docs/blob/main/docs/agents/reference/mcp-configuration.md
+        mcp_sources=(
+            McpSource(
+                ("servers",), _home_paths(".vscode/mcp.json"), base="cwd", scope="cwd"
+            ),
+        ),
+        mcp_refusal=(
+            "利用者のプロファイルの mcp.json の絶対の場所は公式の文書に書かれていないため読まない"
+        ),
     ),
     "windsurf": ProductInstall(
         _windsurf_entries,
@@ -326,6 +386,12 @@ INSTALLS: dict[str, ProductInstall] = {
         },
         user=".codeium/windsurf/hooks.json",
         # Devin の場所にファイルが無いときだけ、旧の Windsurf の場所を読むと公式に書かれている。
+        # https://docs.devin.ai/windsurf/plugins/cascade/mcp.md の mcp_config.json の節。
+        # XDG_CONFIG_HOME を設定したときの場所は読まない。
+        mcp_sources=(
+            McpSource(_MCP_SERVERS, _home_paths(".config/devin/mcp_config.json")),
+            McpSource(_MCP_SERVERS, _home_paths(".codeium/windsurf/mcp_config.json")),
+        ),
         shadowed={
             "managed:linux": (("etc/windsurf/hooks.json", None),),
             "managed:darwin": (
@@ -344,6 +410,8 @@ INSTALLS: dict[str, ProductInstall] = {
             "Gemini CLI のシステムの設定は環境変数 GEMINI_CLI_SYSTEM_SETTINGS_PATH で差し替えられ、hooks で管理者側が"
             " 勝つとは公式の文書に書かれていない"
         ),
+        # https://github.com/google-gemini/gemini-cli/blob/main/docs/tools/mcp-server.md
+        mcp_sources=(McpSource(_MCP_SERVERS),),
     ),
     "qwen_code": ProductInstall(
         _codex_entries,
@@ -381,6 +449,8 @@ INSTALLS: dict[str, ProductInstall] = {
         _crush_entries,
         managed_refusal=_NO_MANAGED,
         user=".config/crush/crush.json",
+        # https://github.com/charmbracelet/crush の README の MCP の節
+        mcp_sources=(McpSource(("mcp",)),),
     ),
     "goose": ProductInstall(
         _goose_entries,
@@ -419,12 +489,38 @@ INSTALLS: dict[str, ProductInstall] = {
             "Cline の設定の画面の Feature Settings で、Enable Hooks を有効にする必要がある。"
             " 有効にするまで hook は実行されず、Argus の判定と記録は起きない。"
         ),
+        # https://github.com/cline/cline/blob/main/docs/mcp/mcp-overview.mdx の Manual config
+        mcp_sources=(
+            McpSource(
+                _MCP_SERVERS,
+                _home_paths(".cline/data/settings/cline_mcp_settings.json"),
+            ),
+        ),
+        mcp_refusal=(
+            "IDE の拡張機能の設定の場所は公式の文書に絶対の場所が書かれていないため読まない"
+        ),
     ),
     "antigravity_cli": ProductInstall(
         _antigravity_entries,
         layout="named",
         managed_refusal=_NO_MANAGED,
         user=".gemini/config/hooks.json",
+    ),
+    # hook を持たず、MCP サーバの定義だけを読む製品。導入のコマンドの対象 PRODUCTS には入らない。
+    # https://modelcontextprotocol.io/docs/develop/connect-local-servers.md
+    "claude_desktop": ProductInstall(
+        _no_hook_entries,
+        managed_refusal="hook を持たない製品",
+        user_refusal="hook を持たない製品",
+        mcp_sources=(
+            McpSource(
+                _MCP_SERVERS,
+                {
+                    "darwin": "Library/Application Support/Claude/claude_desktop_config.json"
+                },
+            ),
+        ),
+        mcp_platform_refusal="この OS の置き場所は公式の文書に書かれていないため読まない",
     ),
 }
 
