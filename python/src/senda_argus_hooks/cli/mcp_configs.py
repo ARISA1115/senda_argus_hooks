@@ -202,6 +202,7 @@ def read_configured_servers(
         if spec.mcp_refusal:
             result.refused_products[product] = spec.mcp_refusal
         reasons: list[str] = []
+        previous_exists = False
         for source in spec.mcp_sources:
             files = _source_files(
                 product,
@@ -211,6 +212,12 @@ def read_configured_servers(
                 system_root=system_root,
                 cwd=cwd,
             )
+            exists_here = any(path.exists() for _, path in files)
+            if source.only_if_previous_absent and previous_exists:
+                # 製品は新の場所のファイルがあれば旧の場所を読まない。両方あるとき旧の定義を送ると、
+                # 製品が読み込まない古いサーバを走査した結果として送ってしまう。
+                continue
+            previous_exists = exists_here
             for scope, path in files:
                 # 実行したディレクトリが家のディレクトリと同じとき、同じファイルを二重に読まない。
                 try:

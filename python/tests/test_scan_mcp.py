@@ -271,6 +271,34 @@ def test_ambiguous_tools_selector_is_refused(tmp_path, capsys, fake_scanner):
     assert by_product["gemini_cli"]["unscanned_reason"] == "analyzer_disabled"
 
 
+def test_a_malformed_later_tools_file_stops_before_any_scanner_runs(
+    tmp_path, capsys, fake_scanner
+):
+    """tools の JSON が 1 つでも不正なら、前のファイルの走査も始めないこと。"""
+    _gemini(tmp_path, {"fs": {"command": "npx", "args": ["-y", "pkg"]}})
+    _crush(tmp_path, {"fs": {"type": "stdio", "command": "uvx", "args": ["tool"]}})
+    good = _tools_file(tmp_path)
+    bad = tmp_path / "bad-tools.json"
+    bad.write_text("{not json", encoding="utf-8")
+    code = main(
+        [
+            "scan-mcp",
+            "--home",
+            str(tmp_path),
+            "--system-root",
+            str(tmp_path / "s"),
+            "--platform",
+            "linux",
+            "--tools-json",
+            f"crush:fs={good}",
+            "--tools-json",
+            f"gemini_cli:fs={bad}",
+        ]
+    )
+    assert code == 2
+    assert not fake_scanner.exists()
+
+
 def test_unknown_tools_selector_is_refused(tmp_path, capsys, fake_scanner):
     _gemini(tmp_path, {"fs": {"command": "npx", "args": ["x"]}})
     code = main(
@@ -1007,7 +1035,10 @@ def test_cwd_equal_to_home_is_read_once(tmp_path):
     assert [(s.product, s.scope) for s in read.servers] == [("cursor", "user")]
 
 
-def test_windsurf_both_documented_files(tmp_path, capsys, no_scanner):
+def test_windsurf_legacy_file_is_read_only_when_the_devin_file_is_absent(
+    tmp_path, capsys, no_scanner
+):
+    """旧の場所は、新の場所にファイルが無いときだけ読むこと。両方あれば旧の定義を送らない。"""
     _write(
         tmp_path / ".config" / "devin" / "mcp_config.json",
         {
@@ -1028,9 +1059,21 @@ def test_windsurf_both_documented_files(tmp_path, capsys, no_scanner):
     assert [i for i in _items(out) if i[0] == "windsurf"] == [
         ("windsurf", "user", "safe-pkg"),
         ("windsurf", "user", "https://w.example/mcp"),
-        ("windsurf", "user", "evil-pkg"),
     ]
     _assert_no_secrets(out)
+
+
+def test_windsurf_legacy_file_is_the_fallback_when_the_devin_file_is_absent(
+    tmp_path, capsys, no_scanner
+):
+    _write(
+        tmp_path / ".codeium" / "windsurf" / "mcp_config.json",
+        {"mcpServers": {"fs": EVIL_STDIO}},
+    )
+    _, out = _run(tmp_path, capsys=capsys)
+    assert [i for i in _items(out) if i[0] == "windsurf"] == [
+        ("windsurf", "user", "evil-pkg"),
+    ]
 
 
 def test_windsurf_two_url_fields_are_not_guessed(tmp_path, capsys, no_scanner):
@@ -1249,12 +1292,16 @@ def test_fifo_config_does_not_block(tmp_path, _isolated_cwd):
         "x=r(platform='linux',home=Path(sys.argv[1]),system_root=Path(sys.argv[1])/'sys',cwd=Path(sys.argv[2]));"
         "print(json.dumps([[s.name for s in x.servers],x.unreadable_products]))"
     )
+    # 子のインタプリタは pytest.ini の pythonpath を引き継がない。ソースの場所を明示して渡す。
+    src = str(Path(__file__).resolve().parent.parent / "src")
+    env = {**os.environ, "PYTHONPATH": src}
     proc = sp.run(
         [sys.executable, "-c", code, str(tmp_path), str(_isolated_cwd)],
         capture_output=True,
         check=False,
         text=True,
         timeout=20,
+        env=env,
     )
     names, unreadable = json.loads(proc.stdout)
     assert names == ["a"]

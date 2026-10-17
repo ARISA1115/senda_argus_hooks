@@ -86,6 +86,9 @@ class McpSource:
     fmt: str = "json"
     scope: str = "user"
     per_project: bool = False
+    # 直前の置き場所のファイルが無いときだけ読む。製品が旧の場所を、新の場所に無いときの代わりに
+    # だけ読むと定めているときに使う。
+    only_if_previous_absent: bool = False
 
 
 def _home_paths(rel: str) -> dict[str, str]:
@@ -390,7 +393,11 @@ INSTALLS: dict[str, ProductInstall] = {
         # XDG_CONFIG_HOME を設定したときの場所は読まない。
         mcp_sources=(
             McpSource(_MCP_SERVERS, _home_paths(".config/devin/mcp_config.json")),
-            McpSource(_MCP_SERVERS, _home_paths(".codeium/windsurf/mcp_config.json")),
+            McpSource(
+                _MCP_SERVERS,
+                _home_paths(".codeium/windsurf/mcp_config.json"),
+                only_if_previous_absent=True,
+            ),
         ),
         shadowed={
             "managed:linux": (("etc/windsurf/hooks.json", None),),

@@ -951,9 +951,18 @@ def plan_scan(
     selectors = parse_tools_options(tools_options)
     built = [_build_isolated(server) for server in read.servers]
     assigned = assign_tools(selectors, read.servers, [b[0] for b in built])
+    # tools の JSON は走査器を 1 つも起動する前に全部読んで検証する。後ろのファイルが不正なら、
+    # 前のファイルの走査を済ませてから失敗せず、何も走査しない。
+    loaded: dict[int, dict[str, Any]] = {
+        index: load_tools(tools_path)
+        for index, ((artifact, _, _), tools_path) in enumerate(
+            zip(built, assigned, strict=True)
+        )
+        if artifact is not None and tools_path is not None
+    }
     items: list[ScanItem] = []
-    for server, (artifact, display, error), tools_path in zip(
-        read.servers, built, assigned, strict=True
+    for index, (server, (artifact, display, error), tools_path) in enumerate(
+        zip(read.servers, built, assigned, strict=True)
     ):
         item = ScanItem(server=server, artifact=artifact, error=error, display=display)
         items.append(item)
@@ -964,7 +973,7 @@ def plan_scan(
             body["unscanned_reason"] = REASON_ANALYZER_DISABLED
             item.scan_note = "tools の JSON が渡されていないため走査していない"
         else:
-            tools = load_tools(tools_path)
+            tools = loaded[index]
             outcome = run_scanner(tools, timeout=timeout)
             if outcome.unscanned_reason is not None:
                 body["unscanned_reason"] = outcome.unscanned_reason
