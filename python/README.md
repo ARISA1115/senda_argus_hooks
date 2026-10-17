@@ -1158,6 +1158,114 @@ senda-argus devin-collect --interval 60
   batch, so the same session or record is not sent twice.
 - The API key is read from the environment and is not written to events or state.
 
+## Pre-install MCP server scan
+
+`senda-argus scan-mcp` reads the MCP server definitions on this machine, scans them statically, and
+prints or sends one result per server to Argus `POST /v1/install-scans`.
+
+```bash
+# Print what would be sent. Nothing is sent and no server is started.
+senda-argus scan-mcp
+
+# Scan pre-fetched tools/list JSON with mcp-scanner (YARA only) and send the results.
+export SENDA_ARGUS_ENDPOINT=https://argus.example.com
+export SENDA_ARGUS_API_KEY=...      # collector key
+senda-argus scan-mcp --tools-json github=./github-tools.json --send
+```
+
+Where definitions are read from:
+
+- The locations come from the same product table that `hooks-install` uses (`mcp_sources` in
+  `INSTALLS`, `cli/agent_hooks_install.py`). Files are only read, never written. Files in the current
+  directory are read from that directory only; parent directories are not searched.
+
+| Product | Files and key |
+|---|---|
+| Claude Code | `~/.claude.json` top-level `mcpServers` (scope `user`) and `projects.<path>.mcpServers` (scope `project:<path>`); `./.mcp.json` `mcpServers` (scope `cwd`) |
+| Claude Desktop | macOS `~/Library/Application Support/Claude/claude_desktop_config.json` `mcpServers` |
+| Cursor | `~/.cursor/mcp.json` and `./.cursor/mcp.json` `mcpServers` |
+| Windsurf | `~/.config/devin/mcp_config.json` and `~/.codeium/windsurf/mcp_config.json` `mcpServers` (`serverUrl` or `url` for remote) |
+| VS Code | `./.vscode/mcp.json` `servers` |
+| Cline | `~/.cline/data/settings/cline_mcp_settings.json` `mcpServers` |
+| Codex CLI | `~/.codex/config.toml` `[mcp_servers.<name>]` (needs Python 3.11 or later for `tomllib`) |
+| Gemini CLI | `settings.json` `mcpServers` (user and managed) |
+| Crush | `crush.json` `mcp` |
+
+- Not read by decision, listed under `refused_products` with the reason. This does not change the
+  exit code:
+  - Claude Desktop on Linux (only when the OS has no documented location), VS Code user-profile
+    `mcp.json`, and the Cline IDE extension settings: the absolute location is not written in the
+    official documentation.
+  - Copilot CLI, Qwen Code, Kiro, Amazon Q Developer CLI, Factory Droid, Goose, Augment Code, Junie
+    CLI, and Antigravity: no MCP location is registered in the table.
+- Read failures, listed under `unreadable_products` with the reason, make the exit code 1: a file over
+  4 MiB, no permission, a file that is not a regular file (FIFO, device), a symlink loop, a file that
+  is not valid JSON or TOML (for example JSON with comments), and a file whose root or intermediate
+  value (for example `mcp_servers` or `projects.<path>`) is not an object. A missing key is not a
+  failure.
+- A definition whose `type` is not a string, or that fails unexpectedly, becomes an error item with
+  the reason (only the exception class name); the other servers are still processed.
+- Servers with the same name are separate items when they come from different products, files, or
+  Claude Code projects.
+- The scanned list and the list of configured servers come from the same reader, so the number of
+  items equals `servers_read`. Definitions that cannot be turned into a server (both `command` and
+  `url`, unknown type, too many arguments) are listed with a reason and make the exit code 1.
+
+What the command does by default:
+
+- It never starts a stdio server and never connects to a remote server.
+- It calls the external `mcp-scanner` only for servers given with `--tools-json NAME=PATH` (an MCP
+  `tools/list` result or the bare tools array), as
+  `mcp-scanner --analyzers yara --format raw static --tools <file>`. The LLM and VirusTotal analyzers
+  are never selected, because they send descriptions and hashes outside.
+- `NAME` is the server name, `product:name`, or `product:scope:name`. Scope is `user`, `managed`,
+  `cwd` (a file in the current directory), or `project:<path>` (a Claude Code project in
+  `~/.claude.json`), for example `claude_code:project:/work/app:github=./tools.json`.
+  `--tools-json` is split at the last `=`, so `NAME` may contain `=` (a project path can) and `PATH`
+  must not.
+  Each server uses the most specific `NAME` that matches it. A `NAME` used by servers with different
+  commands or packages, a `NAME` used by no server, or tools JSON over the Argus limits (256 tools,
+  16384 bytes per tool, 262144 bytes in total) is an error, and nothing is scanned.
+- A server without tools JSON, or when `mcp-scanner` is missing, fails, or prints non-JSON, is sent as
+  unscanned with `analyzer_disabled`. A scanner timeout (`--timeout`, default 120 s) is sent as
+  `timeout`. Scanner output over 16 MiB stops the scanner and is sent as `analyzer_disabled`. None of
+  these is reported as clean. `mcp-scanner` is not installed automatically.
+- Sending happens only with `--send`. `--dry-run` always prints and never sends. The endpoint and key
+  are the existing `SENDA_ARGUS_ENDPOINT`, `SENDA_ARGUS_API_KEY`, and `SENDA_ARGUS_TIMEOUT`.
+- A rejection by Argus (for example 422 when the scanner output format differs) is printed with the
+  status and makes the exit code 1.
+
+What is sent per server:
+
+- stdio: `name`, `command`, `args`, the package name and version when the launch is `npx`/`bunx`,
+  `uvx`/`uv tool run`, or `pipx run`, and the sha256 of a local file when the command is a file path,
+  `node`/`python` runs a script file, or `uv run` runs a `.py` file. Relative script paths are resolved
+  only against the definition's `cwd` or `uv --directory`. An unknown flag before the package leaves
+  the package out instead of guessing. No hash is sent when it cannot be computed or the file is over
+  256 MiB.
+- A server whose name, package, version, URL, command, or arguments exceed the Argus limits is not
+  sent; it is listed with the reason and the exit code is 1.
+- remote: `name` and the URL normalized without user info, query, or fragment. A remote URL with a
+  path segment that looks like a secret (for example a key embedded in the path) is not sent and
+  becomes an error item, because replacing the segment would change the artifact key Argus computes.
+- The `mcp-scanner` report and the tools JSON, only when the scan ran.
+
+What is never sent or printed:
+
+- `env` values and `headers` values. Only their key names are printed (`env_keys`, `header_keys`).
+- Secrets inside `args` and `command`: values of `name=value` or `name: value` whose name looks like a
+  secret (token, key, password, auth, cookie, header, ...), the argument after such a flag
+  (`--token VALUE`), known token shapes (GitHub, GitLab, Slack, OpenAI, AWS, Google, npm, PyPI,
+  Hugging Face, JWT, `Bearer`/`Basic`), hex strings of 32 or more characters, UUIDs, strings of 20 or
+  more characters that mix upper case, lower case, and digits, and long opaque random strings. They
+  are replaced with `<redacted>`. URLs in arguments, including the value of `name=URL`, keep the host
+  and the path segments that do not look like secrets; user info anywhere in the argument and the
+  query are replaced. An argument is also split at `;`, `&`, and spaces (connection strings such as
+  `Server=x;Password=...`, command strings such as `node s.js --api-key ...`), and the whole argument
+  is replaced when any piece looks like a secret. A JSON argument keeps its shape, with secret
+  keys and secret-looking values replaced; a JSON argument that does not parse is replaced whole.
+- The artifact key: Argus computes it from the fields above.
+
 ## Test coverage
 
 The test suite covers:
