@@ -240,6 +240,19 @@ class MCPPythonInstrumentor(BaseInstrumentor):
                 get_external_content_ledger().record(
                     effective_agent_id(), scan_source(response), exclude=local_instruction_digests(target)
                 )
+            if operation == "call_tool":
+                # 戻り値に現れた URL とハッシュ。戻り値の走査の文を送らない構成でも、導いた値だけは送る。
+                # 呼び出しの引数から導いた値と同じ項目へ、重複を除いて合わせる。
+                derived = ioc_call_fields(scan_source(response))
+                for key in ("ioc_urls", "ioc_hashes", "ioc_hash_commitments", "ioc_url_commitments"):
+                    if derived.get(key):
+                        merged = list(data["mcp"].get(key) or [])
+                        merged += [v for v in derived[key] if v not in merged]
+                        data["mcp"][key] = merged
+                for key in ("ioc_urls_truncated", "ioc_hashes_truncated", "ioc_hash_commitments_truncated"):
+                    if derived.get(key):
+                        data["mcp"][key] = True
+                data["mcp"]["ioc_signals"] = derived["ioc_signals"]
             if operation == "call_tool" and cfg.scan_result:
                 # 本文を送らない既定でも、戻り値に埋め込まれた指示が注入の規則に届くようにする。
                 data["mcp"].update(result_scan_fields(scan_source(response)))

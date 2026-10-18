@@ -36,6 +36,7 @@ IOC_HASH_COMMITMENTS: Final[str] = "ioc_hash_commitments"
 IOC_URLS_TRUNCATED: Final[str] = "ioc_urls_truncated"
 IOC_HASHES_TRUNCATED: Final[str] = "ioc_hashes_truncated"
 IOC_HASH_COMMITMENTS_TRUNCATED: Final[str] = "ioc_hash_commitments_truncated"
+IOC_URL_COMMITMENTS: Final[str] = "ioc_url_commitments"
 # 収集 hook が送る、導出の版の数。受け取り側はエージェントごとに最後に受けた版を控える。
 IOC_SIGNALS_FIELD: Final[str] = "ioc_signals"
 IOC_SIGNALS_VERSION: Final[int] = 1
@@ -45,6 +46,7 @@ FIELDS: Final[tuple[str, ...]] = (
     IOC_URLS,
     IOC_HASHES,
     IOC_HASH_COMMITMENTS,
+    IOC_URL_COMMITMENTS,
     IOC_URLS_TRUNCATED,
     IOC_HASHES_TRUNCATED,
     IOC_HASH_COMMITMENTS_TRUNCATED,
@@ -64,8 +66,11 @@ MAX_DECODED_TOKENS: Final[int] = 8
 MAX_DECODED_BYTES: Final[int] = 4096
 # 1 つの文字列を調べる長さの上限。これを超えた分は調べず、印を立てる。
 MAX_TEXT_CHARS: Final[int] = 262_144
+# 1 回の呼び出しで調べる文字の合計の上限。1 つずつの上限だけだと、大きな文字列を多数並べて処理を伸ばせる。
+MAX_TOTAL_CHARS: Final[int] = 1_048_576
 
 _COMMITMENT_PREFIX: Final[bytes] = b"argus-ioc-hash-v1:"
+_URL_COMMITMENT_PREFIX: Final[bytes] = b"argus-ioc-url-v1:"
 _HEX64: Final = re.compile(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{64}(?![0-9A-Fa-f])")
 _HEX_BYTES: Final = re.compile(
     r"(?<![0-9A-Fa-f])(?:[0-9A-Fa-f]{2}[:\- ]){31}[0-9A-Fa-f]{2}(?![0-9A-Fa-f])"
@@ -91,13 +96,31 @@ def commitment(hex64: str) -> str:
     ).hexdigest()
 
 
-def commitment_table(hashes: Any) -> dict[str, str]:
-    """登録済みのハッシュの並びから、コミットメント → 値の表を作る。64 桁の 16 進だけを入れる。"""
+def url_commitment(url: str) -> str:
+    """パスを持つ URL のコミットメント。正規化した URL から作る一方向の値。"""
+    return hashlib.sha256(_URL_COMMITMENT_PREFIX + url.encode("utf-8")).hexdigest()
+
+
+def commitment_table(values: Any) -> dict[str, str]:
+    """登録済みのハッシュと URL の並びから、コミットメント → 値の表を作る。
+
+    64 桁の 16 進はハッシュ、http か https で始まる文字列は URL として、それぞれの接頭辞で作る。
+    接頭辞が違うため、1 つの表に両方を入れても取り違えない。
+    """
     table: dict[str, str] = {}
-    for value in hashes:
-        if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value):
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        if re.fullmatch(r"[0-9a-f]{64}", value):
             table[commitment(value)] = value
+        elif value.startswith(("http://", "https://")):
+            table[url_commitment(value)] = value
     return table
+
+
+def _has_secret_bearing_path(url: str) -> bool:
+    """パスを持つ URL か。パスにはウェブフックの鍵のような秘密が入りうる。"""
+    return urlsplit(url).path not in ("", "/")
 
 
 def normalize_url_value(raw: str) -> str | None:
@@ -108,6 +131,13 @@ def normalize_url_value(raw: str) -> str | None:
     パスは保つ。末尾のスラッシュは保ち、同じ資源として畳まない。末尾の句読点は文中の区切りとして落とす。
     """
     text = raw.strip().rstrip(_URL_TRAILING_PUNCT)
+    # 括弧で囲んだ IPv6 のホストだけの URL は、閉じ括弧が構造の一部。文末の句読点として落とさない。
+    if (
+        "[" in raw
+        and "]" not in text
+        and raw.strip().rstrip(_URL_TRAILING_PUNCT.replace("]", "")).endswith("]")
+    ):
+        text = raw.strip().rstrip(_URL_TRAILING_PUNCT.replace("]", ""))
     try:
         parts = urlsplit(text)
         host = parts.hostname
@@ -285,18 +315,37 @@ def ioc_signal_fields(
     urls: list[str] = []
     hashes: list[str] = []
     commitments: list[str] = []
+    url_commitments: list[str] = []
     cut_urls = cut_hashes = cut_commit = not complete
+    budget = MAX_TOTAL_CHARS
     for key, raw in strings:
-        if len(raw) > MAX_TEXT_CHARS:
-            cut_urls = cut_hashes = True
-            raw = raw[:MAX_TEXT_CHARS]
+        if budget <= 0:
+            cut_urls = cut_hashes = cut_commit = True
+            break
+        if len(raw) > MAX_TEXT_CHARS or len(raw) > budget:
+            cut_urls = cut_hashes = cut_commit = True
+            raw = raw[: min(MAX_TEXT_CHARS, budget)]
+        budget -= len(raw)
         variants, cut = _variants(raw)
         cut_urls = cut_urls or cut
         cut_hashes = cut_hashes or cut
         for variant in variants:
             for m in _URL.finditer(variant):
                 url = normalize_url_value(m.group(0))
-                if url is None or url in urls:
+                if url is None:
+                    continue
+                if known is None and _has_secret_bearing_path(url):
+                    # 収集 hook は、パスを持つ URL の値を送らない。組織が登録した URL かは、受け取り側が
+                    # コミットメントで引く。
+                    uc = url_commitment(url)
+                    if uc in url_commitments:
+                        continue
+                    if len(url_commitments) >= MAX_COMMITMENTS_PER_CALL:
+                        cut_urls = True
+                        continue
+                    url_commitments.append(uc)
+                    continue
+                if url in urls:
                     continue
                 if len(urls) >= MAX_IOC_PER_CALL:
                     cut_urls = True
@@ -333,6 +382,8 @@ def ioc_signal_fields(
         out[IOC_HASHES] = hashes
     if commitments:
         out[IOC_HASH_COMMITMENTS] = commitments
+    if url_commitments:
+        out[IOC_URL_COMMITMENTS] = url_commitments
     if cut_urls:
         out[IOC_URLS_TRUNCATED] = True
     if cut_hashes:
