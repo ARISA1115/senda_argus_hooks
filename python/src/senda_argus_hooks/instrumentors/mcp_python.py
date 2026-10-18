@@ -31,6 +31,7 @@ from senda_argus_hooks.core.mcp_tools import (
     tool_names_of,
 )
 from senda_argus_hooks.core.egress_hosts import egress_hosts_with_overflow
+from senda_argus_hooks.core.ioc_call_fields import ioc_call_fields
 from senda_argus_hooks.core.monitor_targets import monitor_targets
 from senda_argus_hooks.core.resource_access import (
     classify_read_resource,
@@ -239,6 +240,19 @@ class MCPPythonInstrumentor(BaseInstrumentor):
                 get_external_content_ledger().record(
                     effective_agent_id(), scan_source(response), exclude=local_instruction_digests(target)
                 )
+            if operation == "call_tool":
+                # 戻り値に現れた URL とハッシュ。戻り値の走査の文を送らない構成でも、導いた値だけは送る。
+                # 呼び出しの引数から導いた値と同じ項目へ、重複を除いて合わせる。
+                derived = ioc_call_fields(scan_source(response))
+                for key in ("ioc_urls", "ioc_hashes", "ioc_hash_commitments", "ioc_url_commitments"):
+                    if derived.get(key):
+                        merged = list(data["mcp"].get(key) or [])
+                        merged += [v for v in derived[key] if v not in merged]
+                        data["mcp"][key] = merged
+                for key in ("ioc_urls_truncated", "ioc_hashes_truncated", "ioc_hash_commitments_truncated"):
+                    if derived.get(key):
+                        data["mcp"][key] = True
+                data["mcp"]["ioc_signals"] = derived["ioc_signals"]
             if operation == "call_tool" and cfg.scan_result:
                 # 本文を送らない既定でも、戻り値に埋め込まれた指示が注入の規則に届くようにする。
                 data["mcp"].update(result_scan_fields(scan_source(response)))
@@ -433,6 +447,9 @@ def _mcp_metadata(obj, operation: str, args, kwargs) -> dict[str, Any]:
             meta["egress_hosts"] = hosts
         if truncated:
             meta["egress_hosts_truncated"] = True
+        # 引数に現れた URL とハッシュ。本文を送らない既定でも、導いた値と文脈の無い 64 桁の 16 進の
+        # コミットメントだけを送る。導出は受け取り側と同じ規則である。
+        meta.update(ioc_call_fields(arguments.get("arguments")))
         targets = monitor_targets(arguments.get("arguments"), tool=tool_name)
         if targets:
             meta["monitor_targets"] = targets
