@@ -31,6 +31,7 @@ from senda_argus_hooks.core.mcp_tools import (
     tool_names_of,
 )
 from senda_argus_hooks.core.egress_hosts import egress_hosts_with_overflow
+from senda_argus_hooks.core.ioc_call_fields import ioc_call_fields
 from senda_argus_hooks.core.monitor_targets import monitor_targets
 from senda_argus_hooks.core.resource_access import (
     classify_read_resource,
@@ -433,6 +434,9 @@ def _mcp_metadata(obj, operation: str, args, kwargs) -> dict[str, Any]:
             meta["egress_hosts"] = hosts
         if truncated:
             meta["egress_hosts_truncated"] = True
+        # 引数に現れた URL とハッシュ。本文を送らない既定でも、導いた値と文脈の無い 64 桁の 16 進の
+        # コミットメントだけを送る。導出は受け取り側と同じ規則である。
+        meta.update(ioc_call_fields(arguments.get("arguments")))
         targets = monitor_targets(arguments.get("arguments"), tool=tool_name)
         if targets:
             meta["monitor_targets"] = targets
