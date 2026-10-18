@@ -1,7 +1,7 @@
-"""Anthropic の stream=True と messages.stream() の応答から、使用量を集めて 1 件だけ記録するための包み。
+"""Anthropic の stream=True と messages.stream() の応答から、使用量を集めるための部品。
 
-SDK のストリームと同じ使い方 (for、async for、with、close) を保つ。包まれたオブジェクトの他の属性は
-そのまま委譲する。記録の失敗は呼び出しへ伝えない。
+事象の読み方 (observe_anthropic) と、messages.stream() の管理オブジェクトの包みを持つ。stream=True の
+ストリームの包みは、提供元に依らない usage_stream.UsageStream が持つ。
 """
 
 from __future__ import annotations
@@ -10,23 +10,14 @@ import contextlib
 from collections.abc import Callable
 from typing import Any
 
+from .usage_stream import StreamedMessage, StreamState
+
 USAGE_FIELDS = (
     "input_tokens",
     "output_tokens",
     "cache_creation_input_tokens",
     "cache_read_input_tokens",
 )
-
-
-class StreamedMessage:
-    """読み終えたストリームから組み立てた、量だけを持つ応答。共通の記録の処理が、普通の応答と同じに扱う。"""
-
-    def __init__(self, model: Any, usage: dict[str, int]):
-        self.model = model
-        self.usage = dict(usage)
-
-    def model_dump(self) -> dict[str, Any]:
-        return {"model": self.model, "usage": dict(self.usage), "content": []}
 
 
 def usage_of(obj: Any) -> dict[str, int]:
@@ -39,6 +30,27 @@ def usage_of(obj: Any) -> dict[str, int]:
         if isinstance(value, int) and not isinstance(value, bool):
             out[name] = value
     return out
+
+
+def observe_anthropic(event: Any, state: StreamState) -> None:
+    """message_start の量と応答のモデル、message_delta の量を集める。"""
+    kind = event.get("type") if isinstance(event, dict) else getattr(event, "type", None)
+    if kind == "message_start":
+        message = event.get("message") if isinstance(event, dict) else getattr(event, "message", None)
+        state.usage.update(usage_of(message))
+        model = message.get("model") if isinstance(message, dict) else getattr(message, "model", None)
+        if isinstance(model, str) and model:
+            state.model = model
+    elif kind == "message_delta":
+        state.usage.update(usage_of(event))
+
+
+# 提供元の SDK と通信の部品の型。with の中で上がったこれらは、利用者のコードでなく、ストリームの読み取りの失敗。
+_PROVIDER_ERROR_ROOTS = ("anthropic", "openai", "httpx", "httpx2", "httpcore")
+
+
+def _is_provider_error(exc: BaseException) -> bool:
+    return type(exc).__module__.split(".", 1)[0] in _PROVIDER_ERROR_ROOTS
 
 
 def _snapshot_of(stream: Any) -> Any:
@@ -55,117 +67,6 @@ def _snapshot_of(stream: Any) -> Any:
         return getattr(stream, "current_message_snapshot", None)
     except Exception:  # noqa: BLE001 - 読む前の assert を、量が無いこととして扱う
         return None
-
-
-class UsageStream:
-    """stream=True の応答を包み、message_start と message_delta の量を集めて、読み終えたときに 1 件だけ記録する。
-
-    for、async for、next、anext、with、close を、SDK のストリームと同じに使える。応答のモデルは message_start の
-    message.model から取る。要求に渡した別名でなく、応答のモデルの名前で記録するため。
-    """
-
-    def __init__(self, inner: Any, on_done: Callable[[dict[str, int], str | None], None]):
-        self._inner = inner
-        self._on_done = on_done
-        self._usage: dict[str, int] = {}
-        self._model: str | None = None
-        self._done = False
-        self._it: Any = None
-        self._ait: Any = None
-
-    def _observe(self, event: Any) -> None:
-        kind = event.get("type") if isinstance(event, dict) else getattr(event, "type", None)
-        if kind == "message_start":
-            message = event.get("message") if isinstance(event, dict) else getattr(event, "message", None)
-            self._usage.update(usage_of(message))
-            model = message.get("model") if isinstance(message, dict) else getattr(message, "model", None)
-            if isinstance(model, str) and model:
-                self._model = model
-        elif kind == "message_delta":
-            self._usage.update(usage_of(event))
-
-    def _finish(self) -> None:
-        if self._done:
-            return
-        self._done = True
-        if self._usage:
-            with contextlib.suppress(Exception):
-                self._on_done(self._usage, self._model)
-
-    def __iter__(self):
-        return self
-
-    def __next__(self):
-        if self._it is None:
-            self._it = iter(self._inner)
-        try:
-            event = next(self._it)
-        except StopIteration:
-            self._finish()
-            raise
-        except BaseException:
-            self._finish()
-            raise
-        self._observe(event)
-        return event
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self):
-        if self._ait is None:
-            self._ait = self._inner.__aiter__()
-        try:
-            event = await self._ait.__anext__()
-        except StopAsyncIteration:
-            self._finish()
-            raise
-        except BaseException:
-            self._finish()
-            raise
-        self._observe(event)
-        return event
-
-    def __enter__(self):
-        enter = getattr(self._inner, "__enter__", None)
-        if enter is not None:
-            enter()
-        return self
-
-    def __exit__(self, *exc_info):
-        try:
-            exit_ = getattr(self._inner, "__exit__", None)
-            return exit_(*exc_info) if exit_ is not None else None
-        finally:
-            self._finish()
-
-    async def __aenter__(self):
-        enter = getattr(self._inner, "__aenter__", None)
-        if enter is not None:
-            await enter()
-        return self
-
-    async def __aexit__(self, *exc_info):
-        try:
-            exit_ = getattr(self._inner, "__aexit__", None)
-            return await exit_(*exc_info) if exit_ is not None else None
-        finally:
-            self._finish()
-
-    def close(self):
-        try:
-            return self._inner.close()
-        finally:
-            self._finish()
-
-    async def aclose(self):
-        try:
-            return await self._inner.close()
-        finally:
-            self._finish()
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._inner, name)
 
 
 class UsageStreamManager:
@@ -192,10 +93,19 @@ class UsageStreamManager:
     def _record_exit(self, exc: BaseException | None) -> None:
         with contextlib.suppress(Exception):
             snapshot = _snapshot_of(self._stream)
-            if snapshot is not None and usage_of(snapshot):
+            has_usage = snapshot is not None and bool(usage_of(snapshot))
+            provider_error = exc is not None and _is_provider_error(exc)
+            if has_usage:
+                # 途中までの量は、課金された分として残す。
                 self._on_message(snapshot)
-            elif exc is not None:
-                self._on_error(exc, False)
+            if exc is not None and (provider_error or not has_usage):
+                # 提供元か通信の失敗は、量が残っていても、失敗として記録する。利用者のコードの例外は、
+                # 型の名前だけを載せ、例外の文を送らない。
+                self._on_error(exc, provider_error)
+            elif exc is None and not has_usage:
+                # 何も読まずに抜けた。要求は __enter__ で出ているため、量の無い記録として残す。数えないと、
+                # 量の無い呼び出しが、Argus 側が少ないことに気付けない形で消える。
+                self._on_message(StreamedMessage(None, {}))
 
     def _record_enter_failure(self, exc: BaseException) -> None:
         with contextlib.suppress(Exception):

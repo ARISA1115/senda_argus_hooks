@@ -97,12 +97,20 @@ class _Manager:
 
 def _install(monkeypatch):
     class Messages:
+        # 管理オブジェクトを差し替える試験は、計装が包んだ stream を上書きせず、この工場を差し替える。
+        manager_factory = None
+        stream_factory = None
+
         def create(self, *args, **kwargs):
             if kwargs.get("stream"):
+                if Messages.stream_factory is not None:
+                    return Messages.stream_factory()
                 return _Stream(_stream_events())
             return _Response({"id": "m", "model": kwargs.get("model"), "usage": USAGE})
 
         def stream(self, *args, **kwargs):
+            if Messages.manager_factory is not None:
+                return Messages.manager_factory()
             snapshot = None if kwargs.get("no_snapshot") else _Response({"model": kwargs.get("model"), "usage": USAGE})
             return _Manager(snapshot, fail_enter=kwargs.get("fail_enter", False))
 
@@ -336,10 +344,13 @@ def test_a_snapshot_that_asserts_before_any_event_is_read_means_no_usage(events_
             self.stream = _AssertingStream()
             self.fail_enter = False
 
-    Messages.stream = lambda self, *a, **k: _Mgr()
+    Messages.manager_factory = lambda: _Mgr()
+    assert hasattr(type(Messages()).stream, "__senda_patched__")
     with Messages().stream(model="claude-x", messages=[]):
         pass
-    assert _events(path) == []
+    # 事象を 1 つも読まずに抜けた。要求は出ているため、量の無い記録を 1 件だけ残し、量は載せない。
+    (event,) = _events(path)
+    assert event["event_type"] == "llm.request" and "usage" not in event["data"]["llm"]
 
 
 def test_the_safe_snapshot_accessor_is_preferred_when_the_sdk_has_it(events_path):
@@ -358,7 +369,7 @@ def test_the_safe_snapshot_accessor_is_preferred_when_the_sdk_has_it(events_path
             self.stream = _Stream()
             self.fail_enter = False
 
-    Messages.stream = lambda self, *a, **k: _Mgr()
+    Messages.manager_factory = lambda: _Mgr()
     with Messages().stream(model="claude-x", messages=[]):
         pass
     assert len(_usage_events(path)) == 1
@@ -375,3 +386,59 @@ def test_every_non_direct_client_class_of_the_sdk_is_marked(events_path):
     resource.create(model="claude-x", messages=[])
     marked = [e for e in _usage_events(path) if "via" in e["data"]["llm"]]
     assert len(marked) == 6 and len(_usage_events(path)) == 7
+
+
+class _ProviderError(Exception):
+    """提供元か通信の部品が上げる型。型のモジュールの名前で、提供元の失敗と判定される。"""
+
+
+_ProviderError.__module__ = "httpx"
+
+
+def test_a_provider_failure_while_iterating_a_stream_records_partial_usage_and_an_error(events_path):
+    path, (Messages, _) = events_path
+
+    class _Breaking(_Stream):
+        def __next__(self):
+            if not self._events:
+                raise _ProviderError("disconnect")
+            return self._events.pop(0)
+
+        def __iter__(self):
+            return self
+
+    Messages.stream_factory = lambda: _Breaking(_stream_events()[:1])
+    stream = Messages().create(model="claude-x", messages=[], stream=True)
+    with pytest.raises(_ProviderError):
+        list(stream)
+    kinds = [e["event_type"] for e in _events(path)]
+    assert kinds == ["llm.request", "llm.error"]
+    request = _events(path)[0]["data"]["llm"]
+    assert request["usage"]["input_tokens"] == 100 and request["usage"]["output_tokens"] == 1
+
+
+def test_a_failure_before_any_event_is_only_an_error(events_path):
+    path, (Messages, _) = events_path
+
+    class _Dead(_Stream):
+        def __next__(self):
+            raise _ProviderError("connection reset")
+
+        def __iter__(self):
+            return self
+
+    Messages.stream_factory = lambda: _Dead([])
+    with pytest.raises(_ProviderError):
+        list(Messages().create(model="claude-x", messages=[], stream=True))
+    assert [e["event_type"] for e in _events(path)] == ["llm.error"]
+
+
+def test_a_provider_failure_inside_messages_stream_is_an_error_even_with_partial_usage(events_path):
+    path, (Messages, _) = events_path
+    with pytest.raises(_ProviderError):
+        with Messages().stream(model="claude-x", messages=[]):
+            raise _ProviderError("disconnect while reading")
+    kinds = [e["event_type"] for e in _events(path)]
+    assert kinds == ["llm.request", "llm.error"]
+    error = _events(path)[1]["error"]
+    assert error["type"] == "_ProviderError" and error["message"] == "disconnect while reading"

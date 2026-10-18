@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import importlib
 import time
 from collections.abc import Callable
 from typing import Any
@@ -19,6 +20,21 @@ from senda_argus_hooks.core.response_meta import (
 from senda_argus_hooks.core.runtime import emit_event, get_config
 
 from .base import BaseInstrumentor, audit_guard
+from .openai_stream import observe_openai, usage_of_openai
+from .usage_stream import StreamedMessage as _StreamedMessage
+from .usage_stream import UsageStream as _UsageStream
+
+# 計装している呼び出し。Argus の突合の画面が、数えている範囲として出す。parse や stream の補助関数は、
+# create を通らないため含まれない。embeddings は、プロバイダの completions の使用量に載らないため、
+# 突合の対象から外れる。
+INSTRUMENTED_CALLS = (
+    "chat.completions.create",
+    "chat.completions.create(async)",
+    "chat.completions.create(stream=True)",
+    "responses.create",
+    "responses.create(async)",
+    "responses.create(stream=True)",
+)
 
 
 class OpenAIInstrumentor(BaseInstrumentor):
@@ -29,22 +45,35 @@ class OpenAIInstrumentor(BaseInstrumentor):
 
     def instrument(self) -> bool:
         try:
-            import openai
+            import openai  # 導入の有無の判定と、属性をたどる場合の起点
         except Exception:  # noqa: BLE001 - 任意の SDK の import 失敗は種類を問わず未導入として扱う
             return False
         patched = False
-        candidates = []
-        with contextlib.suppress(Exception):
-            candidates.append((openai.resources.chat.completions.Completions, "create", "chat.completions.create"))
-        with contextlib.suppress(Exception):
-            candidates.append((openai.resources.responses.Responses, "create", "responses.create"))
-        with contextlib.suppress(Exception):
-            candidates.append((openai.resources.embeddings.Embeddings, "create", "embeddings.create"))
-        for cls, method_name, op in candidates:
+        candidates: list[tuple[Any, str, str, str]] = []
+        for module, sync_name, async_name, op in (
+            ("chat.completions", "Completions", "AsyncCompletions", "chat.completions.create"),
+            ("responses", "Responses", "AsyncResponses", "responses.create"),
+            ("embeddings", "Embeddings", "AsyncEmbeddings", "embeddings.create"),
+        ):
+            # openai 3.x の resources は属性を遅延して作り、responses は一覧に無い。属性をたどると、他で先に
+            # 読み込まれていない限り見つからず、計装が黙って外れる。モジュールを名前で読み込む。
+            target: Any = None
+            with contextlib.suppress(Exception):
+                target = importlib.import_module(f"openai.resources.{module}")
+            if target is None:
+                # モジュールとして読み込めない形 (属性だけで作った代替の SDK) は、属性をたどって探す。
+                target = getattr(openai, "resources", None)
+                for part in module.split("."):
+                    target = getattr(target, part, None)
+            for name, kind in ((sync_name, "sync"), (async_name, "async")):
+                cls = getattr(target, name, None)
+                if cls is not None:
+                    candidates.append((cls, "create", op, kind))
+        for cls, method_name, op, kind in candidates:
             if hasattr(getattr(cls, method_name, None), "__senda_patched__"):
                 continue
             original = getattr(cls, method_name)
-            wrapped = self._wrap(original, op)
+            wrapped = self._wrap_async(original, op) if kind == "async" else self._wrap(original, op)
             wrapped.__senda_patched__ = True
             setattr(cls, method_name, wrapped)
             self._patches.append((cls, method_name, original))
@@ -55,84 +84,139 @@ class OpenAIInstrumentor(BaseInstrumentor):
         def wrapper(obj, *args, **kwargs):
             cfg = get_config()
             start = time.perf_counter()
+            via = _deployment_of(obj)
             input_payload = _input_payload(args, kwargs, cfg.capture_prompt, cfg.capture_hash)
             try:
                 response = original(obj, *args, **kwargs)
             except Exception as exc:
-                latency_ms = int((time.perf_counter() - start) * 1000)
-                emit_event(
-                    "llm.error",
-                    source={"component": "instrumentor", "sdk": "openai", "provider": "openai", "operation": operation},
-                    data={"llm": {"provider": "openai", "operation": operation, "model": kwargs.get("model"), "input": input_payload}},
-                    status="error",
-                    latency_ms=latency_ms,
-                    error={"type": exc.__class__.__name__, "message": str(exc)},
-                )
+                self._record_error(operation, kwargs, input_payload, start, exc)
                 raise
-
-            # 観測の後処理は本来の呼び出しから隔離する。ここで失敗しても応答は返す。
-            with audit_guard(operation):
-                latency_ms = int((time.perf_counter() - start) * 1000)
-                output_payload = _safe_response(response) if cfg.capture_response else {"response_hash": sha256_value(_safe_response(response))}
-                # 指示の載る場所は提供元と操作ごとに違う。応答系の要求では instructions と input に
-                # 載り、位置引数で渡る形もある。名前を 2 つ決め打ちすると、その形の呼び出しでは
-                # 行も組も空になり、判定が静かに止まる。場所の網羅は共通の収集へ任せる。
-                # 埋め込みの要求に指示は無い。文書そのものを渡す引数を指示として扱うと、
-                # 経路や URL を含む普通の文書が指示のダイジェストになる。
-                _sources = (
-                    [] if "embedding" in operation else collect_instruction_sources(kwargs, args)
-                )
-                system_prompt_line_hashes = system_prompt_line_digests(*_sources)
-                system_prompt_pair_hashes = system_prompt_pair_digests(*_sources)
-                # 語の組が作れない日本語だけの指示のための文の署名。埋め込みと鍵が揃うときだけ出る。
-                system_prompt_semantic_hashes = system_prompt_semantic_digests(*_sources)
-                llm_data: dict[str, Any] = {
-                    "provider": "openai",
-                    "operation": operation,
-                    "model": kwargs.get("model"),
-                    "input": input_payload,
-                    "output": output_payload,
-                }
-                if "messages" in kwargs:
-                    llm_data["messages_hash"] = sha256_value(kwargs.get("messages") or [])
-                usage = _extract_usage(response)
-                if usage:
-                    llm_data["usage"] = usage
-                response_model = _extract_response_model(response)
-                if response_model:
-                    llm_data["response_model"] = response_model
-                if system_prompt_line_hashes:
-                    llm_data["system_prompt_line_hashes"] = system_prompt_line_hashes
-                # 組は行と独立に載せる。行の内側へ入れると、行を出す条件を変えたときに組が
-                # 黙って止まる。2 つは別々の導出で、片方が空でももう片方は成立する。
-                if system_prompt_pair_hashes:
-                    llm_data["system_prompt_pair_hashes"] = system_prompt_pair_hashes
-                if system_prompt_semantic_hashes:
-                    llm_data["system_prompt_semantic_hashes"] = system_prompt_semantic_hashes
-                emit_event(
-                    "llm.request",
-                    source={"component": "instrumentor", "sdk": "openai", "provider": "openai", "operation": operation},
-                    data={"llm": llm_data},
-                    status="success",
-                    latency_ms=latency_ms,
-                )
-                offered = _offered_tool_names(kwargs)
-                selected = _selected_tool_names(response)
-                if offered and selected:
-                    alternatives = offered_alternatives(offered)
-                    for selected_tool in selected:
-                        emit_event(
-                            "agent.decision",
-                            source={"component": "instrumentor", "sdk": "openai", "provider": "openai", "operation": operation},
-                            data={
-                                "alternatives": alternatives,
-                                "selected_tool": selected_tool,
-                            },
-                            status="success",
-                            latency_ms=latency_ms,
-                        )
+            if kwargs.get("stream") is True:
+                return self._stream(response, operation, args, kwargs, input_payload, start, via)
+            self._record_success(operation, args, kwargs, input_payload, response, start, via)
             return response
         return wrapper
+
+    def _wrap_async(self, original: Callable, operation: str) -> Callable:
+        async def wrapper(obj, *args, **kwargs):
+            cfg = get_config()
+            start = time.perf_counter()
+            via = _deployment_of(obj)
+            input_payload = _input_payload(args, kwargs, cfg.capture_prompt, cfg.capture_hash)
+            try:
+                response = await original(obj, *args, **kwargs)
+            except Exception as exc:
+                self._record_error(operation, kwargs, input_payload, start, exc)
+                raise
+            if kwargs.get("stream") is True:
+                return self._stream(response, operation, args, kwargs, input_payload, start, via)
+            self._record_success(operation, args, kwargs, input_payload, response, start, via)
+            return response
+        return wrapper
+
+    def _stream(self, response: Any, operation: str, args: tuple, kwargs: dict, input_payload: dict, start: float, via: str | None) -> Any:
+        """stream=True の応答を包み、読み終えたときに 1 件だけ記録する。量が返らなかったときは、理由を載せる。"""
+
+        def done(usage: dict, model: str | None) -> None:
+            note = None
+            if not usage:
+                # チャットのストリームは、stream_options の include_usage を要求しない限り、量を返さない。
+                options = kwargs.get("stream_options")
+                requested = isinstance(options, dict) and options.get("include_usage") is True
+                note = "stream_usage_missing" if requested or "responses" in operation else "stream_without_include_usage"
+            self._record_success(
+                operation, args, kwargs, input_payload, _StreamedMessage(model or kwargs.get("model"), usage), start, via, note
+            )
+
+        return _UsageStream(
+            response,
+            done,
+            observe_openai,
+            lambda exc: self._record_error(operation, kwargs, input_payload, start, exc),
+        )
+
+    def _record_error(self, operation: str, kwargs: dict, input_payload: dict, start: float, exc: BaseException) -> None:
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        emit_event(
+            "llm.error",
+            source={"component": "instrumentor", "sdk": "openai", "provider": "openai", "operation": operation},
+            data={"llm": {"provider": "openai", "operation": operation, "model": kwargs.get("model"), "input": input_payload}},
+            status="error",
+            latency_ms=latency_ms,
+            error={"type": exc.__class__.__name__, "message": str(exc)},
+        )
+
+    def _record_success(self, operation: str, args: tuple, kwargs: dict, input_payload: dict, response: Any, start: float, via: str | None = None, usage_note: str | None = None) -> None:
+        cfg = get_config()
+
+        # 観測の後処理は本来の呼び出しから隔離する。ここで失敗しても応答は返す。
+        with audit_guard(operation):
+            latency_ms = int((time.perf_counter() - start) * 1000)
+            output_payload = _safe_response(response) if cfg.capture_response else {"response_hash": sha256_value(_safe_response(response))}
+            # 指示の載る場所は提供元と操作ごとに違う。応答系の要求では instructions と input に
+            # 載り、位置引数で渡る形もある。名前を 2 つ決め打ちすると、その形の呼び出しでは
+            # 行も組も空になり、判定が静かに止まる。場所の網羅は共通の収集へ任せる。
+            # 埋め込みの要求に指示は無い。文書そのものを渡す引数を指示として扱うと、
+            # 経路や URL を含む普通の文書が指示のダイジェストになる。
+            _sources = (
+                [] if "embedding" in operation else collect_instruction_sources(kwargs, args)
+            )
+            system_prompt_line_hashes = system_prompt_line_digests(*_sources)
+            system_prompt_pair_hashes = system_prompt_pair_digests(*_sources)
+            # 語の組が作れない日本語だけの指示のための文の署名。埋め込みと鍵が揃うときだけ出る。
+            system_prompt_semantic_hashes = system_prompt_semantic_digests(*_sources)
+            llm_data: dict[str, Any] = {
+                "provider": "openai",
+                "operation": operation,
+                "model": kwargs.get("model"),
+                "input": input_payload,
+                "output": output_payload,
+            }
+            if "messages" in kwargs:
+                llm_data["messages_hash"] = sha256_value(kwargs.get("messages") or [])
+            usage = _extract_usage(response)
+            if usage:
+                llm_data["usage"] = usage
+            if usage_note:
+                # 量が返らなかった理由。突合は、量の無い記録を、捨てた記録として数え、その日を判定しない。
+                llm_data["usage_unavailable"] = usage_note
+            if via:
+                # Azure や OpenAI 以外の宛先は、OpenAI の使用量の API に載らない。突合の対象から外せるよう印を付ける。
+                llm_data["via"] = via
+            response_model = _extract_response_model(response)
+            if response_model:
+                llm_data["response_model"] = response_model
+            if system_prompt_line_hashes:
+                llm_data["system_prompt_line_hashes"] = system_prompt_line_hashes
+            # 組は行と独立に載せる。行の内側へ入れると、行を出す条件を変えたときに組が
+            # 黙って止まる。2 つは別々の導出で、片方が空でももう片方は成立する。
+            if system_prompt_pair_hashes:
+                llm_data["system_prompt_pair_hashes"] = system_prompt_pair_hashes
+            if system_prompt_semantic_hashes:
+                llm_data["system_prompt_semantic_hashes"] = system_prompt_semantic_hashes
+            emit_event(
+                "llm.request",
+                source={"component": "instrumentor", "sdk": "openai", "provider": "openai", "operation": operation},
+                data={"llm": llm_data},
+                status="success",
+                latency_ms=latency_ms,
+            )
+            offered = _offered_tool_names(kwargs)
+            selected = _selected_tool_names(response)
+            if offered and selected:
+                alternatives = offered_alternatives(offered)
+                for selected_tool in selected:
+                    emit_event(
+                        "agent.decision",
+                        source={"component": "instrumentor", "sdk": "openai", "provider": "openai", "operation": operation},
+                        data={
+                            "alternatives": alternatives,
+                            "selected_tool": selected_tool,
+                        },
+                        status="success",
+                        latency_ms=latency_ms,
+                    )
+
 
     def uninstrument(self) -> bool:
         for cls, method_name, original in self._patches:
@@ -270,17 +354,21 @@ def _extract_usage(response: Any) -> dict[str, int] | None:
     usage = getattr(response, "usage", None)
     if usage is None and isinstance(response, dict):
         usage = response.get("usage")
-    if usage is None:
+    return usage_of_openai(usage) or None
+
+
+def _deployment_of(obj: Any) -> str | None:
+    """この呼び出しが OpenAI の API を直接でなく、Azure や別の宛先へ送るクライアントのものかを返す。
+
+    AzureOpenAI は同じ Completions のリソースを通る。OpenAI 互換の別の宛先 (base_url が OpenAI 以外) も同じ。
+    どちらも OpenAI の使用量の API に載らない量を、Argus 側が数えると、Argus 側が多い差として出る。
+    """
+    client = getattr(obj, "_client", None)
+    if client is None:
         return None
-
-    def _get(name: str) -> Any:
-        return getattr(usage, name, None) if not isinstance(usage, dict) else usage.get(name)
-
-    input_tokens = _get("prompt_tokens")
-    output_tokens = _get("completion_tokens")
-    result: dict[str, int] = {}
-    if input_tokens is not None:
-        result["input_tokens"] = int(input_tokens)
-    if output_tokens is not None:
-        result["output_tokens"] = int(output_tokens)
-    return result or None
+    if "azure" in type(client).__name__.lower():
+        return "azure"
+    host = getattr(getattr(client, "base_url", None), "host", None)
+    if isinstance(host, str) and host and host != "api.openai.com" and not host.endswith(".openai.com"):
+        return "base_url"
+    return None

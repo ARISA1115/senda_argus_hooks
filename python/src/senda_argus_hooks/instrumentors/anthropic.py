@@ -20,10 +20,11 @@ from senda_argus_hooks.core.runtime import emit_event, get_config
 
 from .anthropic_stream import (
     USAGE_FIELDS,
-    StreamedMessage as _StreamedMessage,
-    UsageStream as _UsageStream,
     UsageStreamManager as _UsageStreamManager,
+    observe_anthropic,
 )
+from .usage_stream import StreamedMessage as _StreamedMessage
+from .usage_stream import UsageStream as _UsageStream
 from .base import BaseInstrumentor, audit_guard
 
 # 計装している呼び出し。Argus の突合の画面が、数えている範囲として出す。Batch の API は、結果の取得が
@@ -91,6 +92,8 @@ class AnthropicInstrumentor(BaseInstrumentor):
                 return _UsageStream(
                     response,
                     lambda usage, model: self._record_success(operation, args, kwargs, input_payload, _StreamedMessage(model or kwargs.get("model"), usage), start, via),
+                    observe_anthropic,
+                    lambda exc: self._record_error(operation, kwargs, input_payload, start, exc),
                 )
             self._record_success(operation, args, kwargs, input_payload, response, start, via)
             return response
@@ -111,6 +114,8 @@ class AnthropicInstrumentor(BaseInstrumentor):
                 return _UsageStream(
                     response,
                     lambda usage, model: self._record_success(operation, args, kwargs, input_payload, _StreamedMessage(model or kwargs.get("model"), usage), start, via),
+                    observe_anthropic,
+                    lambda exc: self._record_error(operation, kwargs, input_payload, start, exc),
                 )
             self._record_success(operation, args, kwargs, input_payload, response, start, via)
             return response
