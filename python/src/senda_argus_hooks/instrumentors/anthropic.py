@@ -79,6 +79,7 @@ class AnthropicInstrumentor(BaseInstrumentor):
         def wrapper(obj, *args, **kwargs):
             cfg = get_config()
             start = time.perf_counter()
+            via = _deployment_of(obj)
             input_payload = _input_payload(args, kwargs, cfg.capture_prompt, cfg.capture_hash)
             try:
                 response = original(obj, *args, **kwargs)
@@ -89,9 +90,9 @@ class AnthropicInstrumentor(BaseInstrumentor):
                 # stream=True は、イベントを読み終えた時点で量が確定する。読み終えたときに 1 件だけ記録する。
                 return _UsageStream(
                     response,
-                    lambda usage: self._record_success(operation, args, kwargs, input_payload, _StreamedMessage(kwargs.get("model"), usage), start),
+                    lambda usage, model: self._record_success(operation, args, kwargs, input_payload, _StreamedMessage(model or kwargs.get("model"), usage), start, via),
                 )
-            self._record_success(operation, args, kwargs, input_payload, response, start)
+            self._record_success(operation, args, kwargs, input_payload, response, start, via)
             return response
         return wrapper
 
@@ -99,6 +100,7 @@ class AnthropicInstrumentor(BaseInstrumentor):
         async def wrapper(obj, *args, **kwargs):
             cfg = get_config()
             start = time.perf_counter()
+            via = _deployment_of(obj)
             input_payload = _input_payload(args, kwargs, cfg.capture_prompt, cfg.capture_hash)
             try:
                 response = await original(obj, *args, **kwargs)
@@ -108,9 +110,9 @@ class AnthropicInstrumentor(BaseInstrumentor):
             if kwargs.get("stream") is True:
                 return _UsageStream(
                     response,
-                    lambda usage: self._record_success(operation, args, kwargs, input_payload, _StreamedMessage(kwargs.get("model"), usage), start),
+                    lambda usage, model: self._record_success(operation, args, kwargs, input_payload, _StreamedMessage(model or kwargs.get("model"), usage), start, via),
                 )
-            self._record_success(operation, args, kwargs, input_payload, response, start)
+            self._record_success(operation, args, kwargs, input_payload, response, start, via)
             return response
         return wrapper
 
@@ -119,20 +121,21 @@ class AnthropicInstrumentor(BaseInstrumentor):
         def wrapper(obj, *args, **kwargs):
             cfg = get_config()
             start = time.perf_counter()
+            via = _deployment_of(obj)
             input_payload = _input_payload(args, kwargs, cfg.capture_prompt, cfg.capture_hash)
             manager = original(obj, *args, **kwargs)
             return _UsageStreamManager(
                 manager,
-                lambda message: self._record_success(operation, args, kwargs, input_payload, message, start),
-                lambda exc: self._record_error(operation, kwargs, input_payload, start, exc),
+                lambda message: self._record_success(operation, args, kwargs, input_payload, message, start, via),
+                lambda exc, with_message: self._record_error(operation, kwargs, input_payload, start, exc, with_message),
             )
         return wrapper
 
-    def _record_error(self, operation: str, kwargs: dict, input_payload: dict, start: float, exc: BaseException) -> None:
+    def _record_error(self, operation: str, kwargs: dict, input_payload: dict, start: float, exc: BaseException, with_message: bool = True) -> None:
         latency_ms = int((time.perf_counter() - start) * 1000)
-        emit_event("llm.error", source={"component": "instrumentor", "sdk": "anthropic", "provider": "anthropic", "operation": operation}, data={"llm": {"provider": "anthropic", "operation": operation, "model": kwargs.get("model"), "input": input_payload}}, status="error", latency_ms=latency_ms, error={"type": exc.__class__.__name__, "message": str(exc)})
+        emit_event("llm.error", source={"component": "instrumentor", "sdk": "anthropic", "provider": "anthropic", "operation": operation}, data={"llm": {"provider": "anthropic", "operation": operation, "model": kwargs.get("model"), "input": input_payload}}, status="error", latency_ms=latency_ms, error={"type": exc.__class__.__name__, "message": str(exc) if with_message else ""})
 
-    def _record_success(self, operation: str, args: tuple, kwargs: dict, input_payload: dict, response: Any, start: float) -> None:
+    def _record_success(self, operation: str, args: tuple, kwargs: dict, input_payload: dict, response: Any, start: float, via: str | None = None) -> None:
         cfg = get_config()
 
         # 観測の後処理は本来の呼び出しから隔離する。ここで失敗しても応答は返す。
@@ -152,6 +155,9 @@ class AnthropicInstrumentor(BaseInstrumentor):
             usage = _extract_usage(response)
             if usage:
                 llm_data["usage"] = usage
+            if via:
+                # Bedrock と Vertex などの経由は、プロバイダの使用量の API に載らない。量を突合の対象から外せるよう印を付ける。
+                llm_data["via"] = via
             response_model = _extract_response_model(response)
             if response_model:
                 llm_data["response_model"] = response_model
@@ -295,6 +301,26 @@ def _safe_response(response: Any) -> Any:
             with contextlib.suppress(Exception):
                 return getattr(response, attr)()
     return str(response)
+
+
+# anthropic 1.15.0 の lib で確認した、直接の API でないクライアントの型の名前に含まれる語。AnthropicBedrock、
+# AnthropicBedrockMantle、AnthropicVertex、AnthropicFoundry、AnthropicAWS、AnthropicGoogleCloud は、直接の
+# クライアントと同じ Messages のリソースを通る (resources.messages の Messages(self))。
+_DEPLOYMENT_CLIENTS = ("bedrock", "vertex", "foundry", "googlecloud", "aws")
+
+
+def _deployment_of(obj: Any) -> str | None:
+    """この呼び出しが、Anthropic の API を直接ではなく、他の基盤を経由するクライアントのものかを返す。
+
+    AnthropicBedrock と AnthropicVertex などは、同じ Messages のリソースを通る。経由の量は、Anthropic の
+    使用量の API に載らない。クライアントの型の名前から求める。
+    """
+    client = getattr(obj, "_client", None)
+    name = type(client).__name__.lower() if client is not None else ""
+    for key in _DEPLOYMENT_CLIENTS:
+        if key in name:
+            return key
+    return None
 
 
 def _extract_usage(response: Any) -> dict[str, int] | None:

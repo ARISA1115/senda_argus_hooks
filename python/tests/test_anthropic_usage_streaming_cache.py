@@ -67,12 +67,8 @@ def _stream_events():
     start = _Event(
         "message_start",
         message=types.SimpleNamespace(
-            usage={
-                "input_tokens": 100,
-                "output_tokens": 1,
-                "cache_creation_input_tokens": 7,
-                "cache_read_input_tokens": 20,
-            }
+            model="claude-resolved-1",
+            usage={"input_tokens": 100, "output_tokens": 1, "cache_creation_input_tokens": 7, "cache_read_input_tokens": 20},
         ),
     )
     delta = _Event("message_delta", usage={"output_tokens": 50})
@@ -80,17 +76,20 @@ def _stream_events():
 
 
 class _Manager:
-    def __init__(self, snapshot):
+    def __init__(self, snapshot, fail_enter=False):
         self.stream = types.SimpleNamespace(current_message_snapshot=snapshot)
+        self.fail_enter = fail_enter
 
     def __enter__(self):
+        if self.fail_enter:
+            raise ConnectionError("request failed")
         return self.stream
 
     def __exit__(self, *a):
         return False
 
     async def __aenter__(self):
-        return self.stream
+        return self.__enter__()
 
     async def __aexit__(self, *a):
         return False
@@ -104,7 +103,8 @@ def _install(monkeypatch):
             return _Response({"id": "m", "model": kwargs.get("model"), "usage": USAGE})
 
         def stream(self, *args, **kwargs):
-            return _Manager(_Response({"model": kwargs.get("model"), "usage": USAGE}))
+            snapshot = None if kwargs.get("no_snapshot") else _Response({"model": kwargs.get("model"), "usage": USAGE})
+            return _Manager(snapshot, fail_enter=kwargs.get("fail_enter", False))
 
     class AsyncMessages:
         async def create(self, *args, **kwargs):
@@ -204,15 +204,94 @@ def test_an_async_messages_stream_records_on_exit(events_path):
     assert len(_usage_events(path)) == 1
 
 
-def test_an_error_inside_the_stream_block_is_an_error_event_not_a_usage_event(
-    events_path,
-):
+def test_a_user_exception_inside_the_block_still_records_the_usage_already_billed(events_path):
     path, (Messages, _) = events_path
     with pytest.raises(RuntimeError):
         with Messages().stream(model="claude-x", messages=[]):
-            raise RuntimeError("api down")
+            raise RuntimeError("user code failed with a secret")
+    (event,) = _usage_events(path)
+    assert event["data"]["llm"]["usage"] == USAGE
+    assert [e["event_type"] for e in _events(path)] == ["llm.request"]
+
+
+def test_an_exception_with_no_usage_records_only_its_type_not_the_message(events_path):
+    path, (Messages, _) = events_path
+    with pytest.raises(RuntimeError):
+        with Messages().stream(model="claude-x", messages=[], no_snapshot=True):
+            raise RuntimeError("user code failed with a secret")
+    (event,) = _events(path)
+    assert event["event_type"] == "llm.error"
+    assert event["error"] == {"type": "RuntimeError", "message": ""}
+
+
+def test_a_failed_request_on_enter_is_an_error_event_with_its_message(events_path):
+    path, (Messages, _) = events_path
+    with pytest.raises(ConnectionError):
+        with Messages().stream(model="claude-x", messages=[], fail_enter=True):
+            pass
+    (event,) = _events(path)
+    assert event["event_type"] == "llm.error" and event["error"]["message"] == "request failed"
+
+
+def test_the_stream_true_record_uses_the_model_the_response_reports(events_path):
+    path, (Messages, _) = events_path
+    list(Messages().create(model="claude-alias", messages=[], stream=True))
+    (event,) = _usage_events(path)
+    assert event["data"]["llm"]["response_model"] == "claude-resolved-1"
+    assert event["data"]["llm"]["model"] == "claude-alias"
+
+
+def test_the_wrapped_stream_supports_next_and_records_once_at_the_end(events_path):
+    path, (Messages, _) = events_path
+    stream = Messages().create(model="claude-x", messages=[], stream=True)
+    assert next(stream).type == "message_start"
     assert _usage_events(path) == []
-    assert [e["event_type"] for e in _events(path)] == ["llm.error"]
+    next(stream)
+    next(stream)
+    with pytest.raises(StopIteration):
+        next(stream)
+    assert len(_usage_events(path)) == 1
+    with pytest.raises(StopIteration):
+        next(stream)
+    assert len(_usage_events(path)) == 1
+
+
+def test_a_stream_closed_early_records_the_partial_usage_once(events_path):
+    path, (Messages, _) = events_path
+    stream = Messages().create(model="claude-x", messages=[], stream=True)
+    next(stream)
+    stream.close()
+    stream.close()
+    (event,) = _usage_events(path)
+    assert event["data"]["llm"]["usage"]["input_tokens"] == 100
+
+
+def test_the_async_stream_supports_anext(events_path):
+    path, (_, AsyncMessages) = events_path
+
+    async def run():
+        stream = await AsyncMessages().create(model="claude-x", messages=[], stream=True)
+        first = await stream.__anext__()
+        rest = [e async for e in stream]
+        return first, rest
+
+    first, rest = asyncio.run(run())
+    assert first.type == "message_start" and len(rest) == 2
+    assert len(_usage_events(path)) == 1
+
+
+def test_a_call_through_a_bedrock_or_vertex_client_is_marked_so_it_can_be_left_out(events_path):
+    path, (Messages, _) = events_path
+
+    class AnthropicBedrock:
+        pass
+
+    resource = Messages()
+    resource._client = AnthropicBedrock()
+    resource.create(model="claude-x", messages=[])
+    Messages().create(model="claude-x", messages=[])
+    direct, via = sorted(_usage_events(path), key=lambda e: "via" in e["data"]["llm"])
+    assert "via" not in direct["data"]["llm"] and via["data"]["llm"]["via"] == "bedrock"
 
 
 def test_unpatching_restores_every_patched_method(tmp_path, monkeypatch):
@@ -242,3 +321,57 @@ def test_unpatching_restores_every_patched_method(tmp_path, monkeypatch):
         AsyncMessages.create,
         AsyncMessages.stream,
     ) == originals
+
+
+def test_a_snapshot_that_asserts_before_any_event_is_read_means_no_usage(events_path):
+    path, (Messages, _) = events_path
+
+    class _AssertingStream:
+        @property
+        def current_message_snapshot(self):
+            raise AssertionError
+
+    class _Mgr(_Manager):
+        def __init__(self):
+            self.stream = _AssertingStream()
+            self.fail_enter = False
+
+    Messages.stream = lambda self, *a, **k: _Mgr()
+    with Messages().stream(model="claude-x", messages=[]):
+        pass
+    assert _events(path) == []
+
+
+def test_the_safe_snapshot_accessor_is_preferred_when_the_sdk_has_it(events_path):
+    path, (Messages, _) = events_path
+
+    class _Stream:
+        @property
+        def current_message_snapshot(self):
+            raise AssertionError("must not be read")
+
+        def _current_snapshot_or_none(self):
+            return _Response({"model": "claude-x", "usage": USAGE})
+
+    class _Mgr(_Manager):
+        def __init__(self):
+            self.stream = _Stream()
+            self.fail_enter = False
+
+    Messages.stream = lambda self, *a, **k: _Mgr()
+    with Messages().stream(model="claude-x", messages=[]):
+        pass
+    assert len(_usage_events(path)) == 1
+
+
+def test_every_non_direct_client_class_of_the_sdk_is_marked(events_path):
+    path, (Messages, _) = events_path
+    for name in ("AnthropicBedrock", "AsyncAnthropicVertex", "AnthropicFoundry", "AnthropicAWS", "AnthropicGoogleCloud", "AnthropicBedrockMantle"):
+        resource = Messages()
+        resource._client = type(name, (), {})()
+        resource.create(model="claude-x", messages=[])
+    resource = Messages()
+    resource._client = type("Anthropic", (), {})()
+    resource.create(model="claude-x", messages=[])
+    marked = [e for e in _usage_events(path) if "via" in e["data"]["llm"]]
+    assert len(marked) == 6 and len(_usage_events(path)) == 7
