@@ -18,7 +18,8 @@ import json
 import os
 import threading
 import uuid
-from typing import Any, Optional
+import weakref
+from typing import Any, Callable, Optional
 
 CHAIN_FIELD = "hook_chain"
 SESSION_END_EVENT = "hook_session_end"
@@ -31,10 +32,24 @@ def digest_of(event: dict[str, Any]) -> str:
 
 
 class RecordChain:
-    __slots__ = ("_lock", "_pid", "_session", "_seq", "_prev", "_ended")
+    """1 つの送り先ごとの連鎖。送り先ごとに別の数え手を持つ。
+
+    同じ記録が複数の送り先へ出ても、送り先ごとに連続した番号になる。1 つの数え手を共有すると、各送り先が、自分が
+    受けていない記録の番号の飛びを見る。
+    """
+
+    __slots__ = ("_lock", "_pid", "_session", "_seq", "_prev", "_ended", "__weakref__")
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        self._pid = os.getpid()
+        self._session = uuid.uuid4().hex
+        self._seq = 0
+        self._prev = ""
+        self._ended = False
+        _instances.add(self)
+
+    def _new_session(self) -> None:
         self._pid = os.getpid()
         self._session = uuid.uuid4().hex
         self._seq = 0
@@ -44,27 +59,32 @@ class RecordChain:
     def _renew_if_forked(self) -> None:
         # fork した子は親の続きを書かない。別のプロセスは別のセッションにする。
         if os.getpid() != self._pid:
-            self._pid = os.getpid()
-            self._session = uuid.uuid4().hex
-            self._seq = 0
-            self._prev = ""
-            self._ended = False
+            self._new_session()
+
+    def _reset_after_fork(self) -> None:
+        # 別のスレッドが錠を持ったまま fork すると、子は錠を持つ者がいないまま錠を受け継ぎ、永久に待つ。
+        # 錠を作り直し、新しいセッションにする。
+        self._lock = threading.Lock()
+        self._new_session()
+
+    def _stamp_locked(self, event: dict[str, Any]) -> dict[str, Any]:
+        canon = json.loads(json.dumps(event, ensure_ascii=False, default=str))
+        self._seq += 1
+        canon[CHAIN_FIELD] = {"session": self._session, "seq": self._seq, "prev": self._prev}
+        self._prev = digest_of(canon)
+        return canon
 
     def stamp(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """記録に通し番号と前の要約を付けた写しを返す。順序は渡された順。
 
         直列化して読み直した写しに付ける。送る本文を受け取り側が読み直した値と同じにし、要約を一致させる。
+        終了を通知したセッションへは、続きを書かない。収集が同じプロセスで再び始まったときは、新しいセッションにする。
         """
-        out: list[dict[str, Any]] = []
         with self._lock:
             self._renew_if_forked()
-            for event in events:
-                canon = json.loads(json.dumps(event, ensure_ascii=False, default=str))
-                self._seq += 1
-                canon[CHAIN_FIELD] = {"session": self._session, "seq": self._seq, "prev": self._prev}
-                self._prev = digest_of(canon)
-                out.append(canon)
-        return out
+            if self._ended:
+                self._new_session()
+            return [self._stamp_locked(event) for event in events]
 
     def position(self) -> tuple[str, int]:
         """(セッション, 直近に番号を付けた記録の番号)。生存の通知に載せる。"""
@@ -72,26 +92,32 @@ class RecordChain:
             self._renew_if_forked()
             return self._session, self._seq
 
-    def take_end(self) -> Optional[tuple[str, int]]:
-        """セッションの終了を 1 回だけ知らせるための (セッション, 最後の番号)。2 回目は None。"""
+    def stamp_end(self, build: Callable[[str, int], dict[str, Any]]) -> Optional[dict[str, Any]]:
+        """セッションの終了の通知を、このセッションの最後の記録として番号を付けて返す。1 回だけ。
+
+        番号を付けた後に、セッションを終了済みにする。記録を 1 件も付けていないセッションと、終了済みのセッションでは
+        None を返す。build は (セッション, 最後の番号) から記録を作る。
+        """
         with self._lock:
             self._renew_if_forked()
-            if self._ended:
+            if self._ended or self._seq == 0:
                 return None
+            event = build(self._session, self._seq)
+            stamped = self._stamp_locked(event)
             self._ended = True
-            return self._session, self._seq
+            return stamped
 
 
-_chain = RecordChain()
+_instances: "weakref.WeakSet[RecordChain]" = weakref.WeakSet()
 
 
-def chain() -> RecordChain:
-    return _chain
+def _after_fork_in_child() -> None:
+    for instance in list(_instances):
+        instance._reset_after_fork()
 
 
-def reset_for_tests() -> None:
-    global _chain
-    _chain = RecordChain()
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_after_fork_in_child)
 
 
 def seq_range(events: Any) -> list[tuple[str, int, int]]:

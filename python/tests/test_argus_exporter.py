@@ -19,12 +19,8 @@ def _chain_state(monkeypatch):
 
     終了の通知そのものは test_record_chain.py が、止めずに確認する。
     """
-    from senda_argus_hooks.core import record_chain
-
-    record_chain.reset_for_tests()
     monkeypatch.setattr(ArgusExporter, "_enqueue_session_end", lambda self, worker: None)
     yield
-    record_chain.reset_for_tests()
 
 
 def _wait_until(predicate, timeout: float = 2.0) -> None:

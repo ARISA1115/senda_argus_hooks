@@ -35,7 +35,6 @@ from pathlib import Path
 from typing import Any
 
 from senda_argus_hooks.core.device_identity import sign_headers
-from senda_argus_hooks.core.record_chain import chain
 from senda_argus_hooks.core.event import new_event
 from senda_argus_hooks.core.runtime import effective_agent_id, get_bus, get_config
 
@@ -57,7 +56,15 @@ def _mac(key: bytes, *parts: str) -> str:
 
 
 def canary_mac(
-    secret: str, *, agent_id: str, boot_id: str, seq: int, interval_sec: int, generation: int
+    secret: str,
+    *,
+    agent_id: str,
+    boot_id: str,
+    seq: int,
+    interval_sec: int,
+    generation: int,
+    chain_session: str | None = None,
+    chain_last_seq: int | None = None,
 ) -> str:
     """The value the server recomputes for one canary.
 
@@ -65,10 +72,11 @@ def canary_mac(
     same expected value, so a change on one side alone fails a test instead of silently
     rejecting every canary.
     """
-    return _mac(
-        secret.encode("utf-8"),
-        "canary-beat", agent_id, boot_id, str(seq), str(interval_sec), str(generation),
-    )
+    parts = ["canary-beat", agent_id, boot_id, str(seq), str(interval_sec), str(generation)]
+    if chain_session is not None and chain_last_seq is not None:
+        # 連鎖の位置も署名の対象にする。覆わないと、last_seq の改ざんが、canary 自身の連鎖でしか見えない。
+        parts += [chain_session, str(chain_last_seq)]
+    return _mac(secret.encode("utf-8"), *parts)
 
 
 def secret_generation(secret: str) -> int | None:
@@ -208,7 +216,7 @@ class _Canary:
         agent = effective_agent_id() if self._derived else self._agent
         if agent != self._agent:
             return False
-        session, last_seq = chain().position()
+        session, last_seq = exporter.chain_position()
         data = {
             "chain": {"session": session, "last_seq": last_seq},
             "boot_id": self._boot,
@@ -222,6 +230,8 @@ class _Canary:
                 seq=seq,
                 interval_sec=self._interval,
                 generation=self._generation,
+                chain_session=session,
+                chain_last_seq=last_seq,
             ),
         }
         try:

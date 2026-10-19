@@ -16,7 +16,7 @@ import urllib.request
 from typing import Any
 
 from senda_argus_hooks.core.device_identity import reserve_seq, sign_headers
-from senda_argus_hooks.core.record_chain import SESSION_END_EVENT, chain, seq_range
+from senda_argus_hooks.core.record_chain import SESSION_END_EVENT, RecordChain, seq_range
 
 from .base import BaseExporter
 
@@ -201,6 +201,8 @@ class ArgusExporter(BaseExporter):
         self._discard_url = endpoint + _DISCARD_PATH
         self._discards: list[list[float]] = []
         self._seq_discards: list[list[Any]] = []
+        # この送り先の記録の連鎖。送り先ごとに別の数え手を持つ。
+        self._chain = RecordChain()
         # 直近の _send_once が 2xx で受けられたか。再送しない拒否も (None, None) で返るので別に持つ。
         self._last_ingest_ok = False
 
@@ -545,7 +547,7 @@ class ArgusExporter(BaseExporter):
             events = [dict(ev, run_id=ev.get("run_id") or self._run_id) for ev in events]
         if chained:
             # 通し番号は、記録を捉えた時点で付ける。送信の待ち行列へ積む前に付けるため、溢れて捨てた記録も番号を持つ。
-            events = chain().stamp(events)
+            events = self._chain.stamp(events)
         payload = json.dumps({"events": events}, ensure_ascii=False, default=str).encode("utf-8")
         headers = {"Content-Type": "application/json"}
         if self._api_key:
@@ -610,37 +612,49 @@ class ArgusExporter(BaseExporter):
             self._note_discard(self._event_times(events), len(events))
             self._note_seq_ranges(self._payload_seq_ranges(payload))
 
+    def chain_position(self) -> tuple[str, int]:
+        """(セッション, 直近の番号)。生存の通知に載せる。"""
+        return self._chain.position()
+
     def _enqueue_session_end(self, worker: threading.Thread | None) -> None:
         """セッションの終了を、署名つきの通知として 1 回だけ送る。
 
         終了の通知が無く途切れたセッションを、受け取り側は未終了として数える。末尾の記録を消して新しいセッションを
         始める手口を、その数で見つける。送出のワーカーが動いていない (記録を 1 件も送っていない) ときは、送るものが無い。
+        キューが満杯で積めなかった通知は、番号の範囲を、捨てた記録として宣言する。
         """
         if worker is None or not worker.is_alive():
             return
-        taken = chain().take_end()
-        if taken is None:
-            return
-        _session, last_seq = taken
         try:
             from senda_argus_hooks.core.event import new_event
             from senda_argus_hooks.core.runtime import effective_agent_id, get_config
 
             cfg = get_config()
-            event = new_event(
-                project=cfg.project,
-                environment=cfg.environment,
-                event_type=SESSION_END_EVENT,
-                source={"component": "exporter", "sdk": "senda_argus_hooks"},
-                data={"last_seq": last_seq},
-                status="success",
-                run_id=cfg.run_id or f"run_session_end_{_session}",
-                agent_id=effective_agent_id(),
-            ).to_dict()
-            payload, headers = self._request([event], chained=True)
-            self._queue.put_nowait((payload, headers))
+            agent = effective_agent_id()
+
+            def build(session: str, last_seq: int) -> dict[str, Any]:
+                return new_event(
+                    project=cfg.project,
+                    environment=cfg.environment,
+                    event_type=SESSION_END_EVENT,
+                    source={"component": "exporter", "sdk": "senda_argus_hooks"},
+                    data={"last_seq": last_seq},
+                    status="success",
+                    run_id=cfg.run_id or f"run_session_end_{session}",
+                    agent_id=agent,
+                ).to_dict()
+
+            stamped = self._chain.stamp_end(build)
+            if stamped is None:
+                return
+            payload, headers = self._request([stamped], chained=False)
         except Exception:  # noqa: BLE001 - 終了の通知で、終了の処理を止めない
-            _logger.debug("セッションの終了の通知を送れませんでした", exc_info=True)
+            _logger.debug("セッションの終了の通知を作れませんでした", exc_info=True)
+            return
+        try:
+            self._queue.put_nowait((payload, headers))
+        except queue.Full:
+            self._note_seq_ranges(self._payload_seq_ranges(payload))
 
     def shutdown(self) -> None:
         # 終了時に積み残したバッチを送り切る。daemon ワーカーは通常終了で待たれないため、
