@@ -467,6 +467,13 @@ def cmd_scan_mcp(args) -> int:
     return run(args)
 
 
+def cmd_scan_endpoint(args) -> int:
+    """端末のエージェントと MCP の設定を走査し、結果を表示するか Argus へ送る。"""
+    from senda_argus_hooks.cli.scan_endpoint import run
+
+    return run(args)
+
+
 def build_parser() -> argparse.ArgumentParser:
     from senda_argus_hooks.integrations.coding_agent_hooks import (
         PRODUCTS as HOOK_PRODUCTS,
@@ -604,6 +611,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--platform", choices=["linux", "darwin"], help=argparse.SUPPRESS
     )
     scan_p.set_defaults(func=cmd_scan_mcp)
+
+    endpoint_p = sub.add_parser(
+        "scan-endpoint",
+        help="Report agents and MCP configs on this device to Argus without reading secrets",
+    )
+    endpoint_p.add_argument("--send", action="store_true", help="Send the report to Argus")
+    endpoint_p.add_argument(
+        "--dry-run", action="store_true", help="Print the report and send nothing"
+    )
+    endpoint_p.add_argument("--home", help=argparse.SUPPRESS)
+    endpoint_p.add_argument("--system-root", help=argparse.SUPPRESS)
+    endpoint_p.add_argument(
+        "--platform", choices=["linux", "darwin"], help=argparse.SUPPRESS
+    )
+    endpoint_p.set_defaults(func=cmd_scan_endpoint)
 
     from senda_argus_hooks.cli.device import add_parser as add_device_parser
 
