@@ -240,3 +240,62 @@ def test_the_signed_headers_are_kept_as_they_are(monkeypatch) -> None:
     monkeypatch.setattr(scan_endpoint, "sign_headers", lambda _data: dict(signed))
     monkeypatch.setattr(scan_endpoint, "hostname", lambda: "other")
     assert scan_endpoint.identity_headers(b"{}") == signed
+
+
+def test_a_claude_code_project_config_sends_the_location_kind_without_the_path(
+    tmp_path,
+) -> None:
+    secret_project = str(tmp_path / "alice" / "secret-merger-project")
+    _write(
+        tmp_path / ".claude.json",
+        {"projects": {secret_project: {"mcpServers": {"p": {"command": "npx"}}}}},
+    )
+    body = _report(tmp_path)
+    text = json.dumps(body)
+    assert "secret-merger-project" not in text and "alice" not in text
+    cfg = next(c for c in body["mcp_configs"] if c["client"] == "claude_code")
+    assert cfg["location"] == "project"
+
+
+@pytest.mark.parametrize(
+    ("scope", "kind"),
+    [
+        ("user", "user"),
+        ("cwd", "cwd"),
+        ("project:/home/a/x", "project"),
+        ("x:y", "other"),
+    ],
+)
+def test_location_kind_drops_the_path(scope, kind) -> None:
+    assert scan_endpoint.location_kind(scope) == kind
+
+
+def test_a_marker_in_an_mcp_argument_does_not_count_as_an_installed_hook(
+    tmp_path,
+) -> None:
+    # Gemini の MCP の引数に hook のコマンドの文字列があっても、hook の配置の項目ではない。
+    _gemini(
+        tmp_path,
+        {
+            "x": {
+                "command": "python",
+                "args": ["-m", "senda_argus_hooks.cli.main hook gemini_cli pre"],
+            }
+        },
+    )
+    agents = {a["name"]: a for a in _report(tmp_path)["agents"]}
+    assert agents["gemini_cli"]["hook_installed"] is False
+
+
+def test_a_cline_hook_script_counts_as_installed(tmp_path) -> None:
+    from senda_argus_hooks.cli.agent_hooks_install import hook_command, settings_path
+
+    script = settings_path(
+        "cline", "user", "linux", home=tmp_path, system_root=tmp_path / "sysroot"
+    )
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text(
+        "#!/bin/sh\n" + hook_command("cline", "pre", "user") + "\n", encoding="utf-8"
+    )
+    agents = {a["name"]: a for a in _report(tmp_path)["agents"]}
+    assert agents["cline"]["hook_installed"] is True

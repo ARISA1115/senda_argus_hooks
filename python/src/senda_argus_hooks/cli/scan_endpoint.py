@@ -27,9 +27,13 @@ from typing import Any, Callable
 from urllib.parse import urlsplit
 
 from senda_argus_hooks.cli.agent_hooks_install import (
+    _NAMED_KEY,
+    HOOK_MARKER,
     INSTALLS,
+    WRAPPER_PREFIX,
     InstallError,
     _contains_ours,
+    _is_ours,
     settings_path,
 )
 from senda_argus_hooks.cli.mcp_configs import ConfigRead, read_configured_servers
@@ -108,16 +112,76 @@ def _settings_paths(
     return out
 
 
-def _hook_installed(paths: list[Path]) -> bool:
-    """設定のどれかに、Argus の hook の項目があるか。読めない設定は無いとする。"""
+# 設定の場所の種類。設定のファイルのパスやプロジェクトのパスは送らない。
+LOCATION_KINDS: frozenset[str] = frozenset({"user", "cwd", "managed", "project"})
+
+
+def location_kind(scope: str) -> str:
+    """設定の場所の種類だけを返す。project:<パス> の形はパスを落として project にする。
+
+    パスには利用者名とプロジェクトの名前が入り、送ると端末の外へ漏れる。表に無い種類は other にする。
+    """
+    kind = scope.split(":", 1)[0]
+    return kind if kind in LOCATION_KINDS else "other"
+
+
+def _ours_in_list(items: Any) -> bool:
+    """イベントの配列の中に Argus の hook の項目があるか。入れ子の hooks の群も 1 段だけ見る。"""
+    if not isinstance(items, list):
+        return False
+    for item in items:
+        if _is_ours(item):
+            return True
+        inner = item.get("hooks") if isinstance(item, dict) else None
+        if isinstance(inner, list) and any(_is_ours(h) for h in inner):
+            return True
+    return False
+
+
+def _events(product: str) -> tuple[str, ...]:
+    spec = INSTALLS[product]
+    return tuple(spec.entries("pre", "post", 1))
+
+
+def _hook_in_settings(product: str, data: Any) -> bool:
+    """導入のコマンドが hook を書く配置の項目だけを見る。MCP の引数など別の項目の文字列は見ない。"""
+    if not isinstance(data, dict):
+        return False
+    layout = INSTALLS[product].layout
+    events = _events(product)
+    if layout == "root":
+        return any(_ours_in_list(data.get(e)) for e in events)
+    if layout == "named":
+        named = data.get(_NAMED_KEY)
+        return isinstance(named, dict) and _contains_ours(named)
+    hooks = data.get("hooks")
+    if layout == "list":
+        return _ours_in_list(hooks)
+    return isinstance(hooks, dict) and any(_ours_in_list(hooks.get(e)) for e in events)
+
+
+def _hook_installed(product: str, paths: list[Path]) -> bool:
+    """製品の設定に、Argus の hook があるか。読めない設定は無いとする。
+
+    スクリプトを置く製品は、スクリプトの中の Argus の hook の目印で判定する。JSON として読まない。
+    """
+    layout = INSTALLS[product].layout
     for path in paths:
         try:
             if not path.is_file() or path.stat().st_size > MAX_SETTINGS_BYTES:
                 continue
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+            raw = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
             continue
-        if _contains_ours(data):
+        if layout == "script":
+            if HOOK_MARKER in raw or WRAPPER_PREFIX in raw:
+                return True
+            continue
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            continue
+        if _hook_in_settings(product, data):
             return True
     return False
 
@@ -150,7 +214,7 @@ def build_report(
             {
                 "name": product,
                 "form": "cli" if on_path else "app",
-                "hook_installed": _hook_installed(paths),
+                "hook_installed": _hook_installed(product, paths),
             }
         )
     if len(agents) > MAX_AGENTS:
@@ -162,7 +226,8 @@ def build_report(
         if len(server.name) > MAX_NAME_LEN or _CONTROL.search(server.name):
             truncated = True
             continue
-        key = (server.product, server.scope)
+        # 設定の場所はパスを落とした種類で束ねる。プロジェクトのパスごとに分けて送らない。
+        key = (server.product, location_kind(server.scope))
         cfg = configs.get(key)
         if cfg is None:
             if len(configs) >= MAX_CONFIGS:
@@ -170,7 +235,7 @@ def build_report(
                 continue
             cfg = configs[key] = {
                 "client": server.product,
-                "location": server.scope,
+                "location": location_kind(server.scope),
                 "servers": [],
             }
         if len(cfg["servers"]) >= MAX_SERVERS_PER_CONFIG:
