@@ -25,7 +25,13 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from senda_argus_hooks.core.device_keys import (
+    KeyProvider,
+    challenge_for,
+    select_provider,
+)
 from senda_argus_hooks.core.device_identity import (
+    MAX_KEY_REF_LEN,
     DeviceCredential,
     hostname,
     load_credential,
@@ -102,20 +108,38 @@ def _endpoint(args: argparse.Namespace, credential: Optional[DeviceCredential]) 
     return value
 
 
-def _store(base: str, token: dict[str, Any]) -> str:
+def _store(
+    base: str,
+    token: dict[str, Any],
+    *,
+    key_kind: str = "hmac",
+    key_ref: str = "",
+) -> str:
+    """鍵を保存する。非対称の鍵の端末は秘密を受け取らず、鍵の種類と在りかだけを保存する。"""
     device_id = str(token.get("device_id") or "")
     secret = str(token.get("device_secret") or "")
-    if not device_id or not secret:
+    if not device_id or (key_kind == "hmac" and not secret):
         raise ValueError("応答に device_id か device_secret がありません")
     path = save_credential(
         device_id=device_id,
-        secret=secret,
+        secret=secret if key_kind == "hmac" else "",
         endpoint=base,
         tenant_id=str(token.get("tenant_id") or ""),
         expires_at=_epoch(token.get("expires_at")),
         rotate_by=_epoch(token.get("rotate_by")),
+        key_kind=key_kind,
+        key_ref=key_ref,
     )
     return str(path)
+
+
+def _provider() -> Optional[KeyProvider]:
+    """登録に使う非対称の鍵。使えなければ None を返し、共有の秘密の鍵で登録する。"""
+    try:
+        return select_provider(default_path().with_name("device-key.pem"))
+    except (OSError, ValueError) as exc:
+        print(f"端末の鍵を用意できませんでした: {exc.__class__.__name__}", file=sys.stderr)
+        return None
 
 
 def _check_storage_writable() -> None:
@@ -150,14 +174,32 @@ def cmd_register(args: argparse.Namespace) -> int:
     if not code:
         raise ValueError(f"--code か環境変数 {ENV_CODE} に登録コードを指定してください")
     timeout = float(args.timeout)
+    provider = _provider()
+    if provider is not None and (
+        len(provider.ref) > MAX_KEY_REF_LEN or provider.ref != provider.ref.strip()
+    ):
+        # 保存できない在りかの鍵で登録すると、登録コードを使った後に鍵を開けなくなる。使う前に止める。
+        print(
+            f"端末の鍵の在りかが {MAX_KEY_REF_LEN} 文字を超えるか前後に空白があります。"
+            "鍵の置き場を短いパスにしてください。",
+            file=sys.stderr,
+        )
+        return 1
+    request: dict[str, Any] = {
+        "registration_code": code,
+        "hostname": hostname(),
+        "os_user": os_user(),
+        "os": platform.system().lower(),
+    }
+    if provider is not None:
+        try:
+            request["public_key"] = provider.public_key_b64()
+        except Exception as exc:  # noqa: BLE001 - 鍵を読めないときは共有の秘密の鍵で登録する
+            print(f"公開鍵を読めませんでした: {exc.__class__.__name__}", file=sys.stderr)
+            provider = None
     status, grant = _post(
         base + "/v1/devices/authorize",
-        {
-            "registration_code": code,
-            "hostname": hostname(),
-            "os_user": os_user(),
-            "os": platform.system().lower(),
-        },
+        request,
         timeout=timeout,
     )
     if status != 200 or not grant.get("device_code"):
@@ -171,6 +213,16 @@ def cmd_register(args: argparse.Namespace) -> int:
         f"次の URL を開き、SSO でサインインして、コード {grant.get('user_code')} を承認してください。"
     )
     print(uri)
+    poll: dict[str, Any] = {"device_code": grant["device_code"]}
+    if provider is not None:
+        # 証明は登録ごとの challenge を含める。サーバーが検証できたときだけ保護領域の鍵になる。
+        try:
+            attestation = provider.attest(challenge_for(str(grant["device_code"])))
+        except Exception as exc:  # noqa: BLE001 - 証明が無くてもソフトウェアの鍵として登録する
+            print(f"端末の証明を作れませんでした: {exc.__class__.__name__}", file=sys.stderr)
+            attestation = None
+        if attestation is not None:
+            poll["attestation"] = attestation
     interval = min(max(float(grant.get("interval") or 5), _MIN_INTERVAL), _MAX_INTERVAL)
     deadline = time.monotonic() + min(float(grant.get("expires_in") or 600), 1800.0)
     network_failed = False
@@ -179,7 +231,7 @@ def cmd_register(args: argparse.Namespace) -> int:
         try:
             status, token = _post(
                 base + "/v1/devices/token",
-                {"device_code": grant["device_code"]},
+                poll,
                 timeout=timeout,
             )
         except _NETWORK_ERRORS:
@@ -191,7 +243,12 @@ def cmd_register(args: argparse.Namespace) -> int:
             continue
         if status == 200:
             try:
-                where = _store(base, token)
+                # 秘密が返ったときは、サーバーが公開鍵を受けていない。共有の秘密の鍵として保存する。
+                where = (
+                    _store(base, token, key_kind=provider.kind, key_ref=provider.ref)
+                    if provider is not None and not token.get("device_secret")
+                    else _store(base, token)
+                )
             except (ValueError, OSError) as exc:
                 print(
                     f"承認は完了しましたが、鍵を保存できませんでした: {exc.__class__.__name__}。"
@@ -200,6 +257,8 @@ def cmd_register(args: argparse.Namespace) -> int:
                 )
                 return 3
             print(f"登録しました。鍵を保存しました: {where}")
+            if provider is not None and not token.get("device_secret"):
+                print(f"鍵の保護: {token.get('key_protection') or 'unknown'}")
             if os.environ.get("SENDA_ARGUS_DEVICE_ID") and os.environ.get(
                 "SENDA_ARGUS_DEVICE_SECRET"
             ):
@@ -282,7 +341,10 @@ def cmd_renew(args: argparse.Namespace) -> int:
     token.setdefault("device_id", credential.device_id)
     token.setdefault("tenant_id", credential.tenant_id)
     try:
-        where = _store(base, token)
+        # 非対称の鍵は替えず、期限だけが延びる。鍵の種類と在りかを保つ。
+        where = _store(
+            base, token, key_kind=credential.key_kind, key_ref=credential.key_ref
+        )
     except (ValueError, OSError) as exc:
         print(
             f"鍵は更新されましたが保存できませんでした: {exc.__class__.__name__}。"

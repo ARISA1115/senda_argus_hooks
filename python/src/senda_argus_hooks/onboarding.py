@@ -217,6 +217,8 @@ class _Canary:
         if agent != self._agent:
             return False
         session, last_seq = exporter.chain_position()
+        from senda_argus_hooks.core import hook_config_digest
+
         data = {
             "chain": {"session": session, "last_seq": last_seq},
             "boot_id": self._boot,
@@ -233,6 +235,8 @@ class _Canary:
                 chain_session=session,
                 chain_last_seq=last_seq,
             ),
+            # hook の設定と実行ファイルの要約。端末の鍵の署名が本文を覆い、サーバーは承認した要約と比べる。
+            "hook_config_digest": _config_digest(hook_config_digest),
         }
         try:
             exporter.export([_build_event(CANARY_EVENT, data, agent)])
@@ -242,9 +246,22 @@ class _Canary:
 
     def _loop(self) -> None:
         while not self._stop.is_set():
-            self.beat()
+            try:
+                self.beat()
+            except Exception:  # noqa: BLE001 - 1 回の失敗で見張りのスレッドを終わらせない
+                pass
             if self._stop.wait(self._interval):
                 return
+
+
+def _config_digest(module) -> str:
+    """要約を作れないときも canary を送る。要約の代わりに、承認と一致しない固定の値を載せる。"""
+    try:
+        return module.compute()
+    except Exception:  # noqa: BLE001
+        import hashlib
+
+        return hashlib.sha256(module.UNREADABLE_MARK.encode("utf-8")).hexdigest()
 
 
 _canary_lock = threading.Lock()

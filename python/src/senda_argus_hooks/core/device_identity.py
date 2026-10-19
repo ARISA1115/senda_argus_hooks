@@ -10,7 +10,9 @@
   署名の検証の結果だけが決める。OS の利用者名と hostname は自己申告として送る
 - 署名が無い送信は、受け取り側が移行中の組織では受理され、未検証として記録される。鍵が無い、読めない、
   壊れている場合も、送信は止めず、署名を付けない
-- 標準ライブラリだけで動く。非対称鍵は使えないため、端末ごとの共有秘密で HMAC-SHA256 を付ける
+- 共有の秘密の鍵は標準ライブラリだけで動き、HMAC-SHA256 を付ける
+- 非対称の鍵の端末は、core/device_keys.py の鍵で同じ文字列に ECDSA の署名を付ける。秘密をサーバーと
+  共有しないため、鍵を取り出せない保護領域に置ける。鍵の種類は登録の時に決まり、鍵のファイルに残す
 """
 
 from __future__ import annotations
@@ -54,6 +56,9 @@ ENV_DEVICE_EXPIRES_AT: Final[str] = "SENDA_ARGUS_DEVICE_EXPIRES_AT"
 
 _MAX_FILE_BYTES: Final[int] = 16_384
 _MAX_FIELD_LEN: Final[int] = 512
+# 鍵の在りかの長さの上限。保存と読み込みで同じ値を使い、超える値は切り詰めずに使えないものとして扱う。
+# 切り詰めると、以後の要求が別の場所を開き、未登録の新しい鍵を作りうる。
+MAX_KEY_REF_LEN: Final[int] = 4096
 _HEADER_LIMIT = 256
 _LOCK_TRIES = 20
 _LOCK_WAIT_SEC = 0.01
@@ -70,6 +75,9 @@ class DeviceCredential:
     endpoint: str = ""
     tenant_id: str = ""
     path: Optional[Path] = None
+    # hmac は共有の秘密。helper と software は core/device_keys.py の非対称の鍵で、key_ref が鍵の在りか。
+    key_kind: str = "hmac"
+    key_ref: str = ""
 
     def expired(self, now: Optional[float] = None) -> bool:
         return self.expires_at is not None and (now or time.time()) >= self.expires_at
@@ -101,8 +109,24 @@ _DEVICE_ID_PATTERN = re.compile(r"^[\x21-\x7e]{1,256}$")
 _SECRET_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
-def _usable(device_id: str, secret: str) -> bool:
-    return bool(_DEVICE_ID_PATTERN.match(device_id) and _SECRET_PATTERN.match(secret))
+KEY_KIND_HMAC: Final[str] = "hmac"
+_ASYMMETRIC_KINDS: Final[frozenset[str]] = frozenset({"helper", "software"})
+
+
+def _key_ref(value: Any) -> str:
+    """鍵の在りかを読む。上限を超える値と文字列でない値は空を返す。切り詰めない。"""
+    if not isinstance(value, str):
+        return ""
+    value = value.strip()
+    return value if len(value) <= MAX_KEY_REF_LEN else ""
+
+
+def _usable(device_id: str, secret: str, key_kind: str = KEY_KIND_HMAC, key_ref: str = "") -> bool:
+    if not _DEVICE_ID_PATTERN.match(device_id):
+        return False
+    if key_kind in _ASYMMETRIC_KINDS:
+        return bool(key_ref)
+    return key_kind == KEY_KIND_HMAC and bool(_SECRET_PATTERN.match(secret))
 
 
 def _from_env() -> Optional[DeviceCredential]:
@@ -147,7 +171,9 @@ def load_credential() -> Optional[DeviceCredential]:
         return None
     device_id = _text(data.get("device_id"))
     secret = _text(data.get("device_secret"))
-    if not _usable(device_id, secret):
+    key_kind = _text(data.get("key_kind")) or KEY_KIND_HMAC
+    key_ref = _key_ref(data.get("key_ref"))
+    if not _usable(device_id, secret, key_kind, key_ref):
         return None
     return DeviceCredential(
         device_id=device_id,
@@ -157,6 +183,8 @@ def load_credential() -> Optional[DeviceCredential]:
         endpoint=_text(data.get("endpoint")),
         tenant_id=_text(data.get("tenant_id")),
         path=path,
+        key_kind=key_kind,
+        key_ref=key_ref,
     )
 
 
@@ -169,8 +197,12 @@ def save_credential(
     expires_at: Optional[float],
     rotate_by: Optional[float],
     path: Optional[Path] = None,
+    key_kind: str = KEY_KIND_HMAC,
+    key_ref: str = "",
 ) -> Path:
     """鍵を保存する。作成の時点で利用者だけが読める権限にし、作った後に権限を絞る隙間を作らない。"""
+    if len(key_ref.strip()) > MAX_KEY_REF_LEN or key_ref != key_ref.strip():
+        raise ValueError("key_ref is longer than the stored limit")
     target = path or default_path()
     target.parent.mkdir(parents=True, exist_ok=True)
     body = json.dumps(
@@ -181,6 +213,8 @@ def save_credential(
             "tenant_id": tenant_id,
             "expires_at": expires_at,
             "rotate_by": rotate_by,
+            "key_kind": key_kind,
+            "key_ref": key_ref,
         }
     ).encode("utf-8")
     tmp = target.with_name(target.name + f".{os.getpid()}.tmp")
@@ -281,8 +315,9 @@ def _next_seq(credential: DeviceCredential) -> int:
     return secrets.randbits(63)
 
 
-def signature_of(secret: str, device_id: str, ts: int, seq: int, body: bytes) -> str:
-    material = "\n".join(
+def signing_material(device_id: str, ts: int, seq: int, body: bytes) -> str:
+    """署名の対象。共有の秘密の鍵と非対称の鍵で同じ文字列を使い、受け取り側の式と一致させる。"""
+    return "\n".join(
         (
             SIGNATURE_VERSION,
             device_id,
@@ -291,6 +326,10 @@ def signature_of(secret: str, device_id: str, ts: int, seq: int, body: bytes) ->
             hashlib.sha256(body).hexdigest(),
         )
     )
+
+
+def signature_of(secret: str, device_id: str, ts: int, seq: int, body: bytes) -> str:
+    material = signing_material(device_id, ts, seq, body)
     # 秘密は 32 バイトを hex にした文字列で渡される。鍵は hex を戻したバイト列で、受け取り側と同じにする。
     return hmac.new(
         bytes.fromhex(secret), material.encode("utf-8"), hashlib.sha256
@@ -318,11 +357,24 @@ def sign_headers(
         return {}
     ts = int(time.time())
     seq = seq if seq is not None else _next_seq(cred)
-    try:
-        signature = signature_of(cred.secret, cred.device_id, ts, seq, body)
-    except ValueError:
-        # hex として読めない秘密では署名できない。送信は止めず、署名なしで送る。
-        return {}
+    if cred.key_kind in _ASYMMETRIC_KINDS:
+        from senda_argus_hooks.core.device_keys import provider_for, signature_b64url
+
+        provider = provider_for(cred.key_kind, cred.key_ref)
+        if provider is None:
+            return {}
+        try:
+            signature = signature_b64url(
+                provider, signing_material(cred.device_id, ts, seq, body).encode("utf-8")
+            )
+        except Exception:  # noqa: BLE001 - 鍵を使えない間も送信は止めず、署名なしで送る
+            return {}
+    else:
+        try:
+            signature = signature_of(cred.secret, cred.device_id, ts, seq, body)
+        except ValueError:
+            # hex として読めない秘密では署名できない。送信は止めず、署名なしで送る。
+            return {}
     if cred.expired():
         _warn_expired_once(cred)
     headers = {
