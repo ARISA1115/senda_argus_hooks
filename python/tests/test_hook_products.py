@@ -130,6 +130,7 @@ PRE_CASES = {
             "tool_input": {"file_path": "/repo/a.txt", "content": "x"},
             "tool_use_id": "tu-1",
             "cwd": "/repo",
+            "permission_mode": "default",
         },
     ),
     "kiro": (
@@ -177,6 +178,7 @@ PRE_CASES = {
             "tool_name": "Execute",
             "tool_input": {"command": "git push"},
             "cwd": "/repo",
+            "permission_mode": "default",
         },
     ),
     "crush": (

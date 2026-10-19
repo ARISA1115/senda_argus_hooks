@@ -14,6 +14,7 @@ from .coding_agent_hooks import (
     ToolCall,
     coerce_tool_input,
     optional_str,
+    read_permission_mode,
     required_str,
 )
 
@@ -29,6 +30,7 @@ def parse_claude_style(
         tool_input=coerce_tool_input(data.get("tool_input")),
         tool_use_id=optional_str(data.get("tool_use_id")),
         cwd=optional_str(data.get("cwd")),
+        permission_mode=read_permission_mode(product, data),
     )
     if with_response:
         call.tool_response = data.get("tool_response")

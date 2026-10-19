@@ -26,6 +26,7 @@ from .coding_agent_hooks import (
     ToolCall,
     coerce_tool_input,
     optional_str,
+    read_permission_mode,
     required_str,
 )
 from .copilot_cli_hook import CopilotCliAdapter
@@ -111,6 +112,7 @@ class SpecAdapter(ProductAdapter):
             user_email=optional_str(_dig(data, spec.user_email))
             if spec.user_email
             else None,
+            permission_mode=read_permission_mode(self.product, data),
         )
         if post:
             _attach_response(call, inner, data, spec)

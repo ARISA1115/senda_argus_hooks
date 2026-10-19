@@ -132,6 +132,7 @@ CURSOR_PRE = {
                 "tool_input": {"command": "rm -rf build", "description": "片付け"},
                 "tool_use_id": "toolu_01",
                 "cwd": "/repo",
+                "permission_mode": "default",
             },
         ),
         (
