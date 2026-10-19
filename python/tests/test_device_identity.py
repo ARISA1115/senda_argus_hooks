@@ -17,6 +17,8 @@ from senda_argus_hooks.exporters.argus import ArgusExporter
 
 
 SECRET = bytes(range(32)).hex()
+NEW_SECRET = "ab" * 32
+RENEWED_SECRET = "cd" * 32
 
 
 @pytest.fixture(autouse=True)
@@ -218,7 +220,7 @@ class _Enroll(BaseHTTPRequestHandler):
                 out, code = (
                     {
                         "device_id": "dev-9",
-                        "device_secret": "newsecret",
+                        "device_secret": NEW_SECRET,
                         "tenant_id": "t9",
                         "expires_at": "2099-01-01T00:00:00Z",
                         "rotate_by": 4070908800,
@@ -226,7 +228,7 @@ class _Enroll(BaseHTTPRequestHandler):
                     200,
                 )
         elif self.path == "/v1/devices/renew":
-            out, code = {"device_secret": "renewed", "expires_at": 4070908800}, 200
+            out, code = {"device_secret": RENEWED_SECRET, "expires_at": 4070908800}, 200
         else:
             out, code = {"error": "nope"}, 404
         raw = json.dumps(out).encode()
@@ -263,10 +265,10 @@ def test_register_waits_for_approval_then_saves_the_key_owner_only(
     monkeypatch.setattr(device_cli.time, "sleep", lambda s: None)
     assert device_cli.cmd_register(_args(enroll_server)) == 0
     cred = di.load_credential()
-    assert cred is not None and cred.device_id == "dev-9" and cred.secret == "newsecret"
+    assert cred is not None and cred.device_id == "dev-9" and cred.secret == NEW_SECRET
     assert cred.expires_at is not None and cred.tenant_id == "t9"
     out = capsys.readouterr().out
-    assert "ABCD-1234" in out and "newsecret" not in out
+    assert "ABCD-1234" in out and NEW_SECRET not in out
     first = enroll_server.seen[0]
     assert first[2]["registration_code"] == "reg-code" and "X-API-Key" not in first[1]
     assert enroll_server.polls == 2
@@ -292,7 +294,7 @@ def test_renew_signs_the_request_and_replaces_the_stored_secret(
     path, headers, _ = enroll_server.seen[0]
     low = {k.lower(): v for k, v in headers.items()}
     assert path == "/v1/devices/renew" and low["x-argus-device-id"] == "dev-1"
-    assert di.load_credential().secret == "renewed"
+    assert di.load_credential().secret == RENEWED_SECRET
 
 
 def test_status_reports_an_unregistered_device(isolated, capsys):
@@ -554,3 +556,39 @@ def test_a_lost_renew_response_tells_the_user_to_retry_within_the_grace(
     args = argparse.Namespace(endpoint="http://x", timeout=1.0)
     assert device_cli.cmd_renew(args) == 3
     assert "10 分以内" in capsys.readouterr().err
+
+
+def test_a_device_id_with_a_control_character_is_not_a_usable_credential(
+    isolated, monkeypatch
+):
+    monkeypatch.setenv(di.ENV_DEVICE_ID, "wl-1\r\nX-Evil: 1")
+    monkeypatch.setenv(di.ENV_DEVICE_SECRET, SECRET)
+    assert di.load_credential() is None
+    assert di.sign_headers(b"x") == {}
+    (isolated / "device.json").write_text(
+        '{"device_id": "dev\\n1", "device_secret": "%s"}' % SECRET, encoding="utf-8"
+    )
+    (isolated / "device.json").chmod(0o600)
+    monkeypatch.delenv(di.ENV_DEVICE_ID)
+    monkeypatch.delenv(di.ENV_DEVICE_SECRET)
+    assert di.load_credential() is None
+
+
+def test_a_secret_that_is_not_exactly_32_bytes_of_hex_is_not_loaded(
+    isolated, monkeypatch
+):
+    for bad in ("ab" * 31, "ab" * 33, "zz" * 32, ""):
+        monkeypatch.setenv(di.ENV_DEVICE_ID, "wl-1")
+        monkeypatch.setenv(di.ENV_DEVICE_SECRET, bad)
+        assert di.load_credential() is None, bad
+
+
+def test_status_reports_an_unusable_key_file_instead_of_unregistered(isolated, capsys):
+    import argparse
+
+    (isolated / "device.json").write_text(
+        '{"device_id": "d", "device_secret": "abc"}', encoding="utf-8"
+    )
+    (isolated / "device.json").chmod(0o600)
+    assert device_cli.cmd_status(argparse.Namespace()) == 1
+    assert "使えません" in capsys.readouterr().out

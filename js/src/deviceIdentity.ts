@@ -14,7 +14,12 @@ import { join } from "node:path";
 const VERSION = "argus-device-v1";
 const MAX_FILE_BYTES = 16_384;
 const MAX_FIELD = 512;
-const HEX = /^(?:[0-9a-fA-F]{2})+$/;
+const SECRET_PATTERN = /^[0-9a-fA-F]{64}$/;
+const DEVICE_ID_PATTERN = /^[\x21-\x7e]{1,256}$/;
+
+function usable(deviceId: string, secret: string): boolean {
+  return DEVICE_ID_PATTERN.test(deviceId) && SECRET_PATTERN.test(secret);
+}
 
 export interface DeviceCredential {
   deviceId: string;
@@ -36,7 +41,7 @@ function filePath(): string {
 export function loadCredential(): DeviceCredential | null {
   const id = text(process.env.SENDA_ARGUS_DEVICE_ID);
   const secret = text(process.env.SENDA_ARGUS_DEVICE_SECRET);
-  if (id && secret) {
+  if (usable(id, secret)) {
     const raw = Number(process.env.SENDA_ARGUS_DEVICE_EXPIRES_AT);
     return { deviceId: id, secret, expiresAt: Number.isFinite(raw) && raw > 0 ? raw : undefined };
   }
@@ -49,7 +54,7 @@ export function loadCredential(): DeviceCredential | null {
     const data = JSON.parse(readFileSync(path, "utf8"));
     const deviceId = text(data?.device_id);
     const fileSecret = text(data?.device_secret);
-    if (!deviceId || !fileSecret) return null;
+    if (!usable(deviceId, fileSecret)) return null;
     const expiresAt = typeof data.expires_at === "number" ? data.expires_at : undefined;
     return { deviceId, secret: fileSecret, expiresAt };
   } catch {
@@ -84,7 +89,7 @@ export function signatureOf(secret: string, deviceId: string, ts: number, seq: s
 
 // 本文の文字列に付ける署名のヘッダー。鍵が無いときは空を返す。送信のたびに呼び、再送は署名し直す。
 export function signHeaders(body: string, credential: DeviceCredential | null = loadCredential()): Record<string, string> {
-  if (!credential || !HEX.test(credential.secret)) return {};
+  if (!credential || !usable(credential.deviceId, credential.secret)) return {};
   const ts = Math.floor(Date.now() / 1000);
   if (!warnedExpired && credential.expiresAt !== undefined && credential.expiresAt <= ts) {
     warnedExpired = true;

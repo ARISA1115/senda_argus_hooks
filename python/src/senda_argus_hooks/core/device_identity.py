@@ -20,6 +20,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import socket
 import stat
@@ -94,10 +95,20 @@ def _text(value: Any) -> str:
     return value.strip()[:_MAX_FIELD_LEN] if isinstance(value, str) else ""
 
 
+# 端末の識別子は、ヘッダーへそのまま入れる。改行や制御文字を含むと、送信の部品が例外を上げる。
+_DEVICE_ID_PATTERN = re.compile(r"^[\x21-\x7e]{1,256}$")
+# 秘密は 32 バイトを hex にした 64 文字。短い hex や hex でない値は、受け取り側が検証できない署名になる。
+_SECRET_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
+
+
+def _usable(device_id: str, secret: str) -> bool:
+    return bool(_DEVICE_ID_PATTERN.match(device_id) and _SECRET_PATTERN.match(secret))
+
+
 def _from_env() -> Optional[DeviceCredential]:
     device_id = _text(os.environ.get(ENV_DEVICE_ID))
     secret = _text(os.environ.get(ENV_DEVICE_SECRET))
-    if not device_id or not secret:
+    if not _usable(device_id, secret):
         return None
     raw = os.environ.get(ENV_DEVICE_EXPIRES_AT, "").strip()
     try:
@@ -136,7 +147,7 @@ def load_credential() -> Optional[DeviceCredential]:
         return None
     device_id = _text(data.get("device_id"))
     secret = _text(data.get("device_secret"))
-    if not device_id or not secret:
+    if not _usable(device_id, secret):
         return None
     return DeviceCredential(
         device_id=device_id,

@@ -200,8 +200,12 @@ def cmd_register(args: argparse.Namespace) -> int:
                 )
                 return 3
             print(f"登録しました。鍵を保存しました: {where}")
-            if os.environ.get("SENDA_ARGUS_DEVICE_ID") and os.environ.get("SENDA_ARGUS_DEVICE_SECRET"):
-                print("環境変数の鍵が残っているため、保存した鍵より環境変数の鍵が使われます。")
+            if os.environ.get("SENDA_ARGUS_DEVICE_ID") and os.environ.get(
+                "SENDA_ARGUS_DEVICE_SECRET"
+            ):
+                print(
+                    "環境変数の鍵が残っているため、保存した鍵より環境変数の鍵が使われます。"
+                )
             return 0
         error = str(token.get("error") or "")
         if error == "invalid_grant" and network_failed:
@@ -225,6 +229,12 @@ def cmd_register(args: argparse.Namespace) -> int:
 
 def cmd_status(args: argparse.Namespace) -> int:
     credential = load_credential()
+    if credential is None and default_path().is_file():
+        print(
+            "鍵のファイルがありますが使えません。形が壊れているか、他の利用者が読める権限です。"
+            "送信は署名なしで、未検証として記録されます。",
+        )
+        return 1
     if credential is None:
         print(
             "この端末は登録されていません。送信は署名なしで、未検証として記録されます。"

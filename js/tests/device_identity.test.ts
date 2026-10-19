@@ -91,3 +91,15 @@ test("exporter が実際に送る本文とヘッダーの署名が一致し、�
   }
   assert.notEqual(sent[0].init.headers["X-Argus-Device-Sig"], sent[1].init.headers["X-Argus-Device-Sig"]);
 });
+
+test("制御文字を含む識別子と、32 バイトの hex でない秘密は鍵として読まない", () => {
+  clean();
+  process.env.SENDA_ARGUS_DEVICE_ID = "wl-1\r\nX-Evil: 1";
+  process.env.SENDA_ARGUS_DEVICE_SECRET = SECRET;
+  assert.equal(loadCredential(), null);
+  for (const bad of ["ab".repeat(31), "ab".repeat(33), "zz".repeat(32), ""]) {
+    process.env.SENDA_ARGUS_DEVICE_ID = "wl-1";
+    process.env.SENDA_ARGUS_DEVICE_SECRET = bad;
+    assert.equal(loadCredential(), null, bad);
+  }
+});
