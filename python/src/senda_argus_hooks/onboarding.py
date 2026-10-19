@@ -217,6 +217,8 @@ class _Canary:
         if agent != self._agent:
             return False
         session, last_seq = exporter.chain_position()
+        from senda_argus_hooks.core import hook_config_digest
+
         data = {
             "chain": {"session": session, "last_seq": last_seq},
             "boot_id": self._boot,
@@ -233,6 +235,8 @@ class _Canary:
                 chain_session=session,
                 chain_last_seq=last_seq,
             ),
+            # hook の設定と実行ファイルの要約。端末の鍵の署名が本文を覆い、サーバーは承認した要約と比べる。
+            "hook_config_digest": hook_config_digest.compute(),
         }
         try:
             exporter.export([_build_event(CANARY_EVENT, data, agent)])
