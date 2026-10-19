@@ -3,7 +3,8 @@ import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { loadCredential, signatureOf, signHeaders } from "../src/deviceIdentity.js";
+import { ArgusExporter } from "../src/exporters/argus.js";
+import { encodeHeaderValue, loadCredential, signatureOf, signHeaders } from "../src/deviceIdentity.js";
 
 const SECRET = Buffer.from(Array.from({ length: 32 }, (_, i) => i)).toString("hex");
 
@@ -58,4 +59,35 @@ test("権限が広い鍵のファイルは使わない", { skip: process.platfor
   assert.equal(loadCredential()?.deviceId, "d1");
   chmodSync(path, 0o644);
   assert.equal(loadCredential(), null);
+});
+
+test("非 ASCII の利用者名はヘッダーで percent エンコードされ、ヘッダーに入れられる", () => {
+  assert.equal(encodeHeaderValue("山田"), "%E5%B1%B1%E7%94%B0");
+  assert.equal(encodeHeaderValue("a".repeat(300)).length, 256);
+  assert.ok(encodeHeaderValue("山".repeat(100)).length <= 256);
+  assert.ok(/^[\x20-\x7e]*$/.test(encodeHeaderValue("ü名")));
+});
+
+test("exporter が実際に送る本文とヘッダーの署名が一致し、報告にも別の本文で署名する", async () => {
+  clean();
+  process.env.SENDA_ARGUS_DEVICE_ID = "wl-1";
+  process.env.SENDA_ARGUS_DEVICE_SECRET = SECRET;
+  const sent: { url: string; init: any }[] = [];
+  (globalThis as any).fetch = async (url: string, init: any) => {
+    sent.push({ url, init });
+    return { ok: true, status: 200 };
+  };
+  const exporter = new ArgusExporter("http://argus.example", "key");
+  (exporter as any).noteDiscard(new Date(Date.now() - 60_000).toISOString());
+  exporter.emit({ event_id: "e1", event_type: "x", timestamp: new Date().toISOString() } as any);
+  await exporter.flush();
+  assert.ok(sent.length >= 2);
+  for (const { init } of sent) {
+    const h = init.headers;
+    assert.equal(
+      h["X-Argus-Device-Sig"],
+      signatureOf(SECRET, "wl-1", Number(h["X-Argus-Device-Ts"]), h["X-Argus-Device-Seq"], Buffer.from(init.body)),
+    );
+  }
+  assert.notEqual(sent[0].init.headers["X-Argus-Device-Sig"], sent[1].init.headers["X-Argus-Device-Sig"]);
 });

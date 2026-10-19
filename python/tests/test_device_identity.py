@@ -118,7 +118,10 @@ def test_a_workload_key_from_the_environment_is_used_and_can_expire(monkeypatch)
 def test_the_os_user_and_host_are_sent_as_unsigned_self_declared_values(isolated):
     _save(isolated)
     h = di.sign_headers(b"x")
-    assert h[di.HEADER_USER] == di.os_user() and h[di.HEADER_HOST] == di.hostname()
+    from urllib.parse import unquote
+
+    assert unquote(h[di.HEADER_USER]) == di.os_user()
+    assert unquote(h[di.HEADER_HOST]) == di.hostname()
 
 
 class _Capture(BaseHTTPRequestHandler):
@@ -450,3 +453,104 @@ def test_the_approval_url_uses_the_dashboard_url_and_carries_the_code(
         "https://dash.example/devices/approve?user_code=ABCD-1234"
         in capsys.readouterr().out
     )
+
+
+def test_non_ascii_user_and_host_are_percent_encoded_and_fit_in_a_header(
+    isolated, monkeypatch
+):
+    from urllib.parse import unquote
+
+    _save(isolated)
+    monkeypatch.setattr(di, "os_user", lambda: "山田")
+    monkeypatch.setattr(di, "hostname", lambda: "PC-ü" + "名" * 200)
+    h = di.sign_headers(b"x")
+    assert h[di.HEADER_USER] == "%E5%B1%B1%E7%94%B0"
+    assert unquote(h[di.HEADER_USER]) == "山田"
+    assert all(v.isascii() for v in h.values())
+    assert len(h[di.HEADER_HOST]) <= 256
+
+
+def test_the_os_user_comes_from_passwd_not_from_the_environment(monkeypatch):
+    import os
+    import pwd
+
+    monkeypatch.setenv("USER", "someone-else")
+    monkeypatch.setenv("LOGNAME", "someone-else")
+    assert di.os_user() == pwd.getpwuid(os.getuid()).pw_name
+
+
+def test_a_retry_keeps_the_sequence_number_and_renews_the_timestamp(
+    isolated, server, monkeypatch
+):
+    _save(isolated)
+    endpoint = f"http://127.0.0.1:{server.server_address[1]}"
+    exporter = ArgusExporter({"type": "argus", "endpoint": endpoint})
+    payload, headers = exporter._request([{"event_id": "e1", "event_type": "x"}])
+    seq = di.reserve_seq()
+    exporter._send_once(payload, headers, "", seq)
+    exporter._send_once(payload, headers, "", seq)
+    lows = [{k.lower(): v for k, v in h.items()} for _, h, _ in server.captured[-2:]]
+    assert lows[0]["x-argus-device-seq"] == lows[1]["x-argus-device-seq"] == str(seq)
+
+
+def test_register_continues_through_a_5xx_during_the_wait(
+    isolated, enroll_server, monkeypatch
+):
+    monkeypatch.setattr(device_cli.time, "sleep", lambda s: None)
+    real = device_cli._post
+    state = {"n": 0}
+
+    def flaky(url, body, **kw):
+        if url.endswith("/v1/devices/token") and state["n"] == 0:
+            state["n"] += 1
+            return 503, {}
+        return real(url, body, **kw)
+
+    monkeypatch.setattr(device_cli, "_post", flaky)
+    assert device_cli.cmd_register(_args(enroll_server)) == 0
+
+
+def test_a_lost_token_response_tells_the_user_to_revoke_and_reissue(
+    isolated, monkeypatch, capsys
+):
+    monkeypatch.setattr(device_cli.time, "sleep", lambda s: None)
+    calls = {"n": 0}
+
+    def fake(url, body, **kw):
+        if url.endswith("/v1/devices/authorize"):
+            return 200, {
+                "device_code": "dc",
+                "user_code": "ABCD-1234",
+                "verification_uri": "/devices/approve",
+                "expires_in": 60,
+                "interval": 1,
+            }
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise device_cli.urllib.error.URLError("reset")
+        return 400, {"error": "invalid_grant"}
+
+    monkeypatch.setattr(device_cli, "_post", fake)
+    import argparse
+
+    args = argparse.Namespace(
+        endpoint="http://x", code="c", timeout=1.0, dashboard_url=None
+    )
+    assert device_cli.cmd_register(args) == 3
+    assert "再発行" in capsys.readouterr().err
+
+
+def test_a_lost_renew_response_tells_the_user_to_retry_within_the_grace(
+    isolated, monkeypatch, capsys
+):
+    import argparse
+
+    _save(isolated)
+
+    def boom(url, body, **kw):
+        raise device_cli.urllib.error.URLError("reset")
+
+    monkeypatch.setattr(device_cli, "_post", boom)
+    args = argparse.Namespace(endpoint="http://x", timeout=1.0)
+    assert device_cli.cmd_renew(args) == 3
+    assert "10 分以内" in capsys.readouterr().err

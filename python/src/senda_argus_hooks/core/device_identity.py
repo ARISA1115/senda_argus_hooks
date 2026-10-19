@@ -29,11 +29,14 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final, Optional
+from urllib.parse import quote
 
 try:  # POSIX だけ。無い環境では、プロセス内の通し番号に倒す。
     import fcntl
+    import pwd
 except ImportError:  # pragma: no cover - Windows
     fcntl = None  # type: ignore[assignment]
+    pwd = None  # type: ignore[assignment]
 
 SIGNATURE_VERSION: Final[str] = "argus-device-v1"
 HEADER_ID: Final[str] = "X-Argus-Device-Id"
@@ -50,6 +53,7 @@ ENV_DEVICE_EXPIRES_AT: Final[str] = "SENDA_ARGUS_DEVICE_EXPIRES_AT"
 
 _MAX_FILE_BYTES: Final[int] = 16_384
 _MAX_FIELD_LEN: Final[int] = 512
+_HEADER_LIMIT = 256
 _LOCK_TRIES = 20
 _LOCK_WAIT_SEC = 0.01
 _warned_expired = False
@@ -177,6 +181,9 @@ def save_credential(
             os.fchmod(fd, 0o600)
         with os.fdopen(fd, "wb") as handle:
             handle.write(body)
+            handle.flush()
+            # 秘密は 1 度しか返らない。電源が落ちて空のファイルが残らないよう、置き換えの前に書き出す。
+            os.fsync(handle.fileno())
         os.replace(tmp, target)
     finally:
         if tmp.exists():
@@ -184,8 +191,26 @@ def save_credential(
     return target
 
 
+def encode_header_value(value: str, limit: int = _HEADER_LIMIT) -> str:
+    """自己申告のヘッダーの値を UTF-8 の percent エンコードにする。
+
+    非 ASCII の利用者名や hostname をそのまま入れると、送信が例外で失敗する。受け取り側は同じ規則で戻す。
+    符号化の後の長さが上限を超える前で切る。上限を超えると、受け取り側は署名ごと拒否する。
+    """
+    out = ""
+    for ch in value:
+        piece = quote(ch, safe="")
+        if len(out) + len(piece) > limit:
+            break
+        out += piece
+    return out
+
+
 def os_user() -> str:
     try:
+        if pwd is not None:
+            # 環境変数 USER と LOGNAME は書き換えられ、JavaScript の SDK が読む passwd の値と食い違う。
+            return pwd.getpwuid(os.getuid()).pw_name[:_MAX_FIELD_LEN]
         return getpass.getuser()[:_MAX_FIELD_LEN]
     except Exception:  # noqa: BLE001 - 利用者名を引けない環境でも送信は止めない
         return ""
@@ -261,8 +286,17 @@ def signature_of(secret: str, device_id: str, ts: int, seq: int, body: bytes) ->
     ).hexdigest()
 
 
+def reserve_seq() -> Optional[int]:
+    """再送のあいだ同じ通し番号を使うため、送信の前に 1 回だけ採る。鍵が無いときは None を返す。"""
+    cred = load_credential()
+    return None if cred is None else _next_seq(cred)
+
+
 def sign_headers(
-    body: bytes, *, credential: Optional[DeviceCredential] = None
+    body: bytes,
+    *,
+    credential: Optional[DeviceCredential] = None,
+    seq: Optional[int] = None,
 ) -> dict[str, str]:
     """本文に付ける署名のヘッダー。鍵が無いときは空を返す。
 
@@ -272,7 +306,7 @@ def sign_headers(
     if cred is None:
         return {}
     ts = int(time.time())
-    seq = _next_seq(cred)
+    seq = seq if seq is not None else _next_seq(cred)
     try:
         signature = signature_of(cred.secret, cred.device_id, ts, seq, body)
     except ValueError:
@@ -289,7 +323,7 @@ def sign_headers(
     user = os_user()
     host = hostname()
     if user:
-        headers[HEADER_USER] = user
+        headers[HEADER_USER] = encode_header_value(user)
     if host:
-        headers[HEADER_HOST] = host
+        headers[HEADER_HOST] = encode_header_value(host)
     return headers

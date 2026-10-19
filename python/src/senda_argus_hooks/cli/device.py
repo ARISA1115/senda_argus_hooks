@@ -173,6 +173,7 @@ def cmd_register(args: argparse.Namespace) -> int:
     print(uri)
     interval = min(max(float(grant.get("interval") or 5), _MIN_INTERVAL), _MAX_INTERVAL)
     deadline = time.monotonic() + min(float(grant.get("expires_in") or 600), 1800.0)
+    network_failed = False
     while time.monotonic() < deadline:
         time.sleep(interval)
         try:
@@ -183,6 +184,10 @@ def cmd_register(args: argparse.Namespace) -> int:
             )
         except _NETWORK_ERRORS:
             # 通信の失敗 1 回で待ちを終えない。登録コードは消費済みで、発行し直しになる。
+            network_failed = True
+            continue
+        if status >= 500 or status == 429:
+            # 負荷分散の 502 と 503 と 429 は一時の失敗。登録コードは消費済みで、終えると発行し直しになる。
             continue
         if status == 200:
             try:
@@ -195,8 +200,18 @@ def cmd_register(args: argparse.Namespace) -> int:
                 )
                 return 3
             print(f"登録しました。鍵を保存しました: {where}")
+            if os.environ.get("SENDA_ARGUS_DEVICE_ID") and os.environ.get("SENDA_ARGUS_DEVICE_SECRET"):
+                print("環境変数の鍵が残っているため、保存した鍵より環境変数の鍵が使われます。")
             return 0
         error = str(token.get("error") or "")
+        if error == "invalid_grant" and network_failed:
+            # 応答を受け取り損ねた可能性がある。サーバーは秘密を 1 度しか返さず、端末は有効のまま残る。
+            print(
+                "承認は完了しましたが、鍵の応答を受け取れませんでした。秘密は 1 度しか返らないため、"
+                "管理者に端末の失効と登録コードの再発行を依頼してください。",
+                file=sys.stderr,
+            )
+            return 3
         if error == "authorization_pending":
             continue
         if error == "slow_down":
@@ -239,9 +254,18 @@ def cmd_renew(args: argparse.Namespace) -> int:
         )
         return 1
     base = _endpoint(args, credential)
-    status, token = _post(
-        base + "/v1/devices/renew", {}, timeout=float(args.timeout), signed=True
-    )
+    try:
+        status, token = _post(
+            base + "/v1/devices/renew", {}, timeout=float(args.timeout), signed=True
+        )
+    except _NETWORK_ERRORS as exc:
+        print(
+            f"更新の応答を受け取れませんでした: {exc.__class__.__name__}。"
+            "サーバーで鍵が入れ替わっていることがあり、前の鍵は 10 分の間だけ更新に使えます。"
+            "10 分以内にもう一度 device renew を実行してください。",
+            file=sys.stderr,
+        )
+        return 3
     if status != 200:
         print(f"更新できませんでした: {token.get('error') or status}", file=sys.stderr)
         return 1

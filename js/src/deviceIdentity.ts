@@ -57,6 +57,26 @@ export function loadCredential(): DeviceCredential | null {
   }
 }
 
+// 自己申告の値を UTF-8 の percent エンコードにする。非 ASCII の利用者名をヘッダーへそのまま入れると fetch が
+// 例外になる。符号化の後の長さが上限を超える前で切る。上限を超えると、受け取り側は署名ごと拒否する。
+export function encodeHeaderValue(value: string, limit = 256): string {
+  let out = "";
+  for (const ch of value) {
+    let piece: string;
+    try {
+      piece = encodeURIComponent(ch);
+    } catch {
+      continue;
+    }
+    // encodeURIComponent は ! ' ( ) * を符号化しない。受け取り側の復号で同じ値に戻るため、そのまま送る。
+    if (out.length + piece.length > limit) break;
+    out += piece;
+  }
+  return out;
+}
+
+let warnedExpired = false;
+
 export function signatureOf(secret: string, deviceId: string, ts: number, seq: string, body: Buffer): string {
   const material = [VERSION, deviceId, String(ts), seq, createHash("sha256").update(body).digest("hex")].join("\n");
   return createHmac("sha256", Buffer.from(secret, "hex")).update(material, "utf8").digest("hex");
@@ -66,6 +86,10 @@ export function signatureOf(secret: string, deviceId: string, ts: number, seq: s
 export function signHeaders(body: string, credential: DeviceCredential | null = loadCredential()): Record<string, string> {
   if (!credential || !HEX.test(credential.secret)) return {};
   const ts = Math.floor(Date.now() / 1000);
+  if (!warnedExpired && credential.expiresAt !== undefined && credential.expiresAt <= ts) {
+    warnedExpired = true;
+    process.stderr.write(`senda-argus: device key ${credential.deviceId} has expired; sends are rejected until it is replaced\n`);
+  }
   // 63 ビットの乱数。受け取り側は 20 桁までを受け、見た番号の集合で判定する。
   const seq = (randomBytes(8).readBigUInt64BE() >> 1n).toString();
   const headers: Record<string, string> = {
@@ -75,11 +99,11 @@ export function signHeaders(body: string, credential: DeviceCredential | null = 
     "X-Argus-Device-Sig": signatureOf(credential.secret, credential.deviceId, ts, seq, Buffer.from(body, "utf8")),
   };
   try {
-    headers["X-Argus-Device-User"] = userInfo().username.slice(0, MAX_FIELD);
+    headers["X-Argus-Device-User"] = encodeHeaderValue(userInfo().username);
   } catch {
     // 利用者名を引けない環境でも送信は止めない。
   }
-  const host = hostname().slice(0, MAX_FIELD);
+  const host = encodeHeaderValue(hostname());
   if (host) headers["X-Argus-Device-Host"] = host;
   return headers;
 }
