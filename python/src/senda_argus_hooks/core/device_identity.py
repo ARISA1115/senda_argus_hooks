@@ -56,6 +56,9 @@ ENV_DEVICE_EXPIRES_AT: Final[str] = "SENDA_ARGUS_DEVICE_EXPIRES_AT"
 
 _MAX_FILE_BYTES: Final[int] = 16_384
 _MAX_FIELD_LEN: Final[int] = 512
+# 鍵の在りかの長さの上限。保存と読み込みで同じ値を使い、超える値は切り詰めずに使えないものとして扱う。
+# 切り詰めると、以後の要求が別の場所を開き、未登録の新しい鍵を作りうる。
+MAX_KEY_REF_LEN: Final[int] = 4096
 _HEADER_LIMIT = 256
 _LOCK_TRIES = 20
 _LOCK_WAIT_SEC = 0.01
@@ -110,6 +113,14 @@ KEY_KIND_HMAC: Final[str] = "hmac"
 _ASYMMETRIC_KINDS: Final[frozenset[str]] = frozenset({"helper", "software"})
 
 
+def _key_ref(value: Any) -> str:
+    """鍵の在りかを読む。上限を超える値と文字列でない値は空を返す。切り詰めない。"""
+    if not isinstance(value, str):
+        return ""
+    value = value.strip()
+    return value if len(value) <= MAX_KEY_REF_LEN else ""
+
+
 def _usable(device_id: str, secret: str, key_kind: str = KEY_KIND_HMAC, key_ref: str = "") -> bool:
     if not _DEVICE_ID_PATTERN.match(device_id):
         return False
@@ -161,7 +172,7 @@ def load_credential() -> Optional[DeviceCredential]:
     device_id = _text(data.get("device_id"))
     secret = _text(data.get("device_secret"))
     key_kind = _text(data.get("key_kind")) or KEY_KIND_HMAC
-    key_ref = _text(data.get("key_ref"))
+    key_ref = _key_ref(data.get("key_ref"))
     if not _usable(device_id, secret, key_kind, key_ref):
         return None
     return DeviceCredential(
@@ -190,6 +201,8 @@ def save_credential(
     key_ref: str = "",
 ) -> Path:
     """鍵を保存する。作成の時点で利用者だけが読める権限にし、作った後に権限を絞る隙間を作らない。"""
+    if len(key_ref.strip()) > MAX_KEY_REF_LEN or key_ref != key_ref.strip():
+        raise ValueError("key_ref is longer than the stored limit")
     target = path or default_path()
     target.parent.mkdir(parents=True, exist_ok=True)
     body = json.dumps(

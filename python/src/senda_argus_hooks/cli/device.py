@@ -31,6 +31,7 @@ from senda_argus_hooks.core.device_keys import (
     select_provider,
 )
 from senda_argus_hooks.core.device_identity import (
+    MAX_KEY_REF_LEN,
     DeviceCredential,
     hostname,
     load_credential,
@@ -174,6 +175,16 @@ def cmd_register(args: argparse.Namespace) -> int:
         raise ValueError(f"--code か環境変数 {ENV_CODE} に登録コードを指定してください")
     timeout = float(args.timeout)
     provider = _provider()
+    if provider is not None and (
+        len(provider.ref) > MAX_KEY_REF_LEN or provider.ref != provider.ref.strip()
+    ):
+        # 保存できない在りかの鍵で登録すると、登録コードを使った後に鍵を開けなくなる。使う前に止める。
+        print(
+            f"端末の鍵の在りかが {MAX_KEY_REF_LEN} 文字を超えるか前後に空白があります。"
+            "鍵の置き場を短いパスにしてください。",
+            file=sys.stderr,
+        )
+        return 1
     request: dict[str, Any] = {
         "registration_code": code,
         "hostname": hostname(),
