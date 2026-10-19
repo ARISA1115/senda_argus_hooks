@@ -13,6 +13,20 @@ from senda_argus_hooks.exporters import create_exporter
 from senda_argus_hooks.exporters.argus import ArgusExporter
 
 
+@pytest.fixture(autouse=True)
+def _chain_state(monkeypatch):
+    """各テストで通し番号の数え手を作り直す。終了の通知は、このモジュールの件数のテストを崩すため、既定では止める。
+
+    終了の通知そのものは test_record_chain.py が、止めずに確認する。
+    """
+    from senda_argus_hooks.core import record_chain
+
+    record_chain.reset_for_tests()
+    monkeypatch.setattr(ArgusExporter, "_enqueue_session_end", lambda self, worker: None)
+    yield
+    record_chain.reset_for_tests()
+
+
 def _wait_until(predicate, timeout: float = 2.0) -> None:
     """送信は daemon スレッドに切り離されるため、キャプチャ到着まで待つ。"""
     deadline = time.monotonic() + timeout
@@ -493,7 +507,9 @@ def test_discarded_records_are_reported_after_the_next_success():
         exp.export([{"event_id": "c", "timestamp": _at(90)}])
         exp.shutdown()
         assert exp.unsent_events() == 2
-        assert srv.reports == [{"windows": [{"from": _BASE, "to": _BASE + 30, "count": 2}]}]
+        assert [r["windows"] for r in srv.reports] == [[{"from": _BASE, "to": _BASE + 30, "count": 2}]]
+        # 捨てた記録の番号の範囲も、同じ報告に載る。
+        assert [[(g["from"], g["to"]) for g in r["ranges"]] for r in srv.reports] == [[(1, 2)]]
     finally:
         srv.srv.shutdown()
 
@@ -627,7 +643,9 @@ def test_a_rejected_payload_is_reported_once_ingest_recovers():
         exp.export([{"event_id": "d", "timestamp": _at(900)}])
         exp.shutdown()
         # 先の 2 回は 400 で拒まれたので、2 つの時間帯が 1 つにまとまり、3 回目の成功の後に 1 回だけ報告される。
-        assert srv.reports == [{"windows": [{"from": _BASE, "to": _BASE + 20, "count": 3}]}]
+        assert [r["windows"] for r in srv.reports] == [[{"from": _BASE, "to": _BASE + 20, "count": 3}]]
+        # 捨てた記録の番号の範囲も、同じ報告に載る。
+        assert [[(g["from"], g["to"]) for g in r["ranges"]] for r in srv.reports] == [[(1, 3)]]
         assert exp._discards == []
     finally:
         srv.srv.shutdown()

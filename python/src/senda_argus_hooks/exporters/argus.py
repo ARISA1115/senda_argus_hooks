@@ -16,6 +16,7 @@ import urllib.request
 from typing import Any
 
 from senda_argus_hooks.core.device_identity import reserve_seq, sign_headers
+from senda_argus_hooks.core.record_chain import SESSION_END_EVENT, chain, seq_range
 
 from .base import BaseExporter
 
@@ -31,6 +32,8 @@ _DROP_WARN_INTERVAL = 60.0
 # 捨てた記録の時間帯を報告する宛先と、持つ時間帯の数と、前の時間帯へ寄せる間隔。
 _DISCARD_PATH = "/v1/hooks/discards"
 _MAX_DISCARD_WINDOWS = 32
+# 捨てた記録の番号の範囲を持つ数。受け取り側は、宣言された範囲の飛びを、宣言の無い飛びと区別して数える。
+_MAX_DISCARD_RANGES = 64
 _DISCARD_MERGE_SEC = 60.0
 # 受け取り側が受ける時間帯の範囲。送る前に同じ範囲へ切り詰め、範囲外で報告ごと拒まれないようにする。
 _DISCARD_MAX_SPAN = 7 * 86400.0
@@ -197,6 +200,7 @@ class ArgusExporter(BaseExporter):
         # この時間帯の中継にだけある記録を、hooks の記録の欠落ではなく取り込みの欠落として数える。
         self._discard_url = endpoint + _DISCARD_PATH
         self._discards: list[list[float]] = []
+        self._seq_discards: list[list[Any]] = []
         # 直近の _send_once が 2xx で受けられたか。再送しない拒否も (None, None) で返るので別に持つ。
         self._last_ingest_ok = False
 
@@ -224,6 +228,37 @@ class ArgusExporter(BaseExporter):
         with self._drop_lock:
             self._discards = _bound_windows(_add_window(self._discards, lo, hi, float(count)))
 
+    def _note_seq_ranges(self, ranges: list[tuple[str, int, int]]) -> None:
+        """捨てた記録の番号の範囲を持つ。同じセッションで続く範囲は 1 つに寄せ、数に上限を置く。
+
+        上限を超える分は、古い範囲から落とす。落とした範囲は宣言できず、受け取り側で宣言の無い飛びになる。
+        """
+        if not ranges:
+            return
+        with self._drop_lock:
+            held = self._seq_discards
+            for session, lo, hi in ranges:
+                for item in held:
+                    if item[0] == session and lo <= item[2] + 1 and hi >= item[1] - 1:
+                        item[1], item[2] = min(item[1], lo), max(item[2], hi)
+                        break
+                else:
+                    held.append([session, lo, hi])
+            self._seq_discards = held[-_MAX_DISCARD_RANGES:]
+
+    def _note_unsent(self, payload: bytes) -> None:
+        """送れずに捨てた本文の時間帯と番号の範囲を持つ。"""
+        self._note_discard(self._payload_times(payload), self._event_count(payload) or 1)
+        self._note_seq_ranges(self._payload_seq_ranges(payload))
+
+    @staticmethod
+    def _payload_seq_ranges(payload: bytes) -> list[tuple[str, int, int]]:
+        try:
+            body = json.loads(payload.decode("utf-8"))
+        except Exception:  # noqa: BLE001
+            return []
+        return seq_range(body.get("events") if isinstance(body, dict) else None)
+
     @staticmethod
     def _clip_windows(windows: list[list[float]], now: float) -> list[list[float]]:
         """受け取り側の範囲へ切り詰める。未来の終わりは今へ、長すぎる時間帯は終わりから 7 日へ寄せ、
@@ -245,11 +280,15 @@ class ArgusExporter(BaseExporter):
         """
         with self._drop_lock:
             windows, self._discards = self._discards, []
+            ranges, self._seq_discards = self._seq_discards, []
         windows = self._clip_windows(windows, time.time())
-        if not windows:
+        if not windows and not ranges:
             return
         body = json.dumps(
-            {"windows": [{"from": w[0], "to": w[1], "count": int(w[2])} for w in windows]}
+            {
+                "windows": [{"from": w[0], "to": w[1], "count": int(w[2])} for w in windows],
+                "ranges": [{"session": r[0], "from": r[1], "to": r[2]} for r in ranges],
+            }
         ).encode("utf-8")
         # 渡されたヘッダーに記録の署名が残っていても、鍵が読めないときに報告へ付いたまま送らない。
         headers = {k: v for k, v in headers.items() if not k.lower().startswith("x-argus-device-")}
@@ -274,6 +313,7 @@ class ArgusExporter(BaseExporter):
             for w in windows:
                 merged = _add_window(merged, w[0], w[1], w[2])
             self._discards = _bound_windows(merged)
+        self._note_seq_ranges([(r[0], r[1], r[2]) for r in ranges])
 
     def _read_accepted(self, response: Any, status: Any) -> bytes:
         """202 の本文を読む。判定を省いた受け付けかは本文にあるので、読めなければ見落とさず警告する。"""
@@ -411,7 +451,7 @@ class ArgusExporter(BaseExporter):
                     # 再送しない拒否 (401、403、400 など)。届かなかった記録を破棄と同じに数え、取り込みが
                     # 回復した後に時間帯を報告する。数えないと、受け取り側がその間の中継にだけある記録を
                     # hooks の欠落として警報にする。
-                    self._note_discard(self._payload_times(payload), self._event_count(payload) or 1)
+                    self._note_unsent(payload)
                 return
             maintenance = reason == "maintenance"
             exhausted = (
@@ -421,7 +461,7 @@ class ArgusExporter(BaseExporter):
             )
             if exhausted or self._stopping.is_set():
                 self._record_unsent(self._event_count(payload) or 1, reason)
-                self._note_discard(self._payload_times(payload), self._event_count(payload) or 1)
+                self._note_unsent(payload)
                 return
             delay = self._retry_delay(attempt, retry_after, maintenance=maintenance)
             # 待ちが 0 秒でも予定の最長を数え尽くすよう、1 回を 1 秒以上と数える。
@@ -429,7 +469,7 @@ class ArgusExporter(BaseExporter):
             # 終了の要求が来たら待つのをやめ、送れなかった分として数える。
             if self._stopping.wait(delay):
                 self._record_unsent(self._event_count(payload) or 1, reason)
-                self._note_discard(self._payload_times(payload), self._event_count(payload) or 1)
+                self._note_unsent(payload)
                 return
 
     def _send_once(
@@ -500,9 +540,12 @@ class ArgusExporter(BaseExporter):
                 atexit.register(self.shutdown)
                 self._atexit_registered = True
 
-    def _request(self, events: list[dict[str, Any]]) -> tuple[bytes, dict[str, str]]:
+    def _request(self, events: list[dict[str, Any]], *, chained: bool = False) -> tuple[bytes, dict[str, str]]:
         if self._run_id:
             events = [dict(ev, run_id=ev.get("run_id") or self._run_id) for ev in events]
+        if chained:
+            # 通し番号は、記録を捉えた時点で付ける。送信の待ち行列へ積む前に付けるため、溢れて捨てた記録も番号を持つ。
+            events = chain().stamp(events)
         payload = json.dumps({"events": events}, ensure_ascii=False, default=str).encode("utf-8")
         headers = {"Content-Type": "application/json"}
         if self._api_key:
@@ -556,7 +599,7 @@ class ArgusExporter(BaseExporter):
     def export(self, events: list[dict[str, Any]]) -> None:
         if not events:
             return
-        payload, headers = self._request(events)
+        payload, headers = self._request(events, chained=True)
         # 送信をキューへ積み、単一ワーカーが FIFO 順にホスト経路の外で送る。キューが
         # 満杯なら捨てて呼び出し側を待たせない。ワーカーは 1 本に限定する。
         self._ensure_worker()
@@ -565,12 +608,46 @@ class ArgusExporter(BaseExporter):
         except queue.Full:
             self._record_drop(len(events))
             self._note_discard(self._event_times(events), len(events))
+            self._note_seq_ranges(self._payload_seq_ranges(payload))
+
+    def _enqueue_session_end(self, worker: threading.Thread | None) -> None:
+        """セッションの終了を、署名つきの通知として 1 回だけ送る。
+
+        終了の通知が無く途切れたセッションを、受け取り側は未終了として数える。末尾の記録を消して新しいセッションを
+        始める手口を、その数で見つける。送出のワーカーが動いていない (記録を 1 件も送っていない) ときは、送るものが無い。
+        """
+        if worker is None or not worker.is_alive():
+            return
+        taken = chain().take_end()
+        if taken is None:
+            return
+        _session, last_seq = taken
+        try:
+            from senda_argus_hooks.core.event import new_event
+            from senda_argus_hooks.core.runtime import effective_agent_id, get_config
+
+            cfg = get_config()
+            event = new_event(
+                project=cfg.project,
+                environment=cfg.environment,
+                event_type=SESSION_END_EVENT,
+                source={"component": "exporter", "sdk": "senda_argus_hooks"},
+                data={"last_seq": last_seq},
+                status="success",
+                run_id=cfg.run_id or f"run_session_end_{_session}",
+                agent_id=effective_agent_id(),
+            ).to_dict()
+            payload, headers = self._request([event], chained=True)
+            self._queue.put_nowait((payload, headers))
+        except Exception:  # noqa: BLE001 - 終了の通知で、終了の処理を止めない
+            _logger.debug("セッションの終了の通知を送れませんでした", exc_info=True)
 
     def shutdown(self) -> None:
         # 終了時に積み残したバッチを送り切る。daemon ワーカーは通常終了で待たれないため、
         # EventBus.shutdown と atexit の双方からここを通して drain する。
         super().shutdown()
         worker = self._worker
+        self._enqueue_session_end(worker)
         if worker is None or not worker.is_alive():
             return
         with contextlib.suppress(queue.Full):

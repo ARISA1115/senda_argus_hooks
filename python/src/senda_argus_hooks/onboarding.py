@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from senda_argus_hooks.core.device_identity import sign_headers
+from senda_argus_hooks.core.record_chain import chain
 from senda_argus_hooks.core.event import new_event
 from senda_argus_hooks.core.runtime import effective_agent_id, get_bus, get_config
 
@@ -207,7 +208,9 @@ class _Canary:
         agent = effective_agent_id() if self._derived else self._agent
         if agent != self._agent:
             return False
+        session, last_seq = chain().position()
         data = {
+            "chain": {"session": session, "last_seq": last_seq},
             "boot_id": self._boot,
             "seq": seq,
             "interval_sec": self._interval,
