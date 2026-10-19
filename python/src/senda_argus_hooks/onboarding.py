@@ -34,6 +34,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from senda_argus_hooks.core.device_identity import sign_headers
 from senda_argus_hooks.core.event import new_event
 from senda_argus_hooks.core.runtime import effective_agent_id, get_bus, get_config
 
@@ -132,6 +133,7 @@ def _post(url: str, api_key: str, events: list[dict[str, Any]], timeout: float) 
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["X-API-Key"] = api_key
+    headers.update(sign_headers(payload))
     req = urllib.request.Request(url, data=payload, method="POST", headers=headers)
     with urllib.request.urlopen(req, timeout=timeout) as response:
         body = response.read()

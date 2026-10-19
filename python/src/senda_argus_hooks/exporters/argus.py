@@ -15,6 +15,8 @@ import urllib.error
 import urllib.request
 from typing import Any
 
+from senda_argus_hooks.core.device_identity import reserve_seq, sign_headers
+
 from .base import BaseExporter
 
 # 送出は境界付きキューと単一のワーカースレッドで行う。バッチごとにスレッドを起こすと、
@@ -249,6 +251,10 @@ class ArgusExporter(BaseExporter):
         body = json.dumps(
             {"windows": [{"from": w[0], "to": w[1], "count": int(w[2])} for w in windows]}
         ).encode("utf-8")
+        # 渡されたヘッダーに記録の署名が残っていても、鍵が読めないときに報告へ付いたまま送らない。
+        headers = {k: v for k, v in headers.items() if not k.lower().startswith("x-argus-device-")}
+        # 本文が違うため、記録の送信に付けた署名は使えない。この本文で署名し直す。
+        headers = {**headers, **sign_headers(body)}
         req = urllib.request.Request(self._discard_url, data=body, method="POST", headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=self._timeout) as response:
@@ -391,9 +397,11 @@ class ArgusExporter(BaseExporter):
         suffix = f" events={count}" if count is not None else ""
         attempt = 0
         waited = 0.0
+        # 再送は同じ通し番号で署名し直す。受け取り側は、同じ番号と本文の再送を 1 回だけ数える。
+        seq = reserve_seq()
         while True:
             attempt += 1
-            reason, retry_after = self._send_once(payload, headers, suffix)
+            reason, retry_after = self._send_once(payload, headers, suffix, seq)
             if reason is None:
                 # 報告するのは取り込みが 2xx で受けたときだけ。401 など再送しない拒否は回復ではなく、報告も
                 # 同じ 4xx で拒まれて持っている時間帯が戻されずに消える。
@@ -425,13 +433,19 @@ class ArgusExporter(BaseExporter):
                 return
 
     def _send_once(
-        self, payload: bytes, headers: dict[str, str], suffix: str
+        self,
+        payload: bytes,
+        headers: dict[str, str],
+        suffix: str,
+        seq: int | None = None,
     ) -> tuple[str | None, str | None]:
         """1 回送る。送り直す失敗なら (理由, Retry-After) を、それ以外は (None, None) を返す。
 
         (None, None) は成功と、再送しない拒否の両方を含む。成功かどうかは self._last_ingest_ok が持つ。
         """
         self._last_ingest_ok = False
+        # 再送のたびに、新しい時刻と通し番号で署名し直す。鍵が無い端末は、署名を付けずに送る。
+        headers = {**headers, **sign_headers(payload, seq=seq)}
         req = urllib.request.Request(
             self._url, data=payload, method="POST", headers=headers
         )
@@ -508,7 +522,8 @@ class ArgusExporter(BaseExporter):
         if not events:
             return True
         payload, headers = self._request(events)
-        req = urllib.request.Request(self._url, data=payload, method="POST", headers=headers)
+        signed = {**headers, **sign_headers(payload)}
+        req = urllib.request.Request(self._url, data=payload, method="POST", headers=signed)
         try:
             with urllib.request.urlopen(req, timeout=self._timeout) as response:
                 status = getattr(response, "status", None) or response.getcode()

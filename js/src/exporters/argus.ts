@@ -1,5 +1,6 @@
 import type { EventRecord, Exporter } from "../core/types.js";
 import { fallbackRunId } from "../core/event.js";
+import { signHeaders } from "../deviceIdentity.js";
 
 // 捨てた記録の時間帯を報告する宛先と、持つ時間帯の数と、前の時間帯へ寄せる間隔。
 const DISCARD_PATH = "/v1/hooks/discards";
@@ -124,10 +125,11 @@ export class ArgusExporter implements Exporter {
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     timer?.unref?.();
     try {
+      const body = JSON.stringify({ windows });
       const res = await fetch(this.discardUrl, {
         method: "POST",
-        headers: this.headers(),
-        body: JSON.stringify({ windows }),
+        headers: { ...this.headers(), ...signHeaders(body) },
+        body,
         signal: controller.signal,
       });
       // 4xx は送り直しても同じ拒否になるので、届いたものとして戻さない。
@@ -152,10 +154,11 @@ export class ArgusExporter implements Exporter {
     if (untracked) timer?.unref?.();
     let delivered = false;
     try {
+      const body = JSON.stringify({ events: [event] });
       const res = await fetch(this.url, {
         method: "POST",
-        headers: this.headers(),
-        body: JSON.stringify({ events: [event] }),
+        headers: { ...this.headers(), ...signHeaders(body) },
+        body,
         signal: controller.signal,
       });
       delivered = res.ok;

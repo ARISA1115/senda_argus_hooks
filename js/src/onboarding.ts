@@ -16,6 +16,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { getContext } from "./core/context.js";
 import { newEvent } from "./core/event.js";
+import { signHeaders } from "./deviceIdentity.js";
 import type { EventRecord } from "./core/types.js";
 import { argusExporter, getConfig, isCollecting, observedAgentId, onAgentObserved, onShutdown } from "./runtime.js";
 
@@ -90,8 +91,10 @@ export async function sendConnectionCheck(
   try {
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     if (apiKey) headers["X-API-Key"] = apiKey;
+    const payload = JSON.stringify({ events: [event] });
+    Object.assign(headers, signHeaders(payload));
     const response = await fetch(url, {
-      method: "POST", headers, body: JSON.stringify({ events: [event] }), signal: controller.signal,
+      method: "POST", headers, body: payload, signal: controller.signal,
     });
     if (!response.ok) return { status: "error", reason: `http_${response.status}` };
     const body = await response.json();
