@@ -504,6 +504,32 @@ This is intended to answer:
 
 > Which MCP server profile was used?
 
+### Device key and who sent it
+
+`agent_id` is declared by the caller, and an organization API key does not say which device sent a record. A device key lets Argus decide the device from a signature instead of from the body.
+
+Register a device once. An admin issues a one-time registration code in Argus, then:
+
+```bash
+senda-hooks device register --endpoint https://argus.example --code <registration code>
+```
+
+The command prints a URL and a short code. Open the URL, sign in with your organization SSO and approve the code. The person is bound to the device by that SSO approval. The OS user name is sent only as a self-declared value. An organization API key alone cannot register a device.
+
+After registration every record, discard report, MCP scan and hook decision request carries these headers, computed over the exact request body:
+
+| Header | Content |
+|---|---|
+| `X-Argus-Device-Id` | device identifier |
+| `X-Argus-Device-Ts` | send time in epoch seconds |
+| `X-Argus-Device-Seq` | per-device sequence number |
+| `X-Argus-Device-Sig` | hex HMAC-SHA256 of `argus-device-v1`, device id, ts, seq and the SHA-256 of the body, joined by newlines |
+| `X-Argus-Device-User`, `X-Argus-Device-Host` | self-declared OS user and host name, not signed |
+
+The key is stored in `~/.config/senda-argus/device.json` with owner-only permissions, or in the file named by `SENDA_ARGUS_DEVICE_FILE`. A key file readable by other users is ignored. CI, containers and serverless runtimes have no place for a file: set `SENDA_ARGUS_DEVICE_ID` and `SENDA_ARGUS_DEVICE_SECRET` to a short-lived workload key issued by an admin.
+
+Without a key nothing changes: records are sent unsigned and Argus stores them as unverified until the organization enforces device keys. `senda-hooks device status` shows the registration and `senda-hooks device renew` replaces the key before it expires.
+
 ## Installation
 
 ### Local development install

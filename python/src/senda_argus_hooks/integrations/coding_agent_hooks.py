@@ -29,6 +29,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TextIO
 
+from senda_argus_hooks.core.device_identity import sign_headers
+
 PRODUCTS = (
     "claude_code",
     "codex",
@@ -251,6 +253,7 @@ def _post_json(
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["X-API-Key"] = api_key
+    headers.update(sign_headers(payload))
     req = urllib.request.Request(url, data=payload, method="POST", headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=max(0.1, timeout)) as response:

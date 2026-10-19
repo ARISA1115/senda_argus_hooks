@@ -605,6 +605,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     scan_p.set_defaults(func=cmd_scan_mcp)
 
+    from senda_argus_hooks.cli.device import add_parser as add_device_parser
+
+    add_device_parser(sub)
+
     return parser
 
 

@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from senda_argus_hooks.cli.mcp_configs import ConfiguredServer, read_configured_servers
+from senda_argus_hooks.core.device_identity import sign_headers
 from senda_argus_hooks.core.tool_definitions import normalize_provider_url
 
 SCANNER = "mcp-scanner"
@@ -993,6 +994,7 @@ def send_body(
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["X-API-Key"] = api_key
+    headers.update(sign_headers(data))
     req = urllib.request.Request(
         endpoint.rstrip("/") + SCAN_PATH, data=data, method="POST", headers=headers
     )
