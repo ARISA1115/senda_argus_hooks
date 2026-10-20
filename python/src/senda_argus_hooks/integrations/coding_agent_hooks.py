@@ -80,6 +80,17 @@ POSTCALL_RETRY_DELAY_SEC = 0.5
 TOOL_RESPONSE_MAX_CHARS = 4096
 # 応答の本文を読む上限。
 _RESPONSE_READ_LIMIT = 65536
+# 製品の入力に実行モードの項目 permission_mode を持つと公式の文書に書かれた製品。確認は 2026-10-20。
+# Claude Code: https://code.claude.com/docs/en/hooks の共通の入力
+# Codex: https://learn.chatgpt.com/docs/hooks の PreToolUse の入力
+# Qwen Code: https://qwenlm.github.io/qwen-code-docs/en/users/features/hooks/ の共通の入力
+# Factory: https://docs.factory.com/reference/hooks-reference の共通の入力
+# kiro と junie_cli は、文書だけでは項目の有無を断定できないため、実際の入力で確認するまで読まない。
+PERMISSION_MODE_PRODUCTS = frozenset(
+    {"claude_code", "codex", "qwen_code", "factory_droid"}
+)
+# 送る実行モードの文字数の上限。サーバーの受け取りの上限と同じ値にする。
+PERMISSION_MODE_MAX_CHARS = 64
 
 _CONFIG_KEYS = (
     "SENDA_ARGUS_ENDPOINT",
@@ -120,6 +131,8 @@ class ToolCall:
     tool_use_id: str | None = None
     cwd: str | None = None
     user_email: str | None = None
+    # 製品が決める実行モード。製品の入力に項目が無いときは None で、本文に載せない。
+    permission_mode: str | None = None
     tool_response: Any = None
     has_response: bool = False
 
@@ -287,6 +300,8 @@ def build_request_body(call: ToolCall, config: HookConfig) -> dict[str, Any]:
         body["cwd"] = call.cwd
     if call.user_email:
         body["user_email"] = call.user_email
+    if call.permission_mode:
+        body["permission_mode"] = call.permission_mode[:PERMISSION_MODE_MAX_CHARS]
     return body
 
 
@@ -512,6 +527,19 @@ def coerce_tool_input(value: Any) -> dict[str, Any]:
 
 def optional_str(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
+
+
+def read_permission_mode(product: str, data: dict[str, Any]) -> str | None:
+    """製品の入力から実行モードを読む。項目を持つ製品の、空でない文字列だけを返し、上限で切る。
+
+    値の意味は読まない。許す値の一覧と上限の表はサーバーが持つ。モデルの出力や tool の引数からは読まない。
+    """
+    if product not in PERMISSION_MODE_PRODUCTS:
+        return None
+    value = data.get("permission_mode")
+    if not isinstance(value, str) or not value:
+        return None
+    return value[:PERMISSION_MODE_MAX_CHARS]
 
 
 def required_str(data: dict[str, Any], *keys: str) -> str:
