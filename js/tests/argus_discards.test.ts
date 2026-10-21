@@ -36,7 +36,7 @@ test("records that did not arrive are reported once after the next success", asy
   const reports = captured.filter((c) => c.url.endsWith("/v1/hooks/discards"));
   assert.deepEqual(
     reports.map((r) => r.body),
-    [{ windows: [{ from: BASE, to: BASE + 30, count: 2 }] }],
+    [{ windows: [{ from: BASE, to: BASE + 30, count: 2 }], ranges: [{ session: reports[0]?.body.ranges?.[0]?.session, from: 1, to: 2 }] }],
   );
   assert.deepEqual(exporter.discardWindows, []);
 });
@@ -105,7 +105,7 @@ test("a window count over the receiver limit is clipped, not dropped", async () 
   exporter.emit(event("a", 600));
   await exporter.flush();
   const report = captured.find((c) => c.url.endsWith("/v1/hooks/discards"));
-  assert.deepEqual(report?.body, { windows: [{ from: BASE, to: BASE, count: 100_000 }] });
+  assert.deepEqual(report?.body.windows, [{ from: BASE, to: BASE, count: 100_000 }]);
 });
 
 test("windows stay in time order and an older one added late is inserted in order", () => {

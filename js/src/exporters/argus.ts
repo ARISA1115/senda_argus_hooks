@@ -1,10 +1,13 @@
 import type { EventRecord, Exporter } from "../core/types.js";
 import { fallbackRunId } from "../core/event.js";
 import { signHeaders } from "../deviceIdentity.js";
+import { CHAIN_FIELD, RecordChain, SESSION_END_EVENT } from "../core/recordChain.js";
 
 // 捨てた記録の時間帯を報告する宛先と、持つ時間帯の数と、前の時間帯へ寄せる間隔。
 const DISCARD_PATH = "/v1/hooks/discards";
 const MAX_DISCARD_WINDOWS = 32;
+// 捨てた記録の番号の範囲を持つ数。受け取り側は、宣言された範囲の飛びを、宣言の無い飛びと区別して数える。
+const MAX_DISCARD_RANGES = 64;
 const DISCARD_MERGE_SEC = 60;
 // 受け取り側が受ける時間帯の範囲。送る前に同じ範囲へ切り詰め、範囲外で報告ごと拒まれないようにする。
 const DISCARD_MAX_SPAN = 7 * 86400;
@@ -13,6 +16,7 @@ const DISCARD_MAX_AGE = 30 * 86400;
 const DISCARD_MAX_COUNT = 100_000;
 
 type DiscardWindow = { from: number; to: number; count: number };
+type SeqRange = { session: string; from: number; to: number };
 
 // 時間帯を開始の順を保って足す。前後 DISCARD_MERGE_SEC の内で重なる時間帯は 1 つにまとめる。末尾へ足す
 // だけだと、遅れた記録や時計の補正で古い範囲が来たとき並びが時刻の順でなくなり、上限での退避が離れた 2 つを寄せる。
@@ -58,9 +62,12 @@ export class ArgusExporter implements Exporter {
   // 届かなかった記録の時間帯。送信が回復した後に Argus へ報告する。受け取り側はこの時間帯の中継に
   // だけある記録を、hooks の記録の欠落ではなく取り込みの欠落として数える。
   private discards: DiscardWindow[] = [];
+  private seqRanges: SeqRange[] = [];
   private reporting = false;
+  private readonly chain = new RecordChain();
 
   get ingestUrl(): string { return this.url; }
+  chainPosition(): { session: string; lastSeq: number } { return this.chain.position(); }
   get key(): string { return this.apiKey; }
   get discardWindows(): DiscardWindow[] { return this.discards.map((w) => ({ ...w })); }
 
@@ -75,13 +82,14 @@ export class ArgusExporter implements Exporter {
 
   // 終了の待ち合わせに入れずに送る。canary の送信でプロセスの終了を待たせない。
   emitUntracked(event: EventRecord): void {
-    void this.send(event, true);
+    void this.send(this.chain.stamp(event) as EventRecord, true);
   }
 
   emit(event: EventRecord): void {
     // 送り先に run を指定したときは、計装が付けたプロセスの既定の run より指定を優先する。
     const enriched = this.runId && (!event.run_id || event.run_id === fallbackRunId()) ? { ...event, run_id: this.runId } : event;
-    const task = this.send(enriched).finally(() => this.pending.delete(task));
+    // 通し番号は、記録を捉えた時点で付ける。送信が失敗しても、捨てた記録は番号を持つ。
+    const task = this.send(this.chain.stamp(enriched) as EventRecord).finally(() => this.pending.delete(task));
     this.pending.add(task);
   }
 
@@ -98,6 +106,27 @@ export class ArgusExporter implements Exporter {
     this.discards = boundWindows(addWindow(this.discards, at, at, 1));
   }
 
+  // 捨てた記録の番号の範囲を持つ。同じセッションで続く範囲は 1 つに寄せ、数に上限を置く。
+  private noteSeqRange(session: string, from: number, to: number): void {
+    for (const item of this.seqRanges) {
+      if (item.session === session && from <= item.to + 1 && to >= item.from - 1) {
+        item.from = Math.min(item.from, from);
+        item.to = Math.max(item.to, to);
+        return;
+      }
+    }
+    this.seqRanges.push({ session, from, to });
+    if (this.seqRanges.length > MAX_DISCARD_RANGES) this.seqRanges = this.seqRanges.slice(-MAX_DISCARD_RANGES);
+  }
+
+  private noteLost(event: EventRecord): void {
+    this.noteDiscard((event as { timestamp?: unknown }).timestamp);
+    const meta = (event as unknown as Record<string, unknown>)[CHAIN_FIELD] as { session?: unknown; seq?: unknown } | undefined;
+    if (meta && typeof meta.session === "string" && Number.isInteger(meta.seq)) {
+      this.noteSeqRange(meta.session, meta.seq as number, meta.seq as number);
+    }
+  }
+
   // 持っている時間帯を 1 回だけ報告する。届かなければ戻し、次の成功で送る。
   private static clip(windows: DiscardWindow[], now: number): DiscardWindow[] {
     const out: DiscardWindow[] = [];
@@ -112,11 +141,13 @@ export class ArgusExporter implements Exporter {
   }
 
   private async reportDiscards(): Promise<void> {
-    if (this.reporting || this.discards.length === 0) return;
+    if (this.reporting || (this.discards.length === 0 && this.seqRanges.length === 0)) return;
     this.reporting = true;
     const windows = ArgusExporter.clip(this.discards, Date.now() / 1000);
+    const ranges = this.seqRanges;
     this.discards = [];
-    if (windows.length === 0) {
+    this.seqRanges = [];
+    if (windows.length === 0 && ranges.length === 0) {
       this.reporting = false;
       return;
     }
@@ -125,7 +156,7 @@ export class ArgusExporter implements Exporter {
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     timer?.unref?.();
     try {
-      const body = JSON.stringify({ windows });
+      const body = JSON.stringify({ windows, ranges });
       const res = await fetch(this.discardUrl, {
         method: "POST",
         headers: { ...this.headers(), ...signHeaders(body) },
@@ -142,6 +173,7 @@ export class ArgusExporter implements Exporter {
         let merged = this.discards;
         for (const w of windows) merged = addWindow(merged, w.from, w.to, w.count);
         this.discards = boundWindows(merged);
+        for (const r of ranges) this.noteSeqRange(r.session, r.from, r.to);
       }
       this.reporting = false;
     }
@@ -173,7 +205,7 @@ export class ArgusExporter implements Exporter {
     } else {
       // 接続の失敗と、401、403、429 など拒まれた送信。どちらも届かなかった記録として数え、取り込みが
       // 回復した後に時間帯を報告する。数えないと、受け取り側がその間の中継にだけある記録を hooks の欠落として警報にする。
-      this.noteDiscard((event as { timestamp?: unknown }).timestamp);
+      this.noteLost(event);
     }
   }
 
@@ -181,5 +213,20 @@ export class ArgusExporter implements Exporter {
     await Promise.allSettled([...this.pending]);
   }
 
-  async shutdown(): Promise<void> { await this.flush(); }
+  // 終了の時に、セッションの終了を 1 回だけ送る。記録を 1 件も送っていないときは、送るものが無い。
+  // 終了の通知が無く途切れたセッションを、受け取り側は未終了として数える。
+  async shutdown(): Promise<void> {
+    await this.flush();
+    const event = this.chain.stampEnd((session, lastSeq) => ({
+      event_id: `evt_${session}_end`,
+      event_type: SESSION_END_EVENT,
+      timestamp: new Date().toISOString(),
+      run_id: this.runId ?? fallbackRunId(),
+      status: "success",
+      source: { component: "exporter", sdk: "senda_argus_hooks" },
+      data: { last_seq: lastSeq },
+    }));
+    if (!event) return;
+    await this.send(event as unknown as EventRecord, true);
+  }
 }

@@ -39,11 +39,19 @@ function mac(key: string, parts: string[]): string {
 // サーバと Python の hooks が同じ計算を持つ。三者の試験に同じ入力と期待値を置く。
 export function canaryMac(
   secret: string,
-  args: { agentId: string; bootId: string; seq: number; intervalSec: number; generation: number },
+  args: {
+    agentId: string; bootId: string; seq: number; intervalSec: number; generation: number;
+    chainSession?: string; chainLastSeq?: number;
+  },
 ): string {
-  return mac(secret, [
+  const parts = [
     "canary-beat", args.agentId, args.bootId, String(args.seq), String(args.intervalSec), String(args.generation),
-  ]);
+  ];
+  // 連鎖の位置も署名の対象にする。覆わないと、last_seq の改ざんが、canary 自身の連鎖でしか見えない。
+  if (args.chainSession !== undefined && args.chainLastSeq !== undefined) {
+    parts.push(args.chainSession, String(args.chainLastSeq));
+  }
+  return mac(secret, parts);
 }
 
 export function secretGeneration(secret: string): number | undefined {
@@ -151,10 +159,13 @@ class Canary {
       if (agentId !== this.boundAgent) return false;
       const seq = this.seq;
       this.seq = (this.seq + 1) % MAX_SEQ;
+      const position = exporter.chainPosition();
       probe.data = {
+        chain: { session: position.session, last_seq: position.lastSeq },
         boot_id: this.bootId, seq, interval_sec: this.intervalSec, gen: this.generation,
         mac: canaryMac(this.secret, {
           agentId, bootId: this.bootId, seq, intervalSec: this.intervalSec, generation: this.generation,
+          chainSession: position.session, chainLastSeq: position.lastSeq,
         }),
       };
       exporter.emitUntracked(probe);
