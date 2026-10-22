@@ -12,6 +12,10 @@ import pytest
 from senda_argus_hooks.exporters import create_exporter
 from senda_argus_hooks.exporters.argus import ArgusExporter
 
+# このモジュールの autouse fixture が _enqueue_session_end をクラスごと潰す前に、本来の実装を控えておく。
+# 終了の通知そのものを確かめる試験は、これを使って該当インスタンスだけ元に戻す。
+_REAL_ENQUEUE_SESSION_END = ArgusExporter._enqueue_session_end
+
 
 @pytest.fixture(autouse=True)
 def _chain_state(monkeypatch):
@@ -147,6 +151,69 @@ def test_export_does_not_block_caller():
     release.set()
     exporter.shutdown()
     assert elapsed < 0.5
+
+
+def test_export_keeps_stamp_and_enqueue_order_under_concurrency():
+    """2 スレッドが同時に export しても、番号を付けた順と積む順が揺れない。"""
+    exporter = ArgusExporter({"type": "argus", "endpoint": "http://example"})
+    seen: list = []
+    exporter._send = lambda payload, headers: seen.append(
+        json.loads(payload)["events"][0]["hook_chain"]["seq"]
+    )
+    original_request = exporter._request
+    delayed_once = threading.Event()
+
+    def delayed_request(events, *, chained=False):
+        result = original_request(events, chained=chained)
+        # 錠の中で待たせ、別スレッドが先に番号を付けて積めるかを試す。錠が効いていれば
+        # 別スレッドは _request に入る前に止まり、番号の順と積む順は揺れない。
+        if chained and not delayed_once.is_set():
+            delayed_once.set()
+            time.sleep(0.05)
+        return result
+
+    exporter._request = delayed_request
+
+    def send(event_id):
+        exporter.export([{"event_id": event_id, "data": {}}])
+
+    t1 = threading.Thread(target=send, args=("e1",))
+    t1.start()
+    time.sleep(0.01)  # t1 が錠を取って _request に入るまで待つ
+    t2 = threading.Thread(target=send, args=("e2",))
+    t2.start()
+    t1.join()
+    t2.join()
+    exporter.shutdown()
+    assert seen == [1, 2]
+
+
+def test_shutdown_delivers_the_sentinel_when_the_session_end_fills_the_last_slot(monkeypatch):
+    """終了の通知がキューの最後の空きを使っても、_SHUTDOWN 符号が届きワーカーが止まる。"""
+    import queue as _queue
+    from senda_argus_hooks.exporters import argus as argus_module
+
+    monkeypatch.setattr(argus_module, "_DRAIN_TIMEOUT", 0.5)
+    exporter = ArgusExporter({"type": "argus", "endpoint": "http://example"})
+    # このファイルの autouse fixture が止めている終了の通知を、この試験だけ本来の実装に戻す。
+    monkeypatch.setattr(
+        exporter, "_enqueue_session_end", _REAL_ENQUEUE_SESSION_END.__get__(exporter, ArgusExporter)
+    )
+    exporter._queue = _queue.Queue(maxsize=2)
+    release = threading.Event()
+    sent: list = []
+
+    def slow_send(payload, headers):
+        sent.append(json.loads(payload)["events"][0].get("event_type"))
+        release.wait(2.0)
+
+    exporter._send = slow_send
+    exporter.export([{"event_id": "e1", "event_type": "x", "data": {}}])
+    _wait_until(lambda: len(sent) == 1)  # ワーカーが e1 を取り出し送信中で止まり、キューは空
+    exporter.export([{"event_id": "e2", "event_type": "x", "data": {}}])  # 空き 1 枠を使う
+    threading.Timer(0.1, release.set).start()
+    exporter.shutdown()
+    assert not exporter._worker.is_alive()
 
 
 def test_export_counts_queue_drops():
@@ -733,3 +800,15 @@ def test_windows_are_clipped_to_the_receivers_range():
         now,
     )
     assert clipped == [[now - 1 - 7 * 86400, now - 1, 2.0], [now - 10, now, 3.0]]
+
+
+def test_locks_are_recreated_in_a_forked_child():
+    exp = ArgusExporter({"endpoint": "http://127.0.0.1:9"})
+    # 親のスレッドが錠を持ったまま fork した状態を再現する。子には、その錠を放すスレッドが存在しない。
+    exp._send_order_lock.acquire()
+    exp._worker_lock.acquire()
+    exp._drop_lock.acquire()
+    exp._reset_locks_after_fork()
+    for lock in (exp._send_order_lock, exp._worker_lock, exp._drop_lock):
+        assert lock.acquire(timeout=0.5)
+        lock.release()

@@ -163,6 +163,7 @@ def test_canary_sends_signed_beats_through_the_argus_exporter(collecting):
         assert data["mac"] == onboarding.canary_mac(
             "cs7.s-test", agent_id="agent-1", boot_id=data["boot_id"], seq=data["seq"],
             interval_sec=10, generation=7,
+            chain_session=data["chain"]["session"], chain_last_seq=data["chain"]["last_seq"],
         )
 
 

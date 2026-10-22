@@ -7,12 +7,14 @@ import email.utils
 import http.client
 import json
 import logging
+import os
 import queue
 import sys
 import threading
 import time
 import urllib.error
 import urllib.request
+import weakref
 from typing import Any
 
 from senda_argus_hooks.core.device_identity import reserve_seq, sign_headers
@@ -145,6 +147,22 @@ def _bound_windows(windows: list[list[float]]) -> list[list[float]]:
     return windows
 
 
+_instances: weakref.WeakSet[ArgusExporter] = weakref.WeakSet()
+
+
+def _after_fork_in_child() -> None:
+    """fork した子で、親のスレッドが持っていた錠を作り直す。
+
+    錠を持っていたスレッドは、子には存在しない。そのまま使うと、子の最初の送出が錠を待ち続ける。
+    """
+    for instance in list(_instances):
+        instance._reset_locks_after_fork()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_after_fork_in_child)
+
+
 class ArgusExporter(BaseExporter):
     """Argus 検知エンジンの /v1/agent-runs/ingest エンドポイントへイベントを送信する。
 
@@ -203,8 +221,18 @@ class ArgusExporter(BaseExporter):
         self._seq_discards: list[list[Any]] = []
         # この送り先の記録の連鎖。送り先ごとに別の数え手を持つ。
         self._chain = RecordChain()
+        # 番号を付けてからキューへ積むまでを 1 本の錠で囲む。別のスレッドが先に番号を受け取っても、
+        # 積む順が番号の順と揺れると、受け取り側が記録を失っていないのに偽の飛びを見る。
+        self._send_order_lock = threading.Lock()
+        _instances.add(self)
         # 直近の _send_once が 2xx で受けられたか。再送しない拒否も (None, None) で返るので別に持つ。
         self._last_ingest_ok = False
+
+    def _reset_locks_after_fork(self) -> None:
+        """fork した子で、錠を新しく作る。錠を持っていた親のスレッドは、子に存在しない。"""
+        self._send_order_lock = threading.Lock()
+        self._worker_lock = threading.Lock()
+        self._drop_lock = threading.Lock()
 
     def _record_drop(self, count: int) -> None:
         """送出キュー満杯で捨てたイベント数を計数し、警告を一定間隔に間引いてログに残す。
@@ -601,16 +629,18 @@ class ArgusExporter(BaseExporter):
     def export(self, events: list[dict[str, Any]]) -> None:
         if not events:
             return
-        payload, headers = self._request(events, chained=True)
-        # 送信をキューへ積み、単一ワーカーが FIFO 順にホスト経路の外で送る。キューが
-        # 満杯なら捨てて呼び出し側を待たせない。ワーカーは 1 本に限定する。
-        self._ensure_worker()
-        try:
-            self._queue.put_nowait((payload, headers))
-        except queue.Full:
-            self._record_drop(len(events))
-            self._note_discard(self._event_times(events), len(events))
-            self._note_seq_ranges(self._payload_seq_ranges(payload))
+        # 番号を付けてからキューへ積むまでを 1 本の錠で囲み、番号の順と積む順を揺らさない。
+        with self._send_order_lock:
+            payload, headers = self._request(events, chained=True)
+            # 送信をキューへ積み、単一ワーカーが FIFO 順にホスト経路の外で送る。キューが
+            # 満杯なら捨てて呼び出し側を待たせない。ワーカーは 1 本に限定する。
+            self._ensure_worker()
+            try:
+                self._queue.put_nowait((payload, headers))
+            except queue.Full:
+                self._record_drop(len(events))
+                self._note_discard(self._event_times(events), len(events))
+                self._note_seq_ranges(self._payload_seq_ranges(payload))
 
     def chain_position(self) -> tuple[str, int]:
         """(セッション, 直近の番号)。生存の通知に載せる。"""
@@ -664,8 +694,11 @@ class ArgusExporter(BaseExporter):
         self._enqueue_session_end(worker)
         if worker is None or not worker.is_alive():
             return
+        # ワーカーは FIFO を引き取りながら draining 中なので、満杯でも空きはすぐ空く。put_nowait だと
+        # 直前の終了通知がちょうど最後の 1 枠を使った場合に即座に Full になり、符を積めずワーカーが
+        # get() で永久に待ち続ける。空きを待って積み、確実に届ける。
         with contextlib.suppress(queue.Full):
-            self._queue.put_nowait(_SHUTDOWN)
+            self._queue.put(_SHUTDOWN, timeout=_DRAIN_TIMEOUT)
         worker.join(timeout=_DRAIN_TIMEOUT)
         # 待つ時間の内に送り切れなければ、送り直しの待ちを打ち切る。打ち切った分は送れなかった件数に
         # 数えてログに出す。

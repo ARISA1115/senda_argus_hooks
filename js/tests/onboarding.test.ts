@@ -89,6 +89,7 @@ test("canary beats through the Argus exporter only while collecting", async () =
     assert.equal(b.data.gen, 7);
     assert.equal(b.data.mac, canaryMac("cs7.s-test", {
       agentId: "agent-1", bootId: b.data.boot_id, seq: b.data.seq, intervalSec: 10, generation: 7,
+      chainSession: b.data.chain.session, chainLastSeq: b.data.chain.last_seq,
     }));
   }
   await shutdown();

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { getContext, runWithContext, newRunId } from "./core/context.js";
 import { newEvent, runtimeMetadata } from "./core/event.js";
+import { SESSION_END_EVENT } from "./core/recordChain.js";
 import { sanitizeEvent } from "./core/redaction.js";
 import type { EventRecord, Exporter, ExporterConfig, RegisterOptions, RuntimeConfig } from "./core/types.js";
 import { JsonlExporter } from "./exporters/jsonl.js";
@@ -51,7 +52,20 @@ function exporterFromConfig(value: Exporter | ExporterConfig): Exporter {
     case "jsonl": return new JsonlExporter(value.path);
     case "stdout": return new StdoutExporter();
     case "null": return new NullExporter();
-    case "argus": return new ArgusExporter(value.endpoint, value.apiKey, value.runId, value.timeoutMs);
+    case "argus": {
+      const exporter = new ArgusExporter(value.endpoint, value.apiKey, value.runId, value.timeoutMs);
+      // セッションの終了の通知は、通常の記録と同じ項目で組み立てる。項目が足りないと、受け取り側が拒む。
+      exporter.sessionEnd = (session, lastSeq) => {
+        const event = buildEventContained(SESSION_END_EVENT, {
+          source: { component: "exporter", sdk: "senda_argus_hooks" },
+          data: { last_seq: lastSeq },
+          status: "success"
+        });
+        if (!config.runId) event.run_id = `run_session_end_${session}`;
+        return event;
+      };
+      return exporter;
+    }
     default: throw new Error(`Unsupported exporter type: ${String((value as any)?.type)}`);
   }
 }
