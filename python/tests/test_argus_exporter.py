@@ -800,3 +800,15 @@ def test_windows_are_clipped_to_the_receivers_range():
         now,
     )
     assert clipped == [[now - 1 - 7 * 86400, now - 1, 2.0], [now - 10, now, 3.0]]
+
+
+def test_locks_are_recreated_in_a_forked_child():
+    exp = ArgusExporter({"endpoint": "http://127.0.0.1:9"})
+    # 親のスレッドが錠を持ったまま fork した状態を再現する。子には、その錠を放すスレッドが存在しない。
+    exp._send_order_lock.acquire()
+    exp._worker_lock.acquire()
+    exp._drop_lock.acquire()
+    exp._reset_locks_after_fork()
+    for lock in (exp._send_order_lock, exp._worker_lock, exp._drop_lock):
+        assert lock.acquire(timeout=0.5)
+        lock.release()

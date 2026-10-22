@@ -7,12 +7,14 @@ import email.utils
 import http.client
 import json
 import logging
+import os
 import queue
 import sys
 import threading
 import time
 import urllib.error
 import urllib.request
+import weakref
 from typing import Any
 
 from senda_argus_hooks.core.device_identity import reserve_seq, sign_headers
@@ -145,6 +147,22 @@ def _bound_windows(windows: list[list[float]]) -> list[list[float]]:
     return windows
 
 
+_instances: weakref.WeakSet[ArgusExporter] = weakref.WeakSet()
+
+
+def _after_fork_in_child() -> None:
+    """fork した子で、親のスレッドが持っていた錠を作り直す。
+
+    錠を持っていたスレッドは、子には存在しない。そのまま使うと、子の最初の送出が錠を待ち続ける。
+    """
+    for instance in list(_instances):
+        instance._reset_locks_after_fork()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_after_fork_in_child)
+
+
 class ArgusExporter(BaseExporter):
     """Argus 検知エンジンの /v1/agent-runs/ingest エンドポイントへイベントを送信する。
 
@@ -206,8 +224,15 @@ class ArgusExporter(BaseExporter):
         # 番号を付けてからキューへ積むまでを 1 本の錠で囲む。別のスレッドが先に番号を受け取っても、
         # 積む順が番号の順と揺れると、受け取り側が記録を失っていないのに偽の飛びを見る。
         self._send_order_lock = threading.Lock()
+        _instances.add(self)
         # 直近の _send_once が 2xx で受けられたか。再送しない拒否も (None, None) で返るので別に持つ。
         self._last_ingest_ok = False
+
+    def _reset_locks_after_fork(self) -> None:
+        """fork した子で、錠を新しく作る。錠を持っていた親のスレッドは、子に存在しない。"""
+        self._send_order_lock = threading.Lock()
+        self._worker_lock = threading.Lock()
+        self._drop_lock = threading.Lock()
 
     def _record_drop(self, count: int) -> None:
         """送出キュー満杯で捨てたイベント数を計数し、警告を一定間隔に間引いてログに残す。
