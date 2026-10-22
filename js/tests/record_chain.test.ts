@@ -4,6 +4,8 @@ import { createHash } from "node:crypto";
 import { CHAIN_FIELD, RecordChain, digestOf } from "../src/core/recordChain.js";
 import { ArgusExporter } from "../src/exporters/argus.js";
 import { canaryMac } from "../src/onboarding.js";
+import { register } from "../src/register.js";
+import { emitEvent, shutdown } from "../src/runtime.js";
 
 // 受け取り側が書く式を、実装を使わずに、契約の文面どおりに書く。Python の hooks と同じ入力で同じ値になる。
 function independentDigest(event: Record<string, unknown>): string {
@@ -106,6 +108,8 @@ test("shutdown sends one session end after the records and not twice", async () 
     return { ok: true, status: 200, json: async () => ({}) };
   };
   const exp = new ArgusExporter("http://127.0.0.1:1");
+  exp.sessionEnd = (session, lastSeq) =>
+    ({ event_id: `evt_${session}_end`, event_type: "hook_session_end", data: { last_seq: lastSeq } }) as any;
   exp.emit({ event_id: "a", event_type: "t" } as any);
   await exp.shutdown();
   await exp.shutdown();
@@ -121,4 +125,63 @@ test("the canary mac covers the chain position", () => {
   const chained = canaryMac("cs1.fixed", { ...args, chainSession: "s".repeat(32), chainLastSeq: 5 });
   assert.notEqual(plain, chained);
   assert.notEqual(chained, canaryMac("cs1.fixed", { ...args, chainSession: "s".repeat(32), chainLastSeq: 6 }));
+});
+
+test("the session end is built with the full event schema through the runtime", async () => {
+  const bodies: any[] = [];
+  (globalThis as any).fetch = async (_url: string, init: any) => {
+    bodies.push(JSON.parse(init.body));
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+  register({ project: "chain-end", exporters: [{ type: "argus", endpoint: "http://127.0.0.1:1" }] }, {});
+  emitEvent("probe");
+  await shutdown();
+  const end = bodies.flatMap((b) => b.events ?? []).find((e: any) => e.event_type === "hook_session_end");
+  assert.ok(end);
+  for (const field of ["schema_version", "event_id", "trace_id", "span_id", "project", "environment", "actor", "security", "runtime", "run_id", "agent_id"]) {
+    assert.ok(field in end, `${field} is missing`);
+  }
+  assert.equal(end.data.last_seq, 1);
+  assert.equal(end[CHAIN_FIELD].seq, 2);
+  assert.match(end.run_id, /^(run_session_end_|run_)/);
+});
+
+test("a canary that did not arrive is declared as a discarded range", async () => {
+  let ingests = 0;
+  const bodies: any[] = [];
+  (globalThis as any).fetch = async (url: string, init: any) => {
+    bodies.push({ url, body: JSON.parse(init.body) });
+    if (url.endsWith("/v1/hooks/discards")) return { ok: true, status: 200 };
+    ingests += 1;
+    if (ingests === 1) throw new Error("connection refused");
+    return { ok: true, status: 200 };
+  };
+  const exp = new ArgusExporter("http://argus.example", "key");
+  exp.emitUntracked({ event_id: "canary", event_type: "canary", timestamp: new Date().toISOString() } as any);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  exp.emit({ event_id: "next", event_type: "t", timestamp: new Date().toISOString() } as any);
+  await exp.flush();
+  const report = bodies.find((b) => String(b.url).endsWith("/v1/hooks/discards"));
+  assert.ok(report);
+  assert.deepEqual(report.body.ranges.map((r: any) => [r.from, r.to]), [[1, 1]]);
+});
+
+test("numbers are written the way the Python verifier writes them", () => {
+  const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+  const cases: Array<[number, string]> = [
+    [1e-7, "1e-07"],
+    [0.00001, "1e-05"],
+    [0.0001, "0.0001"],
+    [0.1, "0.1"],
+    [1.2345e-5, "1.2345e-05"],
+    [-2.5e-7, "-2.5e-07"],
+    [123.456, "123.456"],
+    [1e21, "1e+21"],
+    [1e20, "100000000000000000000"],
+    [100, "100"],
+    [-0, "0"],
+  ];
+  for (const [value, text] of cases) {
+    assert.equal(digestOf({ n: value }), sha(`{"n":${text}}`), `${value}`);
+  }
 });

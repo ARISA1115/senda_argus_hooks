@@ -1,7 +1,7 @@
 import type { EventRecord, Exporter } from "../core/types.js";
 import { fallbackRunId } from "../core/event.js";
 import { signHeaders } from "../deviceIdentity.js";
-import { CHAIN_FIELD, RecordChain, SESSION_END_EVENT } from "../core/recordChain.js";
+import { CHAIN_FIELD, RecordChain } from "../core/recordChain.js";
 
 // 捨てた記録の時間帯を報告する宛先と、持つ時間帯の数と、前の時間帯へ寄せる間隔。
 const DISCARD_PATH = "/v1/hooks/discards";
@@ -65,6 +65,8 @@ export class ArgusExporter implements Exporter {
   private seqRanges: SeqRange[] = [];
   private reporting = false;
   private readonly chain = new RecordChain();
+  // セッションの終了の通知を、通常の記録と同じ項目で組み立てる関数。runtime が、設定を持つ側で渡す。
+  sessionEnd?: (session: string, lastSeq: number) => EventRecord;
 
   get ingestUrl(): string { return this.url; }
   chainPosition(): { session: string; lastSeq: number } { return this.chain.position(); }
@@ -199,7 +201,11 @@ export class ArgusExporter implements Exporter {
     } finally {
       clearTimeout(timer);
     }
-    if (untracked) return;
+    if (untracked) {
+      // 届かなかった番号は、捨てた記録として宣言する。宣言が無いと、受け取り側は番号の飛びを偽の欠落と見る。
+      if (!delivered) this.noteLost(event);
+      return;
+    }
     if (delivered) {
       await this.reportDiscards();
     } else {
@@ -217,15 +223,9 @@ export class ArgusExporter implements Exporter {
   // 終了の通知が無く途切れたセッションを、受け取り側は未終了として数える。
   async shutdown(): Promise<void> {
     await this.flush();
-    const event = this.chain.stampEnd((session, lastSeq) => ({
-      event_id: `evt_${session}_end`,
-      event_type: SESSION_END_EVENT,
-      timestamp: new Date().toISOString(),
-      run_id: this.runId ?? fallbackRunId(),
-      status: "success",
-      source: { component: "exporter", sdk: "senda_argus_hooks" },
-      data: { last_seq: lastSeq },
-    }));
+    const build = this.sessionEnd;
+    if (!build) return;
+    const event = this.chain.stampEnd((session, lastSeq) => build(session, lastSeq));
     if (!event) return;
     await this.send(event as unknown as EventRecord, true);
   }

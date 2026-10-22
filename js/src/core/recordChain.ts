@@ -20,9 +20,32 @@ function compareUtf8(a: string, b: string): number {
 export const CHAIN_FIELD = "hook_chain";
 export const SESSION_END_EVENT = "hook_session_end";
 
+// 数の表記は、受け取り側が本文を読んだ後の値に合わせる。本文に小数点も指数も無い数は整数として読まれ、
+// ある数は浮動小数として読まれる。浮動小数は Python の repr と同じ表記にする。JavaScript の表記とは、
+// 指数へ切り替える桁と、指数の桁数が異なる。例として 0.00001 は 1e-05、1e-7 は 1e-07 になる。
+function pythonNumber(n: number): string {
+  const text = JSON.stringify(n);
+  if (text === undefined || text === "null") return "null";
+  if (!/[.eE]/.test(text)) return text;
+  const [mantissa, exponentText] = n.toExponential().split("e");
+  const exponent = Number(exponentText);
+  const sign = mantissa.startsWith("-") ? "-" : "";
+  const digits = mantissa.replace("-", "").replace(".", "");
+  if (exponent >= -4 && exponent < 16) {
+    if (exponent >= 0) {
+      const whole = digits.padEnd(exponent + 1, "0").slice(0, exponent + 1);
+      return `${sign}${whole}.${digits.slice(exponent + 1) || "0"}`;
+    }
+    return `${sign}0.${"0".repeat(-exponent - 1)}${digits}`;
+  }
+  const head = digits.length > 1 ? `${digits[0]}.${digits.slice(1)}` : digits;
+  return `${sign}${head}e${exponent < 0 ? "-" : "+"}${String(Math.abs(exponent)).padStart(2, "0")}`;
+}
+
 // 直列化は Python の json.dumps(sort_keys=True, separators=(",", ":"), ensure_ascii=False) に合わせる。
 // キーの並びは、Python の文字列の比較 (コードポイントの順) と同じ、UTF-8 のバイトの順にする。
 function canonical(value: unknown): string {
+  if (typeof value === "number") return pythonNumber(value);
   if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
   if (Array.isArray(value)) return `[${value.map((v) => canonical(v === undefined ? null : v)).join(",")}]`;
   const record = value as Record<string, unknown>;
