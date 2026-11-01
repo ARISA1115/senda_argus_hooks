@@ -1403,3 +1403,20 @@ def test_userinfo_redaction_keeps_scheme_and_host():
         lambda m: m.group(1) + "R@", "x https://u:p@h/p mcp+ssh://k@h"
     )
     assert out == "x https://R@h/p mcp+ssh://R@h"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "-https://u:p@host",
+        "1https://u:p@host",
+        "a.b+c-https://u:p@host",
+        "x" * 5000 + "https://u:p@host",
+    ],
+)
+def test_userinfo_redaction_still_applies_after_scheme_like_characters(text):
+    from senda_argus_hooks.cli.scan_mcp import _USERINFO_RE
+
+    out = _USERINFO_RE.sub(lambda m: m.group(1) + "R@", text)
+    assert "u:p" not in out
+    assert out.endswith("https://R@host")

@@ -188,9 +188,9 @@ def _redact_json(value: Any) -> Any:
     return value
 
 
-_USERINFO_RE = re.compile(
-    r"((?<![A-Za-z0-9+.\-])[A-Za-z][A-Za-z0-9+.\-]*://)[^/@\s'\"]*@"
-)
+# スキームの長さに上限を置く。上限が無いと、スキームに使える文字が長く続く入力で、位置ごとに末尾まで読み、
+# 2 乗の時間になる。実在のスキームは短く、上限を超える並びは、末尾の 32 文字をスキームとして読む。
+_USERINFO_RE = re.compile(r"([A-Za-z][A-Za-z0-9+.\-]{0,31}://)[^/@\s'\"]*@")
 _PIECE_SPLIT_RE = re.compile(r"[;&\s]+")
 _QUOTES = "'\"`"
 
