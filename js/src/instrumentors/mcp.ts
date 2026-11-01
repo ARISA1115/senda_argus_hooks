@@ -6,7 +6,7 @@ import { dataSourceHash, deriveMcpProfileId, derivePurposeId, mcpDataSourceProfi
 import { emitEvent, getConfig, observe } from "../runtime.js";
 import { getMcpToolDirectory, toolNamesOf, UNNAMED_MCP_SERVER } from "../core/mcp_tools.js";
 import { normalizeProviderUrl, toolDefinitionHashes } from "../core/tool_definitions.js";
-import { resultScanFields } from "../core/result_scan.js";
+import { argumentsScanFields, resultScanFields } from "../core/result_scan.js";
 
 const patched = Symbol.for("senda.argus.mcp.patched");
 
@@ -105,6 +105,8 @@ export function instrumentMCP(client: any, metadata: McpMetadata = {}): boolean 
         data_source_hash: dataSourceHash(purposeProfile), arguments_hash: sha256Value(request)
       };
       if (cfg.captureArguments) meta.arguments = request;
+      // 本文を送らない既定でも、引数に置かれた命令や資格情報の名前が、引数を読む規則に届くようにする。
+      if (cfg.scanArguments) Object.assign(meta, argumentsScanFields(request?.arguments));
       // 識別子は引数のダイジェストと記録した引数を作った後に載せる。載せる前の要求で作るので、
       // 同じ呼び出しのダイジェストが識別子の値で変わらない。
       const attached = withCallId(request);

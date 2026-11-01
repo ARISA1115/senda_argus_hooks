@@ -3,7 +3,7 @@ import { sha256Value } from "../core/hashing.js";
 import { newTraceId, runWithContext } from "../core/context.js";
 import { emitEvent, getConfig } from "../runtime.js";
 import { safeValue } from "../instrumentors/common.js";
-import { resultScanFields } from "../core/result_scan.js";
+import { argumentsScanFields, resultScanFields } from "../core/result_scan.js";
 
 const starts = new Map<string, number>();
 const traces = new Map<string, string>();
@@ -86,7 +86,7 @@ export class SendaArgusLangChainCallbackHandler {
     const traceId = begin(runId);
     return runWithContext({ traceId, runId: key(runId) || undefined }, () => emitEvent("tool_call.requested", {
       source: { component: "integration", framework: "langchain", sdk: "langchain", operation: "tool" },
-      data: { tool: { framework: "langchain", name: tool?.name ?? tool?.id?.at?.(-1), arguments: maybeBody(input, getConfig().captureArguments) } },
+      data: { tool: { framework: "langchain", name: tool?.name ?? tool?.id?.at?.(-1), arguments: maybeBody(input, getConfig().captureArguments), ...(getConfig().scanArguments ? argumentsScanFields(input) : {}) } },
       status: "requested"
     }));
   }

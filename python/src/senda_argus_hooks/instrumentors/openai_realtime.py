@@ -63,7 +63,7 @@ from senda_argus_hooks.core.instruction_files import (
 )
 from senda_argus_hooks.core.local_transcription import Transcriber
 from senda_argus_hooks.core.mcp_tools import offered_alternatives
-from senda_argus_hooks.core.result_scan import input_scan_fields, result_scan_fields
+from senda_argus_hooks.core.result_scan import arguments_scan_fields, input_scan_fields, result_scan_fields
 from senda_argus_hooks.core.runtime import emit_event, get_config
 
 from .base import BaseInstrumentor, audit_guard
@@ -612,6 +612,8 @@ class RealtimeSessionRecorder:
             tool["call_id"] = call_id
         if cfg.capture_arguments:
             tool["arguments"] = arguments
+        if cfg.scan_arguments:
+            tool.update(arguments_scan_fields(arguments))
         self._emit("tool_call.requested", {"tool": tool}, operation="realtime.function_call", status="start")
         if offered:
             self._emit(
@@ -665,6 +667,8 @@ class RealtimeSessionRecorder:
             mcp.update(written)
         if cfg.capture_arguments:
             mcp["arguments"] = parsed if parsed is not None else arguments
+        if cfg.scan_arguments:
+            mcp.update(arguments_scan_fields(parsed if parsed is not None else arguments))
         if cfg.capture_result and output is not None:
             mcp["result"] = output
         if cfg.scan_result and output is not None:

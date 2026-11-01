@@ -75,6 +75,26 @@ export function resultScanFields(value: unknown): ResultScanFields {
   }
 }
 
+export interface ArgumentsScanFields {
+  arguments_scan?: string;
+  arguments_scan_truncated?: boolean;
+  arguments_scan_length?: number;
+  arguments_scan_failed?: boolean;
+}
+
+// 呼び出しの引数から、検知の走査だけに使う文と印を作る。秘匿と上限は戻り値の走査の文と同じ実装を通す。
+// 導出を 2 つ持たない。引数の側だけ別に書くと、秘匿か上限の片方だけが変わったときに、秘密が通るか、
+// 長い前置きの後ろの命令が落ちる。
+export function argumentsScanFields(value: unknown): ArgumentsScanFields {
+  const fields = resultScanFields(value);
+  const out: ArgumentsScanFields = {};
+  if (fields.result_scan !== undefined) out.arguments_scan = fields.result_scan;
+  if (fields.result_scan_truncated) out.arguments_scan_truncated = true;
+  if (fields.result_scan_length !== undefined) out.arguments_scan_length = fields.result_scan_length;
+  if (fields.result_scan_failed) out.arguments_scan_failed = true;
+  return out;
+}
+
 export function resultScanText(value: unknown): string | undefined {
   return resultScanFields(value).result_scan;
 }

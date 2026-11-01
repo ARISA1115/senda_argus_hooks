@@ -3,10 +3,18 @@ export const REDACT_FIELDS: ReadonlySet<string> = new Set([
   "access_token", "refresh_token", "cookie", "set-cookie", "x-api-key"
 ]);
 
+// 値の形で分かる資格情報。鍵名が一般の項目へ渡されても、平文で通さない。Python の
+// DEFAULT_REDACT_PATTERNS と同じ形式をそろえる。bearer だけは接頭辞を残して以降を伏せる。
 const patterns: Array<[RegExp, string]> = [
   [/sk-[A-Za-z0-9_-]{12,}/g, "***REDACTED***"],
   [/AKIA[0-9A-Z]{16}/g, "***REDACTED***"],
-  [/(bearer\s+)[A-Za-z0-9._-]+/gi, "$1***REDACTED***"]
+  [/(bearer\s+)[A-Za-z0-9._-]+/gi, "$1***REDACTED***"],
+  [/gh[pousr]_[A-Za-z0-9]{36}/g, "***REDACTED***"],
+  [/github_pat_[A-Za-z0-9_]{22,}/g, "***REDACTED***"],
+  [/(?:xox[baprse]|xapp)-[A-Za-z0-9-]{10,}/g, "***REDACTED***"],
+  [/AIza[0-9A-Za-z_-]{35}/g, "***REDACTED***"],
+  [/ya29\.[0-9A-Za-z_-]{20,}/g, "***REDACTED***"],
+  [/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, "***REDACTED***"]
 ];
 
 // 再帰は呼び出しのスタックを使うため、深すぎる入れ子と循環は畳んで目印に置き換える。
