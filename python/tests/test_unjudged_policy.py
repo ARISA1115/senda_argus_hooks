@@ -64,6 +64,16 @@ class _FakeArgus(BaseHTTPRequestHandler):
         self._reply(spec)
 
 
+def data_calls(httpd) -> int:
+    """データの記録を運んだ送信の数。シャットダウンのたびに送るセッション終了の通知は数えない。"""
+    count = 0
+    for body in httpd.captured:
+        events = body.get("events") if isinstance(body, dict) else body
+        if any(e.get("event_type") != "hook_session_end" for e in (events or [])):
+            count += 1
+    return count
+
+
 @pytest.fixture
 def fake_argus():
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), _FakeArgus)
@@ -613,7 +623,7 @@ def test_export_terminal_code_is_not_retried_and_warns(fake_argus, caplog):
     exporter = ArgusExporter({"endpoint": endpoint, "api_key": "k", "retry_max_attempts": 3, "retry_base_delay": 0})
     exporter.export([{"event_id": "e1", "event_type": "x"}])
     exporter.shutdown()
-    assert httpd.ingest_calls == 1
+    assert data_calls(httpd) == 1
     assert "送り直しません: actions_exhausted" in caplog.text
 
 
@@ -624,7 +634,7 @@ def test_export_hold_503_is_retried(fake_argus):
     exporter = ArgusExporter({"endpoint": endpoint, "api_key": "k", "retry_max_attempts": 3, "retry_base_delay": 0})
     exporter.export([{"event_id": "e1", "event_type": "x"}])
     exporter.shutdown()
-    assert httpd.ingest_calls == 2
+    assert data_calls(httpd) == 2
     assert exporter.unsent_events() == 0
 
 
