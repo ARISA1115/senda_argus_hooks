@@ -144,6 +144,30 @@ def input_scan_fields(value: Any) -> dict[str, Any]:
     )
 
 
+# 呼び出しの引数から作る走査の文を載せる項目の名前。引数の本文は capture_arguments が決め、この文は
+# 検知の走査だけに使う。Argus は保存せず、判定の後に捨てる。
+ARGUMENTS_SCAN_FIELD = "arguments_scan"
+ARGUMENTS_TRUNCATED_FIELD = "arguments_scan_truncated"
+ARGUMENTS_LENGTH_FIELD = "arguments_scan_length"
+ARGUMENTS_FAILED_FIELD = "arguments_scan_failed"
+
+
+def arguments_scan_fields(value: Any) -> dict[str, Any]:
+    """呼び出しの引数から、走査の文と印を作る。秘匿と上限は戻り値の走査の文と同じ実装を通す。
+
+    引数の本文を送らない既定の導入では、シェルの命令や資格情報のファイルの名前を引数へ置いた呼び出しが、
+    引数を読む規則に一度も届かない。導出を 2 つ持たない。引数の側だけ別に書くと、秘匿か上限の片方だけが
+    変わったときに、秘密が通るか、長い前置きの後ろの指示が落ちる。
+    """
+    return _scan_fields(
+        value,
+        ARGUMENTS_SCAN_FIELD,
+        ARGUMENTS_TRUNCATED_FIELD,
+        ARGUMENTS_LENGTH_FIELD,
+        ARGUMENTS_FAILED_FIELD,
+    )
+
+
 def _scan_fields(
     value: Any, scan_field: str, truncated_field: str, length_field: str, failed_field: str
 ) -> dict[str, Any]:

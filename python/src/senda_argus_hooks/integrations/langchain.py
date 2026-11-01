@@ -12,7 +12,7 @@ from senda_argus_hooks.core.instruction_files import (
     system_prompt_pair_digests,
     system_prompt_semantic_digests,
 )
-from senda_argus_hooks.core.result_scan import result_scan_fields
+from senda_argus_hooks.core.result_scan import arguments_scan_fields, result_scan_fields
 from senda_argus_hooks.core.runtime import emit_event, get_config
 
 try:  # Optional dependency. Unit tests use this module without LangChain installed.
@@ -172,6 +172,8 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
         }
         if get_config().capture_arguments:
             tool["arguments"] = input_str
+        if get_config().scan_arguments:
+            tool.update(arguments_scan_fields(input_str))
         emit_event(
             "tool_call.requested",
             source={"component": "integration", "sdk": self.framework, "operation": "on_tool_start"},

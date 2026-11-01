@@ -37,7 +37,7 @@ from senda_argus_hooks.core.resource_access import (
     classify_read_resource,
     classify_resource_access,
 )
-from senda_argus_hooks.core.result_scan import result_scan_fields, scan_source
+from senda_argus_hooks.core.result_scan import arguments_scan_fields, result_scan_fields, scan_source
 from senda_argus_hooks.core.runtime import effective_agent_id, emit_event, get_config
 from senda_argus_hooks.core.tool_definitions import (
     normalize_provider_url,
@@ -482,6 +482,9 @@ def _mcp_metadata(obj, operation: str, args, kwargs) -> dict[str, Any]:
         )
     if cfg.capture_arguments:
         meta["arguments"] = {**arguments, "purpose_id": purpose_id, "data_source_hash": source_hash}
+    if cfg.scan_arguments and operation == "call_tool":
+        # 本文を送らない既定でも、引数に置かれた命令や資格情報の名前が、引数を読む規則に届くようにする。
+        meta.update(arguments_scan_fields(arguments.get("arguments")))
     return meta
 
 

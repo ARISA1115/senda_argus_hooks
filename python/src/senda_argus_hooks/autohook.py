@@ -123,6 +123,7 @@ def bootstrap() -> dict[str, Any] | None:
             capture_arguments=_bool("SENDA_ARGUS_CAPTURE_ARGUMENTS", False),
             capture_result=_bool("SENDA_ARGUS_CAPTURE_RESULT", False),
             scan_result=_bool("SENDA_ARGUS_SCAN_RESULT", True),
+            scan_arguments=_bool("SENDA_ARGUS_SCAN_ARGUMENTS", True),
             scan_input=_bool("SENDA_ARGUS_SCAN_INPUT", True),
             capture_hash=_bool("SENDA_ARGUS_CAPTURE_HASH", True),
             redact=_bool("SENDA_ARGUS_REDACT", True),
