@@ -188,7 +188,9 @@ def _redact_json(value: Any) -> Any:
     return value
 
 
-_USERINFO_RE = re.compile(r"([A-Za-z][A-Za-z0-9+.\-]*://)[^/@\s'\"]*@")
+_USERINFO_RE = re.compile(
+    r"((?<![A-Za-z0-9+.\-])[A-Za-z][A-Za-z0-9+.\-]*://)[^/@\s'\"]*@"
+)
 _PIECE_SPLIT_RE = re.compile(r"[;&\s]+")
 _QUOTES = "'\"`"
 
