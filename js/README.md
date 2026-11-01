@@ -48,6 +48,7 @@ register({
   captureArguments: true,
   captureResult: false,
   scanResult: true, // detection-only scan text of tool results; Argus does not store it
+  scanArguments: false, // off by default; when true, a redacted scan text of tool call arguments is sent for detection only (the text still carries argument strings)
   redact: true
 }, {
   openai,

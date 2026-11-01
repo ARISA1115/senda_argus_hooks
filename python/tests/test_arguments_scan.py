@@ -98,10 +98,10 @@ def test_long_text_keeps_head_and_tail():
     assert fields["arguments_scan_truncated"] is True
 
 
-def test_mcp_call_tool_sends_scan_text_without_the_body_by_default(tmp_path, monkeypatch):
+def test_mcp_call_tool_sends_scan_text_without_the_body_when_enabled(tmp_path, monkeypatch):
     session_cls = _install_fake_mcp(monkeypatch)
     path = tmp_path / "events.jsonl"
-    _register_mcp_only(path, instrument_argus_sdk=False)
+    _register_mcp_only(path, instrument_argus_sdk=False, scan_arguments=True)
     try:
         asyncio.run(session_cls().call_tool("run", {"cmd": COMMAND}))
     finally:
@@ -115,22 +115,25 @@ def test_mcp_call_tool_sends_scan_text_without_the_body_by_default(tmp_path, mon
         assert COMMAND in mcp[ARGUMENTS_SCAN_FIELD]
 
 
-def test_mcp_call_tool_omits_scan_text_when_disabled(tmp_path, monkeypatch):
+def test_mcp_call_tool_sends_no_argument_text_by_default(tmp_path, monkeypatch):
+    """既定は、引数の文字を送らない。秘匿しても、書き込む内容やメッセージの本文を含むため、導入側が選ぶ。"""
     session_cls = _install_fake_mcp(monkeypatch)
     path = tmp_path / "events.jsonl"
-    _register_mcp_only(path, instrument_argus_sdk=False, scan_arguments=False)
+    _register_mcp_only(path, instrument_argus_sdk=False)
     try:
         asyncio.run(session_cls().call_tool("run", {"cmd": COMMAND}))
     finally:
         shutdown()
     for event in _read_events(path):
         assert ARGUMENTS_SCAN_FIELD not in event["data"].get("mcp", {})
+        assert "arguments" not in event["data"].get("mcp", {})
+        assert COMMAND not in json.dumps(event)
 
 
 def test_list_tools_carries_no_arguments_scan(tmp_path, monkeypatch):
     session_cls = _install_fake_mcp(monkeypatch)
     path = tmp_path / "events.jsonl"
-    _register_mcp_only(path, instrument_argus_sdk=False)
+    _register_mcp_only(path, instrument_argus_sdk=False, scan_arguments=True)
     try:
         asyncio.run(session_cls().list_tools())
     finally:
@@ -145,6 +148,7 @@ def test_langchain_tool_start_sends_scan_text_without_the_body(tmp_path):
         project="test-arguments-scan-lc",
         exporters=[{"type": "jsonl", "path": str(path)}],
         auto_instrument=False,
+        scan_arguments=True,
     )
     try:
         handler = SendaArgusCallbackHandler()
@@ -156,3 +160,74 @@ def test_langchain_tool_start_sends_scan_text_without_the_body(tmp_path):
     tool = started[0]["data"]["tool"]
     assert "arguments" not in tool
     assert COMMAND in tool[ARGUMENTS_SCAN_FIELD]
+
+
+def test_openai_agents_function_span_sends_the_arguments_with_the_completion(tmp_path):
+    """function span の入力は、開始の後に設定される。開始の記録には引数が無く、完了の記録で届く。"""
+    import types as _types
+
+    from senda_argus_hooks.integrations.openai_agents import SendaArgusOpenAIAgentsProcessor
+
+    path = tmp_path / "events.jsonl"
+    register(
+        project="test-arguments-scan-oa",
+        exporters=[{"type": "jsonl", "path": str(path)}],
+        scan_arguments=True,
+    )
+    try:
+        processor = SendaArgusOpenAIAgentsProcessor()
+        span_data = _types.SimpleNamespace(type="function", name="bash_exec", input=None, output="ok")
+        span = _types.SimpleNamespace(name="bash_exec", span_data=span_data)
+        processor.on_span_start(span)
+        span_data.input = '{"cmd": "' + COMMAND + '"}'
+        processor.on_span_end(span)
+    finally:
+        shutdown()
+    events = _read_events(path)
+    started = [e for e in events if e["event_type"] == "tool_call.requested"]
+    completed = [e for e in events if e["event_type"] == "tool_call.completed"]
+    assert len(started) == 1 and len(completed) == 1
+    # 開始の記録は、引数が完了の記録で届くことだけを示す。
+    assert started[0]["data"]["tool"]["arguments_deferred"] is True
+    assert ARGUMENTS_SCAN_FIELD not in started[0]["data"]["tool"]
+    assert completed[0]["data"]["tool"]["arguments_deferred"] is True
+    assert COMMAND in completed[0]["data"]["tool"][ARGUMENTS_SCAN_FIELD]
+    assert "arguments" not in completed[0]["data"]["tool"]
+
+
+def test_openai_agents_function_span_sends_nothing_by_default(tmp_path):
+    import types as _types
+
+    from senda_argus_hooks.integrations.openai_agents import SendaArgusOpenAIAgentsProcessor
+
+    path = tmp_path / "events.jsonl"
+    register(
+        project="test-arguments-scan-oa-off",
+        exporters=[{"type": "jsonl", "path": str(path)}],
+    )
+    try:
+        processor = SendaArgusOpenAIAgentsProcessor()
+        span_data = _types.SimpleNamespace(type="function", name="run", input=COMMAND, output="ok")
+        processor.on_span_end(_types.SimpleNamespace(name="run", span_data=span_data))
+    finally:
+        shutdown()
+    for event in _read_events(path):
+        tool = event["data"].get("tool", {})
+        assert ARGUMENTS_SCAN_FIELD not in tool and "arguments_deferred" not in tool
+
+
+# 偽の秘密は分割して組み立てる。リテラルのまま置くと秘密の検出に掛かる。
+_FORMATS = [
+    ("github", "gh" + "p_" + "a" * 36),
+    ("github fine grained", "github_" + "pat_" + "c" * 30),
+    ("slack", "xo" + "xb-" + "1234567890-abcdefghij"),
+    ("google api", "AI" + "za" + "d" * 35),
+    ("google oauth", "ya" + "29." + "e" * 30),
+    ("jwt", "ey" + "Jhbc" + "." + "payload" + "." + "signature"),
+]
+
+
+def test_every_credential_format_is_redacted_from_the_arguments_scan():
+    for name, secret in _FORMATS:
+        text = arguments_scan_fields({"value": f"use {secret} now"})[ARGUMENTS_SCAN_FIELD]
+        assert secret not in text, name

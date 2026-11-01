@@ -61,7 +61,7 @@ export interface RegisterOptions {
   captureResult?: boolean;
   // 戻り値の本文とは別に、検知の走査だけに使う文を送る。Argus は保存せず判定の後に捨てる。
   scanResult?: boolean;
-  // 呼び出しの引数から、検知の走査だけに使う文を送る。本文の保存は captureArguments が決める。
+  // 呼び出しの引数から、検知の走査だけに使う文を送る。本文の保存は captureArguments が決める。既定は送らない。
   scanArguments?: boolean;
   captureHash?: boolean;
   redact?: boolean;
