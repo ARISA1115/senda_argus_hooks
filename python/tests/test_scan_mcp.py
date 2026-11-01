@@ -1383,3 +1383,40 @@ def test_tools_selector_with_equals_in_project_path(tmp_path, capsys, fake_scann
     )
     assert "report" in out["items"][0]["body"]
     assert scan_mcp.parse_tools_options(["a=b=c"]) == {"a=b": Path("c")}
+
+
+def test_userinfo_redaction_stays_linear_on_long_scheme_like_text():
+    import time
+
+    from senda_argus_hooks.cli.scan_mcp import _USERINFO_RE
+
+    for text in ("a" * 40000, "ab-" * 13000, "a" * 40000 + "://x"):
+        started = time.perf_counter()
+        _USERINFO_RE.sub("X", text)
+        assert time.perf_counter() - started < 0.5
+
+
+def test_userinfo_redaction_keeps_scheme_and_host():
+    from senda_argus_hooks.cli.scan_mcp import _USERINFO_RE
+
+    out = _USERINFO_RE.sub(
+        lambda m: m.group(1) + "R@", "x https://u:p@h/p mcp+ssh://k@h"
+    )
+    assert out == "x https://R@h/p mcp+ssh://R@h"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "-https://u:p@host",
+        "1https://u:p@host",
+        "a.b+c-https://u:p@host",
+        "x" * 5000 + "https://u:p@host",
+    ],
+)
+def test_userinfo_redaction_still_applies_after_scheme_like_characters(text):
+    from senda_argus_hooks.cli.scan_mcp import _USERINFO_RE
+
+    out = _USERINFO_RE.sub(lambda m: m.group(1) + "R@", text)
+    assert "u:p" not in out
+    assert out.endswith("https://R@host")
