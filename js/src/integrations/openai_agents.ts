@@ -1,7 +1,7 @@
 import { sha256Value } from "../core/hashing.js";
 import { newTraceId, runWithContext } from "../core/context.js";
 import { emitEvent, getConfig } from "../runtime.js";
-import { resultScanFields } from "../core/result_scan.js";
+import { argumentsScanFields, resultScanFields } from "../core/result_scan.js";
 
 function spanType(span: any): string {
   return String(span?.spanData?.type ?? span?.data?.type ?? span?.type ?? span?.name ?? "span").toLowerCase();
@@ -47,7 +47,11 @@ export class SendaArgusOpenAIAgentsProcessor {
     const evt = eventType(type, "start");
     const data: Record<string, unknown> = { agent: { span_id: span?.spanId ?? span?.span_id, trace_id: traceId, span_hash: sha256Value(span?.toJSON?.() ?? span) } };
     const toolName = spanToolName(span);
-    if (evt.startsWith("tool_call.") && toolName) data.tool = { framework: "openai-agents", tool_name: toolName };
+    const startTool: Record<string, unknown> = {};
+    if (evt.startsWith("tool_call.") && toolName) startTool.tool_name = toolName;
+    // function span の入力は、span の開始の後に設定される。引数が完了の記録で届くことを、付帯で示す。
+    if (evt.startsWith("tool_call.") && toolName && getConfig().scanArguments) startTool.arguments_deferred = true;
+    if (Object.keys(startTool).length > 0) data.tool = { framework: "openai-agents", ...startTool };
     runWithContext({ traceId }, () => emitEvent(evt, {
       source: { component: "integration", framework: "openai-agents", sdk: "openai-agents", operation: type },
       data,
@@ -70,6 +74,14 @@ export class SendaArgusOpenAIAgentsProcessor {
     const toolName = spanToolName(span);
     const tool: Record<string, unknown> = {};
     if (evt.startsWith("tool_call.") && toolName) tool.tool_name = toolName;
+    // 開始の記録と同じ付帯を載せ、完了と失敗の記録で、引数の走査の文を送る。
+    if (evt.startsWith("tool_call.") && toolName && getConfig().scanArguments) {
+      tool.arguments_deferred = true;
+      if (evt === "tool_call.completed" || evt === "tool_call.failed") {
+        const input = span?.spanData?.input ?? span?.data?.input;
+        if (input !== undefined && input !== null) Object.assign(tool, argumentsScanFields(input));
+      }
+    }
     // tool の区間の完了では、戻り値に埋め込まれた指示が注入の規則に届くよう走査の文を添える。
     if (evt === "tool_call.completed" && getConfig().scanResult) {
       const output = span?.spanData?.output ?? span?.data?.output;

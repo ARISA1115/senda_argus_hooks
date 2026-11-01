@@ -13,7 +13,7 @@ from senda_argus_hooks.core.instruction_files import (
     system_prompt_pair_digests,
     system_prompt_semantic_digests,
 )
-from senda_argus_hooks.core.result_scan import result_scan_fields
+from senda_argus_hooks.core.result_scan import arguments_scan_fields, result_scan_fields
 from senda_argus_hooks.core.runtime import emit_event, get_config
 from senda_argus_hooks.instrumentors.base import BaseInstrumentor
 
@@ -244,6 +244,14 @@ def _span_event_data(span: Any, event_type: str) -> dict[str, Any]:
         name = _span_tool_name(span)
         if name:
             tool["tool_name"] = name
+    if event_type.startswith("tool_call.") and tool.get("tool_name") and get_config().scan_arguments:
+        # function span の入力は、span の開始の後に設定される。開始の記録には引数が無いため、引数が完了の
+        # 記録で届くことを、同じ付帯で両方に載せる。受け取り側は、完了と失敗の記録を担い手にする。
+        tool["arguments_deferred"] = True
+        if event_type in ("tool_call.completed", "tool_call.failed"):
+            arguments = _span_input(span)
+            if arguments is not None:
+                tool.update(arguments_scan_fields(_safe_value(arguments)))
     if event_type == "tool_call.completed" and get_config().scan_result:
         # tool の区間の完了では、戻り値に埋め込まれた指示が注入の規則に届くよう走査の文を添える。
         output = _span_output(span)
@@ -266,6 +274,17 @@ def _span_event_data(span: Any, event_type: str) -> dict[str, Any]:
         llm["system_prompt_semantic_hashes"] = semantic_hashes
     data["llm"] = llm
     return data
+
+
+def _span_input(span: Any) -> Any:
+    """tool の区間の入力、すなわち呼び出しの引数を返す。取れなければ None を返す。区間の中身と直下の両方を見る。"""
+    for source in (_span_data_of(span), span):
+        if source is None:
+            continue
+        value = source.get("input") if isinstance(source, dict) else getattr(source, "input", None)
+        if value is not None:
+            return value
+    return None
 
 
 def _span_output(span: Any) -> Any:
