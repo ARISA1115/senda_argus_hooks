@@ -12,6 +12,7 @@ from typing import Any
 from senda_argus_hooks.core.hashing import sha256_value
 from senda_argus_hooks.core.identity import (
     SERVER_INFO_NAME_ATTR,
+    SERVER_INFO_VERSION_ATTR,
     UNNAMED_MCP_SERVER,
     data_source_hash,
     derive_mcp_profile_id,
@@ -363,6 +364,10 @@ def _session_server_name(obj: Any) -> Any:
     return name
 
 
+# サーバーの版の形。CPE の名前へ入るので、区切りの文字を通さない。
+_SERVER_VERSION_RE = re.compile(r"[0-9A-Za-z][0-9A-Za-z._+~-]{0,63}")
+
+
 def _remember_server_info_name(obj: Any, response: Any) -> None:
     """初期化の応答が名乗ったサーバ名を、セッションへ控える。
 
@@ -383,6 +388,12 @@ def _remember_server_info_name(obj: Any, response: Any) -> None:
         and get_mcp_tool_directory().claim(name.strip(), obj)
     ):
         setattr(obj, SERVER_INFO_NAME_ATTR, name.strip())
+    # 版は脆弱性の照合に使う。名乗りと同じくサーバが決める値なので、形の合う値だけを控える。
+    version = (
+        info.get("version") if isinstance(info, dict) else getattr(info, "version", None)
+    )
+    if isinstance(version, str) and _SERVER_VERSION_RE.fullmatch(version.strip()):
+        setattr(obj, SERVER_INFO_VERSION_ATTR, version.strip())
 
 
 def _tool_name_of_call(args, kwargs) -> str | None:
@@ -428,6 +439,9 @@ def _mcp_metadata(obj, operation: str, args, kwargs) -> dict[str, Any]:
         # 判定が読む書き込みの内容のダイジェストは分類器が資源の引数から作って上書きする。
         "arguments_hash": args_hash,
     }
+    server_version = getattr(obj, SERVER_INFO_VERSION_ATTR, None)
+    if isinstance(server_version, str) and server_version:
+        meta["server_version"] = server_version
     # 提供元の識別には、表示名だけでなく正規化した URL も含める。表示名は重複しうるし、
     # 取得できないときは同じ既定値へ落ちる。名前だけで括ると、別の提供元の同名の資源が
     # 同じ鍵に集まり、無関係な読み書きが往復に見える。

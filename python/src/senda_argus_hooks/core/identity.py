@@ -25,6 +25,8 @@ UNNAMED_MCP_SERVER = "unknown"
 # MCP の SDK のセッションは、初期化の応答が名乗ったサーバ名を保持しない。計装が初期化の応答から読んで
 # セッションへ控える属性。明示の名前が無いときにだけ使う。
 SERVER_INFO_NAME_ATTR = "_senda_argus_server_info_name"
+# 初期化の応答が名乗った版を控える属性。脆弱性の照合に使う。
+SERVER_INFO_VERSION_ATTR = "_senda_argus_server_info_version"
 
 # 利用者が describe_mcp_session で明示したサーバの URL を控える属性。SDK のセッションは URL を持たない。
 SERVER_URL_ATTR = "_senda_argus_server_url"

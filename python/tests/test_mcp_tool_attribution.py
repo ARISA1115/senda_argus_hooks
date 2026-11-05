@@ -361,3 +361,37 @@ def test_an_impostor_that_closed_first_leaves_no_tools_behind():
     directory.record("github", ["search"], session=real)
     assert directory.server_of("evil_search") == ""
     assert directory.server_of("search") == "github"
+
+
+@pytest.mark.parametrize(
+    ("announced", "expected"),
+    [
+        ("1.4.2", "1.4.2"),
+        (" 2.0.0-rc.1+build ", "2.0.0-rc.1+build"),
+        ("1:2:*", None),
+        ("", None),
+        (None, None),
+        ("9" * 65, None),
+    ],
+)
+def test_only_a_well_formed_version_is_kept(announced, expected):
+    from senda_argus_hooks.core.identity import SERVER_INFO_VERSION_ATTR
+    from senda_argus_hooks.instrumentors.mcp_python import _remember_server_info_name
+
+    session = types.SimpleNamespace()
+    response = types.SimpleNamespace(
+        serverInfo=types.SimpleNamespace(name=f"version-{id(session)}", version=announced)
+    )
+    _remember_server_info_name(session, response)
+    assert getattr(session, SERVER_INFO_VERSION_ATTR, None) == expected
+
+
+def test_the_call_metadata_carries_the_kept_version():
+    from senda_argus_hooks.core.identity import SERVER_INFO_VERSION_ATTR
+    from senda_argus_hooks.instrumentors.mcp_python import _mcp_metadata
+
+    session = types.SimpleNamespace(server="s")
+    assert "server_version" not in _mcp_metadata(session, "call_tool", ("t",), {})
+    setattr(session, SERVER_INFO_VERSION_ATTR, "1.4.2")
+    assert _mcp_metadata(session, "call_tool", ("t",), {})["server_version"] == "1.4.2"
+
