@@ -386,6 +386,25 @@ def test_only_a_well_formed_version_is_kept(announced, expected):
     assert getattr(session, SERVER_INFO_VERSION_ATTR, None) == expected
 
 
+@pytest.mark.parametrize("announced", [None, "", "1:2:*"])
+def test_a_later_initialization_without_a_valid_version_clears_the_kept_one(announced):
+    from senda_argus_hooks.core.identity import SERVER_INFO_VERSION_ATTR
+    from senda_argus_hooks.instrumentors.mcp_python import _remember_server_info_name
+
+    session = types.SimpleNamespace()
+    name = f"version-again-{id(session)}"
+    first = types.SimpleNamespace(
+        serverInfo=types.SimpleNamespace(name=name, version="1.4.2")
+    )
+    _remember_server_info_name(session, first)
+    assert getattr(session, SERVER_INFO_VERSION_ATTR) == "1.4.2"
+    second = types.SimpleNamespace(
+        serverInfo=types.SimpleNamespace(name=name, version=announced)
+    )
+    _remember_server_info_name(session, second)
+    assert not hasattr(session, SERVER_INFO_VERSION_ATTR)
+
+
 def test_the_call_metadata_carries_the_kept_version():
     from senda_argus_hooks.core.identity import SERVER_INFO_VERSION_ATTR
     from senda_argus_hooks.instrumentors.mcp_python import _mcp_metadata

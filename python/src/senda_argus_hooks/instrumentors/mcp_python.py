@@ -394,6 +394,9 @@ def _remember_server_info_name(obj: Any, response: Any) -> None:
     )
     if isinstance(version, str) and _SERVER_VERSION_RE.fullmatch(version.strip()):
         setattr(obj, SERVER_INFO_VERSION_ATTR, version.strip())
+    elif hasattr(obj, SERVER_INFO_VERSION_ATTR):
+        # 最新の名乗りに正しい版が無い。前の版を残すと、今名乗っていない版で照合する。
+        delattr(obj, SERVER_INFO_VERSION_ATTR)
 
 
 def _tool_name_of_call(args, kwargs) -> str | None:
