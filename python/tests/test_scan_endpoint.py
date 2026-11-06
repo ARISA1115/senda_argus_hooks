@@ -299,3 +299,154 @@ def test_a_cline_hook_script_counts_as_installed(tmp_path) -> None:
     )
     agents = {a["name"]: a for a in _report(tmp_path)["agents"]}
     assert agents["cline"]["hook_installed"] is True
+
+
+_DPKG = """Package: policykit-1
+Status: install ok installed
+Version: 0.105-33
+Description: framework
+ /usr/bin/pkexec TOKEN=should-not-be-read
+
+Package: openssl
+Status: deinstall ok config-files
+Version: 3.0.2-0ubuntu1.10
+
+Package: libreoffice-core
+Status: install ok installed
+Version: 1:7.3.7-0ubuntu0.22.04.4
+
+Package: sudo
+Status: install ok installed
+Version: 1.9.9 --evil
+
+Package: bash
+Status: install ok installed
+Version: 5.1-6ubuntu1
+"""
+
+
+def test_software_reads_only_installed_listed_packages_name_and_version(
+    tmp_path,
+) -> None:
+    status = tmp_path / "sysroot" / "var" / "lib" / "dpkg" / "status"
+    status.parent.mkdir(parents=True)
+    status.write_text(_DPKG, encoding="utf-8")
+    _write(
+        tmp_path
+        / "sysroot"
+        / "usr"
+        / "lib"
+        / "node_modules"
+        / "@openai"
+        / "codex"
+        / "package.json",
+        {"name": "@openai/codex", "version": "0.40.0", "scripts": {"x": "secret"}},
+    )
+    body = _report(tmp_path)
+    # 導入済みで一覧にあるものだけ。削除済み (openssl)、一覧に無い (libreoffice)、version の形が外れる (sudo) は送らない。
+    assert body["software"] == [
+        {"name": "policykit-1", "version": "0.105-33", "source": "dpkg"},
+        {"name": "bash", "version": "5.1-6ubuntu1", "source": "dpkg"},
+        {"name": "@openai/codex", "version": "0.40.0", "source": "npm"},
+    ]
+    sent = json.dumps(body)
+    assert (
+        "should-not-be-read" not in sent
+        and "secret" not in sent
+        and "libreoffice" not in sent
+    )
+
+
+def test_software_is_empty_without_package_lists(tmp_path) -> None:
+    body = _report(tmp_path)
+    assert body["software"] == []
+    assert "truncated" not in body
+
+
+def test_software_sends_a_held_package_that_is_still_installed(tmp_path) -> None:
+    status = tmp_path / "sysroot" / "var" / "lib" / "dpkg" / "status"
+    status.parent.mkdir(parents=True)
+    status.write_text(
+        "Package: openssl\nStatus: hold ok installed\nVersion: 3.0.2-0ubuntu1.10\n\n"
+        "Package: sudo\nStatus: install reinstreq half-installed\nVersion: 1.9.9-1\n\n"
+        "Package: bash\nStatus: hold ok config-files\nVersion: 5.1-6\n",
+        encoding="utf-8",
+    )
+    # 保留でも導入済みなら送る。導入の途中と設定だけ残ったものは送らない。
+    assert _report(tmp_path)["software"] == [
+        {"name": "openssl", "version": "3.0.2-0ubuntu1.10", "source": "dpkg"}
+    ]
+
+
+def test_software_reads_homebrew_and_nvm_prefixes(tmp_path) -> None:
+    _write(
+        tmp_path
+        / "sysroot"
+        / "opt"
+        / "homebrew"
+        / "lib"
+        / "node_modules"
+        / "@google"
+        / "gemini-cli"
+        / "package.json",
+        {"name": "@google/gemini-cli", "version": "0.9.0"},
+    )
+    _write(
+        tmp_path
+        / ".nvm"
+        / "versions"
+        / "node"
+        / "v22.11.0"
+        / "lib"
+        / "node_modules"
+        / "@github"
+        / "copilot"
+        / "package.json",
+        {"name": "@github/copilot", "version": "0.0.330"},
+    )
+    assert _report(tmp_path)["software"] == [
+        {"name": "@google/gemini-cli", "version": "0.9.0", "source": "npm"},
+        {"name": "@github/copilot", "version": "0.0.330", "source": "npm"},
+    ]
+
+
+def test_software_resolves_the_cli_found_on_path_to_its_package(tmp_path) -> None:
+    package = (
+        tmp_path
+        / "custom-prefix"
+        / "lib"
+        / "node_modules"
+        / "@anthropic-ai"
+        / "claude-code"
+    )
+    _write(
+        package / "package.json",
+        {"name": "@anthropic-ai/claude-code", "version": "2.0.31"},
+    )
+    (package / "cli.js").write_text("", encoding="utf-8")
+    bin_dir = tmp_path / "custom-prefix" / "bin"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "claude").symlink_to(package / "cli.js")
+    located = {"claude": str(bin_dir / "claude")}
+    body = _report(tmp_path, which=located.get)
+    assert body["software"] == [
+        {"name": "@anthropic-ai/claude-code", "version": "2.0.31", "source": "npm"}
+    ]
+
+
+@pytest.mark.parametrize("root", [None, [], "1.0.0", 3])
+def test_a_manifest_whose_root_is_not_an_object_does_not_stop_the_scan(
+    tmp_path, root
+) -> None:
+    modules = tmp_path / "sysroot" / "usr" / "lib" / "node_modules"
+    _write(modules / "@openai" / "codex" / "package.json", root)
+    _write(
+        modules / "@google" / "gemini-cli" / "package.json",
+        {"name": "@google/gemini-cli", "version": "0.9.0"},
+    )
+    _gemini(tmp_path, {})
+    body = _report(tmp_path)
+    assert body["software"] == [
+        {"name": "@google/gemini-cli", "version": "0.9.0", "source": "npm"}
+    ]
+    assert [a["name"] for a in body["agents"]] == ["gemini_cli"]

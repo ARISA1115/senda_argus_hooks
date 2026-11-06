@@ -281,7 +281,9 @@ def _strings(
                 budget[0] -= 1
                 out.append(("", k, in_body))
                 child_body = in_body or k.lower() in _BODY_KEYS
-            if not _strings(v, out, k if isinstance(k, str) else "", budgets, child_body):
+            if not _strings(
+                v, out, k if isinstance(k, str) else "", budgets, child_body
+            ):
                 return False
     elif isinstance(value, (list, tuple)):
         for item in value:
@@ -343,7 +345,8 @@ def _path_categories(token: str, operator: list[str]) -> set[str]:
         if base in _UNIQUE_FILE_NAMES:
             found.add(_FILE_NAMES[base])
         if any(ch in base for ch in "*?["):
-            # ワイルドカードの綴りは、既知の名前に当てはまるかで見る。
+            # ワイルドカードの綴りは、既知の名前に当てはまるかで見る。場所の無い * も見る。監視の設定の置き場で
+            # `rm -f *` と打てば、全ての監視の設定を消せる。SQL の * は、照合の前に _without_sql_wildcards が外す。
             for name, category in _FILE_NAMES.items():
                 if name in _UNIQUE_FILE_NAMES and fnmatch.fnmatchcase(name, base):
                     found.add(category)
@@ -383,8 +386,20 @@ def _api_categories(text: str) -> set[str]:
     return found
 
 
+# SQL の * 。パスのワイルドカードではない。count(*) と、select から from までの選ぶ列の並び。
+# 間の長さに上限を置き、select を繰り返した長い文で計算量が 2 乗にならないようにする。
+_SQL_WILDCARD: Final[re.Pattern[str]] = re.compile(
+    r"(?is)\bcount\s*\(\s*\*\s*\)|\bselect\b[^;]{0,512}?\bfrom\b"
+)
+
+
+def _without_sql_wildcards(text: str) -> str:
+    """SQL の * を空白に置き換える。同じ文のシェルの命令 (`; rm -f *`) の * は残す。"""
+    return _SQL_WILDCARD.sub(lambda m: m.group(0).replace("*", " "), text)
+
+
 def _categories_in(text: str, operator: list[str]) -> set[str]:
-    text = _clip(text)
+    text = _without_sql_wildcards(_clip(text))
     found: set[str] = set()
     for match in _ENV_RE.findall(text):
         found.add(_env_category(match))
