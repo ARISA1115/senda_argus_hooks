@@ -299,3 +299,65 @@ def test_a_cline_hook_script_counts_as_installed(tmp_path) -> None:
     )
     agents = {a["name"]: a for a in _report(tmp_path)["agents"]}
     assert agents["cline"]["hook_installed"] is True
+
+
+_DPKG = """Package: policykit-1
+Status: install ok installed
+Version: 0.105-33
+Description: framework
+ /usr/bin/pkexec TOKEN=should-not-be-read
+
+Package: openssl
+Status: deinstall ok config-files
+Version: 3.0.2-0ubuntu1.10
+
+Package: libreoffice-core
+Status: install ok installed
+Version: 1:7.3.7-0ubuntu0.22.04.4
+
+Package: sudo
+Status: install ok installed
+Version: 1.9.9 --evil
+
+Package: bash
+Status: install ok installed
+Version: 5.1-6ubuntu1
+"""
+
+
+def test_software_reads_only_installed_listed_packages_name_and_version(
+    tmp_path,
+) -> None:
+    status = tmp_path / "sysroot" / "var" / "lib" / "dpkg" / "status"
+    status.parent.mkdir(parents=True)
+    status.write_text(_DPKG, encoding="utf-8")
+    _write(
+        tmp_path
+        / "sysroot"
+        / "usr"
+        / "lib"
+        / "node_modules"
+        / "@openai"
+        / "codex"
+        / "package.json",
+        {"name": "@openai/codex", "version": "0.40.0", "scripts": {"x": "secret"}},
+    )
+    body = _report(tmp_path)
+    # 導入済みで一覧にあるものだけ。削除済み (openssl)、一覧に無い (libreoffice)、version の形が外れる (sudo) は送らない。
+    assert body["software"] == [
+        {"name": "policykit-1", "version": "0.105-33", "source": "dpkg"},
+        {"name": "bash", "version": "5.1-6ubuntu1", "source": "dpkg"},
+        {"name": "@openai/codex", "version": "0.40.0", "source": "npm"},
+    ]
+    sent = json.dumps(body)
+    assert (
+        "should-not-be-read" not in sent
+        and "secret" not in sent
+        and "libreoffice" not in sent
+    )
+
+
+def test_software_is_empty_without_package_lists(tmp_path) -> None:
+    body = _report(tmp_path)
+    assert body["software"] == []
+    assert "truncated" not in body

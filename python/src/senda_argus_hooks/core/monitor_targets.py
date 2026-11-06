@@ -281,7 +281,9 @@ def _strings(
                 budget[0] -= 1
                 out.append(("", k, in_body))
                 child_body = in_body or k.lower() in _BODY_KEYS
-            if not _strings(v, out, k if isinstance(k, str) else "", budgets, child_body):
+            if not _strings(
+                v, out, k if isinstance(k, str) else "", budgets, child_body
+            ):
                 return False
     elif isinstance(value, (list, tuple)):
         for item in value:
@@ -342,8 +344,12 @@ def _path_categories(token: str, operator: list[str]) -> set[str]:
                 found.add(category)
         if base in _UNIQUE_FILE_NAMES:
             found.add(_FILE_NAMES[base])
-        if any(ch in base for ch in "*?["):
-            # ワイルドカードの綴りは、既知の名前に当てはまるかで見る。
+        wildcard_only = not base.strip("*?[]")
+        directory = posixpath.dirname(form.strip("/"))
+        if any(ch in base for ch in "*?[") and not (wildcard_only and not directory):
+            # ワイルドカードの綴りは、既知の名前に当てはまるかで見る。ただし場所の無い単独のワイルドカード (*) は
+            # 見ない。SQL の count(*) や select * のような、パスでない記号にも現れ、全ての名前に当たる。場所を持つ
+            # 綴り (~/.claude/* など) は、これまでどおり既知の名前に当てはめる。
             for name, category in _FILE_NAMES.items():
                 if name in _UNIQUE_FILE_NAMES and fnmatch.fnmatchcase(name, base):
                     found.add(category)
