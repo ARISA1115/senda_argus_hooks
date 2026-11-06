@@ -111,6 +111,8 @@ NPM_AGENT_PACKAGES: tuple[str, ...] = (
 )
 MAX_SOFTWARE = 256
 MAX_DPKG_STATUS_BYTES = 32 * 1024 * 1024
+MAX_NVM_VERSIONS = 32
+MAX_MANIFEST_DEPTH = 6
 _SOFTWARE_VERSION = re.compile(r"^[A-Za-z0-9.+~:_\-]{1,64}$")
 
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f  ]")
@@ -250,51 +252,102 @@ def _dpkg_software(system_root: Path) -> list[dict[str, str]]:
             fields[key.strip()] = value.strip()
         name = fields.get("Package", "")
         version = fields.get("Version", "")
+        # Status は「希望の操作 フラグ 状態」の 3 語。保留 (hold) でも導入済みなら送る。
+        status = fields.get("Status", "").split()
         if (
             name in SOFTWARE_PACKAGES
-            and "install ok installed" in fields.get("Status", "")
+            and len(status) == 3
+            and status[1] == "ok"
+            and status[2] == "installed"
             and _SOFTWARE_VERSION.match(version)
         ):
             out.append({"name": name, "version": version, "source": "dpkg"})
     return out
 
 
-def _npm_software(system_root: Path, home: Path) -> list[dict[str, str]]:
-    """全体に導入した npm のパッケージのうち、エージェントの CLI の version を package.json から読む。"""
-    roots = (
+def _npm_manifest(path: Path) -> tuple[str, str] | None:
+    """npm のパッケージの package.json の名前と version。読めない、形が外れる、JSON の根が辞書でないときは None。"""
+    try:
+        if not path.is_file() or path.stat().st_size > MAX_SETTINGS_BYTES:
+            return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    name, version = data.get("name"), data.get("version")
+    if not isinstance(name, str) or not isinstance(version, str):
+        return None
+    return name, version
+
+
+def _npm_roots(system_root: Path, home: Path) -> list[Path]:
+    """全体に導入した npm のパッケージの置き場。Homebrew と nvm の置き場も含める。"""
+    roots = [
         system_root / "usr" / "lib" / "node_modules",
         system_root / "usr" / "local" / "lib" / "node_modules",
+        system_root / "opt" / "homebrew" / "lib" / "node_modules",
         home / ".npm-global" / "lib" / "node_modules",
-    )
+    ]
+    try:
+        nvm = sorted((home / ".nvm" / "versions" / "node").iterdir())
+    except OSError:
+        nvm = []
+    roots += [v / "lib" / "node_modules" for v in nvm[:MAX_NVM_VERSIONS]]
+    return roots
+
+
+def _manifest_of_cli(located: str) -> Path | None:
+    """PATH で見つけた CLI の実体から、上の階層へ package.json を探す。最初に見つけたものだけを返す。"""
+    try:
+        target = Path(located).resolve()
+    except (OSError, RuntimeError):
+        return None
+    for parent in list(target.parents)[:MAX_MANIFEST_DEPTH]:
+        manifest = parent / "package.json"
+        if manifest.is_file():
+            return manifest
+    return None
+
+
+def _npm_software(
+    system_root: Path, home: Path, which: Callable[[str], str | None]
+) -> list[dict[str, str]]:
+    """エージェントの CLI の npm のパッケージの version を package.json から読む。
+
+    PATH で見つけた CLI の実体の package.json を先に読み、次に全体の導入の置き場を読む。
+    """
+    candidates: list[Path] = []
+    for binaries in CLI_BINARIES.values():
+        for binary in binaries:
+            located = which(binary)
+            manifest = _manifest_of_cli(located) if located else None
+            if manifest is not None:
+                candidates.append(manifest)
+    for root in _npm_roots(system_root, home):
+        candidates += [root / name / "package.json" for name in NPM_AGENT_PACKAGES]
     out: list[dict[str, str]] = []
     seen: set[str] = set()
-    for root in roots:
-        for name in NPM_AGENT_PACKAGES:
-            if name in seen:
-                continue
-            manifest = root / name / "package.json"
-            try:
-                if (
-                    not manifest.is_file()
-                    or manifest.stat().st_size > MAX_SETTINGS_BYTES
-                ):
-                    continue
-                version = json.loads(manifest.read_text(encoding="utf-8")).get(
-                    "version"
-                )
-            except (OSError, ValueError):
-                continue
-            if isinstance(version, str) and _SOFTWARE_VERSION.match(version):
-                seen.add(name)
-                out.append({"name": name, "version": version, "source": "npm"})
+    for manifest in candidates:
+        read = _npm_manifest(manifest)
+        if read is None:
+            continue
+        name, version = read
+        if (
+            name in NPM_AGENT_PACKAGES
+            and name not in seen
+            and _SOFTWARE_VERSION.match(version)
+        ):
+            seen.add(name)
+            out.append({"name": name, "version": version, "source": "npm"})
     return out
 
 
 def collect_software(
-    *, system_root: Path, home: Path
+    *, system_root: Path, home: Path, which: Callable[[str], str | None]
 ) -> tuple[list[dict[str, str]], bool]:
     """送るソフトウェアの一覧と、上限で打ち切ったか。"""
-    items = _dpkg_software(system_root) + _npm_software(system_root, home)
+    items = _dpkg_software(system_root) + _npm_software(system_root, home, which)
     return items[:MAX_SOFTWARE], len(items) > MAX_SOFTWARE
 
 
@@ -370,7 +423,9 @@ def build_report(
         cfg["servers"].append(entry)
     # ソフトウェアの打ち切りは、主体の打ち切り (truncated) に混ぜない。受け取り側は truncated の報告で主体の
     # 置き換えを止めるため、ソフトウェアの多い端末の主体の一覧が古いまま残る。
-    software, _software_cut = collect_software(system_root=system_root, home=home)
+    software, _software_cut = collect_software(
+        system_root=system_root, home=home, which=which
+    )
     body: dict[str, Any] = {
         "report_type": REPORT_TYPE,
         "scanner_version": SCANNER_VERSION,
