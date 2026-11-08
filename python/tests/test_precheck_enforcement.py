@@ -235,3 +235,50 @@ def test_a_denied_mcp_call_does_not_run_the_tool(tmp_path, server, monkeypatch):
     finally:
         shutdown()
     assert ran == []
+
+
+def test_shutdown_stops_the_check(tmp_path, server):
+    _register(tmp_path, server["url"], enforce_precheck=True)
+    handler = SendaArgusCallbackHandler()
+    shutdown()
+    assert handler.raise_error is False
+    check_tool_call("run", {"cmd": COMMAND})
+    assert server["bodies"] == []
+
+
+def test_a_blocked_langchain_call_leaves_no_run_state(tmp_path, server):
+    _register(tmp_path, server["url"], enforce_precheck=True)
+    handler = SendaArgusCallbackHandler()
+    try:
+        with pytest.raises(ToolCallBlocked):
+            handler.on_tool_start({"name": "run"}, COMMAND, run_id="r1")
+        assert handler._starts == {}
+        assert handler._tool_types == {}
+    finally:
+        shutdown()
+
+
+def test_each_argument_starts_a_line(tmp_path, server):
+    """命令の規則は行頭を見る。項目の順序で外せないよう、値ごとに改行で分ける。"""
+    server["decision"] = "allow"
+    _register(tmp_path, server["url"], enforce_precheck=True)
+    try:
+        check_tool_call("run", {"host": "prod", "command": COMMAND})
+    finally:
+        shutdown()
+    assert f"\n{COMMAND}" in server["bodies"][0]["tool_input"]["arguments"]
+
+
+@pytest.mark.parametrize(
+    "as_text",
+    [json.dumps({"command": "cd /tmp\n" + COMMAND}), repr({"command": "cd /tmp\n" + COMMAND})],
+)
+def test_a_stringified_langchain_input_keeps_its_lines(tmp_path, server, as_text):
+    server["decision"] = "allow"
+    _register(tmp_path, server["url"], enforce_precheck=True)
+    try:
+        SendaArgusCallbackHandler().on_tool_start({"name": "run"}, as_text, run_id="r1")
+    finally:
+        shutdown()
+    assert f"\n{COMMAND}" in server["bodies"][0]["tool_input"]["arguments"]
+

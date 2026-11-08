@@ -190,6 +190,10 @@ def shutdown() -> None:
         from senda_argus_hooks.core.unjudged import configure_guard
 
         configure_guard(None)
+    with contextlib.suppress(Exception):
+        from senda_argus_hooks.core.precheck import reset_precheck
+
+        reset_precheck()
     flush()
     for rag_handle in list(_ACTIVE_RAG_INSTRUMENTATIONS):  # noqa: PERF101 - 後始末の間に一覧が書き換わっても回す対象を固定する
         with contextlib.suppress(Exception):

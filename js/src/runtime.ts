@@ -21,6 +21,7 @@ let instrumented = false;
 const shutdownHooks: Array<() => void> = [];
 
 export function isCollecting(): boolean { return collecting && instrumented; }
+export function isCollectionRunning(): boolean { return collecting; }
 
 // 計装した呼び出しが送った事象の agent_id。導入の確認と canary は、見張る対象と同じ識別子で送る。
 // 識別子を明示しないとき、計装の事象は SDK ごとの値から識別子を導くため、導入の処理が自分で導くと

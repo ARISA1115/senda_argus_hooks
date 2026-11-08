@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { register } from "../src/register.js";
+import { shutdown } from "../src/runtime.js";
 import { langChainCallbackHandler } from "../src/integrations/langchain.js";
 import { RESULT_SCAN_MAX_CHARS, argumentsScanFields } from "../src/core/result_scan.js";
 import type { EventRecord, Exporter } from "../src/core/types.js";
@@ -182,3 +183,25 @@ test("an unreachable precheck follows the fail mode", async () => {
   register({ project: "test", exporters: [{ type: "argus", endpoint: "http://127.0.0.1:9" } as any], enforcePrecheck: true, precheckFailOpen: false }, { mcp: closed, mcpMetadata: { serverName: "demo" } });
   await assert.rejects(closed.callTool({ name: "run", arguments: {} }), /decision=unavailable/);
 });
+
+test("shutdown stops the precheck", async () => {
+  await withPrecheckServer("deny", async (url, calls) => {
+    let ran = false;
+    const client = { callTool: async (_r: unknown) => { ran = true; return { content: [] }; } };
+    register({ project: "test", exporters: [{ type: "argus", endpoint: url } as any], enforcePrecheck: true }, { mcp: client, mcpMetadata: { serverName: "demo" } });
+    await shutdown();
+    await client.callTool({ name: "run", arguments: { cmd: COMMAND } });
+    assert.equal(ran, true);
+    assert.equal(calls.length, 0);
+  });
+});
+
+test("a blocked LangChain call raises and the run can be used again", async () => {
+  await withPrecheckServer("deny", async (url) => {
+    register({ project: "test", exporters: [{ type: "argus", endpoint: url } as any], enforcePrecheck: true });
+    const h = langChainCallbackHandler() as any;
+    assert.equal(h.raiseError, true);
+    await assert.rejects(h.handleToolStart({ name: "run" }, COMMAND, "blocked-run"), /decision=deny/);
+  });
+});
+

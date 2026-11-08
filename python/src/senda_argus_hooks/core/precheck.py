@@ -56,6 +56,11 @@ def precheck_enabled() -> bool:
     return bool(_endpoint) and bool(get_config().enforce_precheck)
 
 
+def reset_precheck() -> None:
+    """登録を解いた後に、前の宛先へ問い合わせて呼び出しを止めないよう、宛先を消す。"""
+    configure_precheck(None)
+
+
 def _tool_input(arguments: Any) -> dict[str, Any]:
     """判定へ送る引数。scan_arguments に関わらず秘匿した文を送る。送らないと内容を判定できず、承認も引数で区別できない。
 

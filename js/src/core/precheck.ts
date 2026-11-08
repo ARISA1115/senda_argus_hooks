@@ -2,7 +2,7 @@ import { argumentsScanFields } from "./result_scan.js";
 import { deriveAgentId } from "./identity.js";
 import { sha256Value } from "./hashing.js";
 import { getContext } from "./context.js";
-import { argusExporter, getConfig } from "../runtime.js";
+import { argusExporter, getConfig, isCollectionRunning } from "../runtime.js";
 
 // ツールの実行の前に Argus の判定を問い合わせ、拒否と承認待ちの呼び出しを止める。既定で無効である。
 // 主体を結び付けていない鍵では全ての呼び出しが最も厳しい段階で拒否になるため、導入する側が有効にする。
@@ -17,7 +17,8 @@ export class ToolCallBlocked extends Error {
 }
 
 export function precheckEnabled(): boolean {
-  return Boolean(getConfig().enforcePrecheck && argusExporter());
+  // 収集を止めた後に、前の宛先へ問い合わせて呼び出しを止めない。
+  return Boolean(getConfig().enforcePrecheck && argusExporter() && isCollectionRunning());
 }
 
 // scanArguments に関わらず秘匿した文を送る。送らないと内容を判定できず、承認も引数で区別できない。

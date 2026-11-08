@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import ast
 import contextlib
 import functools
+import json
 import logging
 import time
 from typing import Any
@@ -14,7 +16,7 @@ from senda_argus_hooks.core.instruction_files import (
     system_prompt_pair_digests,
     system_prompt_semantic_digests,
 )
-from senda_argus_hooks.core.precheck import check_tool_call
+from senda_argus_hooks.core.precheck import ToolCallBlocked, check_tool_call, precheck_enabled
 from senda_argus_hooks.core.result_scan import arguments_scan_fields, result_scan_fields
 from senda_argus_hooks.core.runtime import emit_event, get_config
 from senda_argus_hooks.integrations.llamaindex import _retrieval_payload, _retrieval_result_payload
@@ -45,6 +47,18 @@ def _remember(store: dict, key: str, value: Any) -> None:
             store.pop(stale, None)
 
 
+def _structured_input(input_str: Any, kwargs: dict[str, Any]) -> Any:
+    """ツールの入力を構造のまま返す。文字列にした dict は改行が 2 文字になり、2 行目の命令を読めない。"""
+    inputs = kwargs.get("inputs")
+    if isinstance(inputs, dict):
+        return inputs
+    if isinstance(input_str, str) and input_str[:1] in "{[":
+        for parse in (json.loads, ast.literal_eval):
+            with contextlib.suppress(ValueError, SyntaxError, RecursionError, MemoryError, TypeError):
+                return parse(input_str)
+    return input_str
+
+
 def _retriever_meta(serialized: Any, query: Any) -> dict[str, Any]:
     """retriever の名前と問い合わせを、検索の事象の項目の形へ写す。"""
     name = None
@@ -64,7 +78,7 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
     @property
     def raise_error(self) -> bool:
         """実行前の判定が有効なときだけ例外を伝える。登録の前に作ったハンドラーでも、呼び出しの時の設定に従う。"""
-        return bool(get_config().enforce_precheck)
+        return precheck_enabled()
 
     def __init__(self, *, framework: str = "langchain", capture_payloads: bool | None = None):
         with contextlib.suppress(TypeError):
@@ -193,8 +207,9 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
         }
         if get_config().capture_arguments:
             tool["arguments"] = input_str
+        structured = _structured_input(input_str, kwargs)
         if get_config().scan_arguments:
-            tool.update(arguments_scan_fields(input_str))
+            tool.update(arguments_scan_fields(structured))
         emit_event(
             "tool_call.requested",
             source={"component": "integration", "sdk": self.framework, "operation": "on_tool_start"},
@@ -203,7 +218,13 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
             purpose_id=purpose_id,
         )
         # 記録の後に問い合わせる。止めた呼び出しも、試みとして記録に残す。
-        check_tool_call(tool_name, input_str)
+        try:
+            check_tool_call(tool_name, structured)
+        except ToolCallBlocked:
+            # 止めた呼び出しには終了の通知が来ない。控えを残すと、拒否のたびに増える。
+            self._starts.pop(run_id, None)
+            self._tool_types.pop(run_id, None)
+            raise
 
     def on_tool_end(self, output: Any, **kwargs: Any) -> None:
         run_id = _run_key(kwargs)

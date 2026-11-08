@@ -165,6 +165,7 @@ def arguments_scan_fields(value: Any) -> dict[str, Any]:
         ARGUMENTS_TRUNCATED_FIELD,
         ARGUMENTS_LENGTH_FIELD,
         ARGUMENTS_FAILED_FIELD,
+        joiner="\n",
     )
 
 
@@ -203,14 +204,20 @@ def retrieved_documents_scan_fields(texts: list[str]) -> dict[str, Any]:
 
 
 def _scan_fields(
-    value: Any, scan_field: str, truncated_field: str, length_field: str, failed_field: str
+    value: Any,
+    scan_field: str,
+    truncated_field: str,
+    length_field: str,
+    failed_field: str,
+    joiner: str = " ",
 ) -> dict[str, Any]:
     try:
         parts, cut = _collect(value)
         parts = [p for p in parts if p.strip()]
         if not parts:
             return {truncated_field: True} if cut else {}
-        text = " ".join(parts)
+        # 引数は値ごとに改行で分ける。命令の規則は行頭を見るため、前の項目の後ろに続くと外れる。
+        text = joiner.join(parts)
         out: dict[str, Any] = {}
         if len(text) > RESULT_SCAN_MAX_CHARS:
             out[truncated_field] = True
