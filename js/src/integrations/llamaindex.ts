@@ -3,6 +3,7 @@ import { sha256Value } from "../core/hashing.js";
 import { newTraceId, runWithContext } from "../core/context.js";
 import { emitEvent, getConfig, observe } from "../runtime.js";
 import { safeValue } from "../instrumentors/common.js";
+import { retrievedTextScanFields } from "./retrieval_scan.js";
 
 const patched = Symbol.for("senda.argus.llamaindex.patched");
 
@@ -28,7 +29,7 @@ function patch(target: any, method: string, kind: "retrieval" | "embedding" | "r
       }
       observe(() => emitEvent(`${kind}.completed`, {
         source: { component: "integration", framework: "llamaindex", sdk: "llamaindex", operation: method },
-        data: { [kind === "rag.query" ? "rag" : kind]: { framework: "llamaindex", operation: method, result: getConfig().captureResult ? safeValue(result) : { result_hash: sha256Value(result) } } },
+        data: { [kind === "rag.query" ? "rag" : kind]: { framework: "llamaindex", operation: method, result: getConfig().captureResult ? safeValue(result) : { result_hash: sha256Value(result) }, ...(kind === "embedding" ? {} : retrievedTextScanFields(result)) } },
         status: "success", latencyMs: Math.round(performance.now() - started)
       }));
       return result;

@@ -631,3 +631,12 @@ def test_claude_failure_event_is_recorded_with_its_error():
         "error": "Command exited with non-zero status code 1",
         "is_interrupt": False,
     }
+
+
+def test_truncation_keeps_the_end_of_a_long_response():
+    """先頭だけを送ると、長い前置きの後ろへ置いた指示が規則に届かない。"""
+    text = "a" * 9000 + "the final instruction"
+    out = hooks.truncate_tool_response(text)
+    assert len(out) == hooks.TOOL_RESPONSE_MAX_CHARS
+    assert out.endswith("the final instruction")
+

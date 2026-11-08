@@ -4,6 +4,7 @@ import { newTraceId, runWithContext } from "../core/context.js";
 import { emitEvent, getConfig } from "../runtime.js";
 import { safeValue } from "../instrumentors/common.js";
 import { argumentsScanFields, resultScanFields } from "../core/result_scan.js";
+import { retrievedTextScanFields } from "./retrieval_scan.js";
 
 const starts = new Map<string, number>();
 const traces = new Map<string, string>();
@@ -77,6 +78,33 @@ export class SendaArgusLangChainCallbackHandler {
     const lifecycle = finish(runId);
     return runWithContext({ traceId: lifecycle.traceId, runId: key(runId) || undefined }, () => emitEvent("llm.error", {
       source: { component: "integration", framework: "langchain", sdk: "langchain", operation: "llm" },
+      status: "error", latencyMs: lifecycle.latencyMs,
+      error: { type: error?.constructor?.name ?? "Error", message: String(error?.message ?? error) }
+    }));
+  }
+
+  handleRetrieverStart(retriever: any, query: string, runId?: unknown) {
+    const traceId = begin(runId);
+    return runWithContext({ traceId, runId: key(runId) || undefined }, () => emitEvent("retrieval.requested", {
+      source: { component: "integration", framework: "langchain", sdk: "langchain", operation: "retriever" },
+      data: { retrieval: { framework: "langchain", retriever_name: retriever?.name ?? retriever?.id?.at?.(-1), query_hash: sha256Value(query) } },
+      status: "requested"
+    }));
+  }
+
+  handleRetrieverEnd(documents: any, runId?: unknown) {
+    const lifecycle = finish(runId);
+    return runWithContext({ traceId: lifecycle.traceId, runId: key(runId) || undefined }, () => emitEvent("retrieval.completed", {
+      source: { component: "integration", framework: "langchain", sdk: "langchain", operation: "retriever" },
+      data: { retrieval: { framework: "langchain", result_count: Array.isArray(documents) ? documents.length : undefined, result_hash: sha256Value(documents), ...retrievedTextScanFields(documents) } },
+      status: "success", latencyMs: lifecycle.latencyMs
+    }));
+  }
+
+  handleRetrieverError(error: any, runId?: unknown) {
+    const lifecycle = finish(runId);
+    return runWithContext({ traceId: lifecycle.traceId, runId: key(runId) || undefined }, () => emitEvent("retrieval.failed", {
+      source: { component: "integration", framework: "langchain", sdk: "langchain", operation: "retriever" },
       status: "error", latencyMs: lifecycle.latencyMs,
       error: { type: error?.constructor?.name ?? "Error", message: String(error?.message ?? error) }
     }));

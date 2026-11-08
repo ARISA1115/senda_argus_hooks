@@ -457,19 +457,31 @@ def decide(
     return verdict
 
 
+def _keep_head_and_tail(text: str) -> str:
+    if len(text) <= TOOL_RESPONSE_MAX_CHARS:
+        return text
+    marker = " ...[truncated]... "
+    keep = TOOL_RESPONSE_MAX_CHARS - len(marker)
+    head = keep // 2
+    return text[:head] + marker + text[-(keep - head) :]
+
+
 def truncate_tool_response(value: Any) -> Any:
-    """tool_response を 4096 文字に切る。超えたものは JSON の文字列にして先頭を送る。"""
+    """tool_response を 4096 文字に切る。超えたものは JSON の文字列にして先頭と末尾を送る。
+
+    先頭だけを送ると、長い前置きの後ろへ置いた指示が内容の規則に届かない。
+    """
     if value is None:
         return None
     if isinstance(value, str):
-        return value[:TOOL_RESPONSE_MAX_CHARS]
+        return _keep_head_and_tail(value)
     try:
         text = json.dumps(value, ensure_ascii=False, default=str)
     except Exception:  # noqa: BLE001
         text = str(value)
     if len(text) <= TOOL_RESPONSE_MAX_CHARS:
         return value
-    return text[:TOOL_RESPONSE_MAX_CHARS]
+    return _keep_head_and_tail(text)
 
 
 def send_postcall(call: ToolCall, config: HookConfig) -> bool:

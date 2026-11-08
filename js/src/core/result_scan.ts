@@ -98,3 +98,32 @@ export function argumentsScanFields(value: unknown): ArgumentsScanFields {
 export function resultScanText(value: unknown): string | undefined {
   return resultScanFields(value).result_scan;
 }
+
+// 受け取り側は結末の記録の走査の文だけを読むため、実行前の記録からは外す。
+export function withoutArgumentsScan(fields: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(fields).filter(([key]) => !key.startsWith("arguments_scan")));
+}
+
+// 文書ごとの配分の下限。文書が多いときは、順位の高い文書から上限に収まる数だけを読む。
+const DOCUMENT_MIN_CHARS = 256;
+
+// 取得した文書の走査の文を作る。全体で切ると、中央の順位の文書が丸ごと落ちるため、文書ごとに配分する。
+// 秘匿は切り詰めの前に完全な文書へ適用する。先に切ると、鍵と値が切れ目をまたいだときに、値の残りがそのまま残る。
+export function retrievedDocumentsScanFields(texts: string[]): ResultScanFields {
+  try {
+    const redacted = texts.map((text) => redactScanString(String(redactValue(text))));
+    const selected = redacted.slice(0, Math.floor(RESULT_SCAN_MAX_CHARS / (DOCUMENT_MIN_CHARS + 1)));
+    if (selected.length === 0) return {};
+    const budget = Math.max(DOCUMENT_MIN_CHARS, Math.floor(RESULT_SCAN_MAX_CHARS / selected.length) - 1);
+    const keep = Math.floor((budget - RESULT_SCAN_ELISION.length) / 2);
+    const sliced = selected.map((text) => (text.length <= budget ? text : text.slice(0, keep) + RESULT_SCAN_ELISION + text.slice(text.length - keep)));
+    const fields = resultScanFields(sliced);
+    if (selected.length < redacted.length || selected.some((text) => text.length > budget)) {
+      fields.result_scan_truncated = true;
+      fields.result_scan_length = redacted.reduce((sum, text) => sum + text.length, 0) + redacted.length - 1;
+    }
+    return fields;
+  } catch {
+    return { result_scan_failed: true };
+  }
+}

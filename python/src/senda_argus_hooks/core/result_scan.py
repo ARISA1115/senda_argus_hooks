@@ -168,6 +168,40 @@ def arguments_scan_fields(value: Any) -> dict[str, Any]:
     )
 
 
+def without_arguments_scan(fields: dict[str, Any]) -> dict[str, Any]:
+    """実行前の記録へ載せる項目。受け取り側は結末の記録の走査の文だけを読むため、実行前の記録からは外す。"""
+    return {k: v for k, v in fields.items() if not k.startswith(ARGUMENTS_SCAN_FIELD)}
+
+
+# 文書ごとの配分の下限。文書が多いときは、順位の高い文書から上限に収まる数だけを読む。
+_DOCUMENT_MIN_CHARS = 256
+
+
+def retrieved_documents_scan_fields(texts: list[str]) -> dict[str, Any]:
+    """取得した文書の走査の文と付帯の項目を作る。全体で切ると、中央の順位の文書が丸ごと落ちるため、文書ごとに配分する。
+
+    秘匿は切り詰めの前に完全な文書へ適用する。先に切ると、鍵と値が切れ目をまたいだときに、値の残りがそのまま残る。
+    """
+    try:
+        redacted = [redact_scan_string(text) for text in texts]
+        selected = redacted[: RESULT_SCAN_MAX_CHARS // (_DOCUMENT_MIN_CHARS + 1)]
+        if not selected:
+            return {}
+        budget = max(_DOCUMENT_MIN_CHARS, RESULT_SCAN_MAX_CHARS // len(selected) - 1)
+        keep = (budget - len(RESULT_SCAN_ELISION)) // 2
+        sliced = [
+            text if len(text) <= budget else text[:keep] + RESULT_SCAN_ELISION + text[-keep:]
+            for text in selected
+        ]
+        fields = result_scan_fields(sliced)
+        if len(selected) < len(redacted) or any(len(t) > budget for t in selected):
+            fields[TRUNCATED_FIELD] = True
+            fields[LENGTH_FIELD] = sum(len(t) for t in redacted) + len(redacted) - 1
+        return fields
+    except Exception:  # noqa: BLE001
+        return {FAILED_FIELD: True}
+
+
 def _scan_fields(
     value: Any, scan_field: str, truncated_field: str, length_field: str, failed_field: str
 ) -> dict[str, Any]:

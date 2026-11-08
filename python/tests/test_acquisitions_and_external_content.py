@@ -254,7 +254,7 @@ def test_external_content_written_to_memory_is_marked(tmp_path, monkeypatch) -> 
     """受け取ったメールの行を自分の指示ファイルへ書くと、その行に出所の印が付く。本文は載らない。"""
     Session = _install(monkeypatch)
     path = tmp_path / "e.jsonl"
-    _register(path, capture_arguments=False)
+    _register(path, capture_arguments=False, scan_arguments=False)
     session = Session()
     asyncio.run(session.call_tool("read_mail", {"id": "1"}))
     asyncio.run(session.call_tool("write_file", {"path": "/home/a/MEMORY.md", "content": f"{_OWN}\n{_PAYLOAD}\n"}))

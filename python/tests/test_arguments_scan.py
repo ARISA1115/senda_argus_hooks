@@ -1,4 +1,4 @@
-"""呼び出しの引数の走査の文。本文を送らない既定の設定で届くことと、秘匿と長さの上限を見る。
+"""呼び出しの引数の走査の文。既定で届くことと、無効にした導入へ送らないことと、秘匿と長さの上限を見る。
 
 引数の本文は capture_arguments が決める。走査の文は検知だけに使い、Argus は保存せず判定の後に捨てる。
 引数を読む規則は、本文を送らない既定の導入でも、シェルの命令や資格情報のファイルの名前に届く。
@@ -7,12 +7,14 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import sys
 import types
 from pathlib import Path
 
-from senda_argus_hooks import register, shutdown
+from senda_argus_hooks import autohook, register, shutdown
+from senda_argus_hooks.core.context import RuntimeConfig
 from senda_argus_hooks.core.result_scan import (
     ARGUMENTS_SCAN_FIELD,
     RESULT_SCAN_MAX_CHARS,
@@ -110,16 +112,45 @@ def test_mcp_call_tool_sends_scan_text_without_the_body_when_enabled(tmp_path, m
     assert events
     for event in events:
         mcp = event["data"]["mcp"]
-        # 本文は送らず、走査の文だけを送る。
+        # 本文は送らず、走査の文は結末の記録だけに載せる。
+        assert "arguments" not in mcp
+        if event["event_type"] == "mcp.tool_call.requested":
+            assert ARGUMENTS_SCAN_FIELD not in mcp
+        else:
+            assert COMMAND in mcp[ARGUMENTS_SCAN_FIELD]
+
+
+def test_mcp_call_tool_sends_scan_text_by_default(tmp_path, monkeypatch):
+    """既定で走査の文を送る。送らないと、引数を読む規則に呼び出しの中身が届かない。本文は送らない。"""
+    session_cls = _install_fake_mcp(monkeypatch)
+    path = tmp_path / "events.jsonl"
+    _register_mcp_only(path, instrument_argus_sdk=False)
+    try:
+        asyncio.run(session_cls().call_tool("run", {"cmd": COMMAND}))
+    finally:
+        shutdown()
+    events = [e for e in _read_events(path) if e["event_type"] == "mcp.tool_call.completed"]
+    assert events
+    for event in events:
+        mcp = event["data"]["mcp"]
         assert "arguments" not in mcp
         assert COMMAND in mcp[ARGUMENTS_SCAN_FIELD]
 
 
-def test_mcp_call_tool_sends_no_argument_text_by_default(tmp_path, monkeypatch):
-    """既定は、引数の文字を送らない。秘匿しても、書き込む内容やメッセージの本文を含むため、導入側が選ぶ。"""
+def test_autohook_default_enables_argument_scan(monkeypatch):
+    """環境変数を置かない導入でも有効である。設定の既定と環境変数の既定が食い違うと、片方の経路だけ黙る。"""
+    monkeypatch.delenv("SENDA_ARGUS_SCAN_ARGUMENTS", raising=False)
+    assert RuntimeConfig().scan_arguments is True
+    assert inspect.signature(register).parameters["scan_arguments"].default is True
+    source = Path(autohook.__file__).read_text(encoding="utf-8")
+    assert '_bool("SENDA_ARGUS_SCAN_ARGUMENTS", True)' in source
+
+
+def test_mcp_call_tool_sends_no_argument_text_when_disabled(tmp_path, monkeypatch):
+    """無効にした導入は、引数の文字を送らない。"""
     session_cls = _install_fake_mcp(monkeypatch)
     path = tmp_path / "events.jsonl"
-    _register_mcp_only(path, instrument_argus_sdk=False)
+    _register_mcp_only(path, instrument_argus_sdk=False, scan_arguments=False)
     try:
         asyncio.run(session_cls().call_tool("run", {"cmd": COMMAND}))
     finally:
@@ -195,7 +226,7 @@ def test_openai_agents_function_span_sends_the_arguments_with_the_completion(tmp
     assert "arguments" not in completed[0]["data"]["tool"]
 
 
-def test_openai_agents_function_span_sends_nothing_by_default(tmp_path):
+def test_openai_agents_function_span_sends_nothing_when_disabled(tmp_path):
     import types as _types
 
     from senda_argus_hooks.integrations.openai_agents import SendaArgusOpenAIAgentsProcessor
@@ -204,6 +235,7 @@ def test_openai_agents_function_span_sends_nothing_by_default(tmp_path):
     register(
         project="test-arguments-scan-oa-off",
         exporters=[{"type": "jsonl", "path": str(path)}],
+        scan_arguments=False,
     )
     try:
         processor = SendaArgusOpenAIAgentsProcessor()

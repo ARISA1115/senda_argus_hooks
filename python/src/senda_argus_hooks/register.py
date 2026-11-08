@@ -50,7 +50,7 @@ def register(
     capture_arguments: bool = False,
     capture_result: bool = False,
     scan_result: bool = True,
-    scan_arguments: bool = False,
+    scan_arguments: bool = True,
     scan_input: bool = True,
     capture_hash: bool = True,
     redact: bool = True,

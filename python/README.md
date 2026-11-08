@@ -975,8 +975,8 @@ Common controls:
 | `capture_response`  | Capture LLM response payloads when supported          |
 | `capture_arguments` | Capture MCP, generic tool, retrieval query, and embedding input payloads |
 | `capture_result`    | Capture MCP, generic tool, retrieval result, and RAG query results |
-| `scan_result`       | On by default. Send a redacted scan text of MCP and generic tool results for detection only. Argus does not store it. Env `SENDA_ARGUS_SCAN_RESULT` |
-| `scan_arguments`    | Off by default. Send a redacted scan text of MCP and generic tool call arguments for detection only. The text still carries argument strings, so enabling it is a deployment decision. Argus does not store it. Env `SENDA_ARGUS_SCAN_ARGUMENTS` |
+| `scan_result`       | On by default. Send a redacted scan text of MCP and generic tool results and of retrieved documents for detection only. Argus does not store it. Env `SENDA_ARGUS_SCAN_RESULT` |
+| `scan_arguments`    | On by default. Send a redacted scan text of MCP and generic tool call arguments for detection only. The text still carries argument strings, so set it to false to stop sending them. Argus does not store it. Env `SENDA_ARGUS_SCAN_ARGUMENTS` |
 | `scan_input`        | On by default. Send a redacted scan text of voice session transcripts for detection only. Raw audio is never sent. Argus does not store it. Env `SENDA_ARGUS_SCAN_INPUT` |
 | `redact`            | Apply redaction to configured sensitive values        |
 | `run_environment`   | `production`, `staging`, `test`, or `evaluation`. Sent at the top level of every event. Other values are dropped. Env `SENDA_ARGUS_RUN_ENVIRONMENT` |

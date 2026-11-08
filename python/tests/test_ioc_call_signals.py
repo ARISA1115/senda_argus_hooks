@@ -7,6 +7,7 @@ import base64
 
 from senda_argus_hooks.core import ioc_signals as sig
 from senda_argus_hooks.core.ioc_call_fields import ioc_call_fields
+from senda_argus_hooks.core.result_scan import ARGUMENTS_SCAN_FIELD
 from senda_argus_hooks.instrumentors.mcp_python import _mcp_metadata
 
 def _b64(text):
@@ -22,7 +23,10 @@ class _Server:
 
 
 def _meta(arguments: dict) -> dict:
-    return _mcp_metadata(_Server(), "call_tool", ("fetch", arguments), {})
+    """派生値の項目だけを見る。走査の文は別の項目で、test_arguments_scan が見る。"""
+    meta = _mcp_metadata(_Server(), "call_tool", ("fetch", arguments), {})
+    meta.pop(ARGUMENTS_SCAN_FIELD, None)
+    return meta
 
 
 class TestIocFieldsOnCall:
