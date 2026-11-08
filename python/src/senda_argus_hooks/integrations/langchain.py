@@ -14,6 +14,7 @@ from senda_argus_hooks.core.instruction_files import (
 )
 from senda_argus_hooks.core.result_scan import arguments_scan_fields, result_scan_fields
 from senda_argus_hooks.core.runtime import emit_event, get_config
+from senda_argus_hooks.integrations.llamaindex import _retrieval_payload, _retrieval_result_payload
 
 try:  # Optional dependency. Unit tests use this module without LangChain installed.
     from langchain_core.callbacks import BaseCallbackHandler as _BaseCallbackHandler
@@ -38,6 +39,14 @@ def _remember(store: dict, key: str, value: Any) -> None:
             store.pop(stale, None)
 
 
+def _retriever_meta(serialized: Any, query: Any) -> dict[str, Any]:
+    """retriever の名前と問い合わせを、検索の事象の項目の形へ写す。"""
+    name = None
+    if isinstance(serialized, dict):
+        name = serialized.get("name") or (serialized.get("id") or [None])[-1]
+    return {"query": query, "retriever_name": name, "retriever_type": name}
+
+
 class SendaArgusCallbackHandler(_BaseCallbackHandler):
     """LangChain callback handler that emits normalized Senda-Argus events.
 
@@ -60,6 +69,7 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
         self._prompt_semantic_hashes: dict[str, list[str]] = {}
         self._tool_types: dict[str, str] = {}
         self._requested_models: dict[str, str] = {}
+        self._retriever_meta: dict[str, dict[str, Any]] = {}
 
     def on_llm_start(self, serialized: dict[str, Any], prompts: list[str], **kwargs: Any) -> None:
         run_id = _run_key(kwargs)
@@ -207,6 +217,49 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
             status="success",
             latency_ms=latency_ms,
             purpose_id=purpose_id,
+        )
+
+    def on_retriever_start(self, serialized: dict[str, Any], query: str, **kwargs: Any) -> None:
+        run_id = _run_key(kwargs)
+        _remember(self._starts, run_id, time.perf_counter())
+        meta = _retriever_meta(serialized, query)
+        _remember(self._retriever_meta, run_id, meta)
+        payload = _retrieval_payload(self.framework, query, meta)
+        emit_event(
+            "retrieval.requested",
+            source={"component": "integration", "sdk": self.framework, "operation": "on_retriever_start"},
+            data={"retrieval": payload},
+            status="start",
+            purpose_id=payload["purpose_id"],
+        )
+
+    def on_retriever_end(self, documents: Any, **kwargs: Any) -> None:
+        run_id = _run_key(kwargs)
+        latency_ms = _latency_ms(self._starts.pop(run_id, None))
+        meta = self._retriever_meta.pop(run_id, {})
+        payload = _retrieval_result_payload(self.framework, documents, meta)
+        emit_event(
+            "retrieval.completed",
+            source={"component": "integration", "sdk": self.framework, "operation": "on_retriever_end"},
+            data={"retrieval": payload},
+            status="success",
+            latency_ms=latency_ms,
+            purpose_id=payload["purpose_id"],
+        )
+
+    def on_retriever_error(self, error: BaseException, **kwargs: Any) -> None:
+        run_id = _run_key(kwargs)
+        latency_ms = _latency_ms(self._starts.pop(run_id, None))
+        meta = self._retriever_meta.pop(run_id, {})
+        payload = _retrieval_payload(self.framework, meta.get("query"), meta)
+        emit_event(
+            "retrieval.failed",
+            source={"component": "integration", "sdk": self.framework, "operation": "on_retriever_error"},
+            data={"retrieval": payload},
+            status="error",
+            latency_ms=latency_ms,
+            error={"type": error.__class__.__name__, "message": str(error)},
+            purpose_id=payload["purpose_id"],
         )
 
     def on_tool_error(self, error: BaseException, **kwargs: Any) -> None:

@@ -195,15 +195,15 @@ SENDA_ARGUS_CAPTURE_RESPONSE=false
 SENDA_ARGUS_CAPTURE_ARGUMENTS=false
 SENDA_ARGUS_CAPTURE_RESULT=false
 SENDA_ARGUS_SCAN_RESULT=true
-SENDA_ARGUS_SCAN_ARGUMENTS=false
+SENDA_ARGUS_SCAN_ARGUMENTS=true
 SENDA_ARGUS_SCAN_INPUT=true
 SENDA_ARGUS_CAPTURE_HASH=true
 SENDA_ARGUS_REDACT=true
 ```
 
-`SENDA_ARGUS_SCAN_RESULT` is separate from result capture. It sends a redacted scan text of each MCP and generic tool result, capped at 32768 characters with the head and tail kept, so that Argus can detect instructions embedded in tool results. Argus uses it for detection only and does not store it. Set it to `false` to stop sending it; Argus then cannot detect instructions in tool results on the agent-run path.
+`SENDA_ARGUS_SCAN_RESULT` is separate from result capture. It sends a redacted scan text of each MCP and generic tool result and of retrieved documents, capped at 32768 characters with the head and tail kept, so that Argus can detect instructions embedded in tool results. Argus uses it for detection only and does not store it. Set it to `false` to stop sending it; Argus then cannot detect instructions in tool results on the agent-run path.
 
-`SENDA_ARGUS_SCAN_ARGUMENTS` is off by default and separate from argument capture. When enabled, it sends a redacted scan text of the arguments of each MCP and generic tool call, capped at 32768 characters with the head and tail kept, so that the argument rules (shell commands, credential files, sandbox escapes, cloud discovery, system prompt probing) can fire when argument bodies are not captured. Secrets are redacted before the text is built, but the text still carries the argument strings, which can include file contents and message bodies. It is therefore a deployment decision and not a default. Argus uses it for detection only and does not store it. Without it, those rules only see the tool name.
+`SENDA_ARGUS_SCAN_ARGUMENTS` is on by default and separate from argument capture. It sends a redacted scan text of the arguments of each MCP and generic tool call, capped at 32768 characters with the head and tail kept, so that the argument rules (shell commands, credential files, sandbox escapes, cloud discovery, system prompt probing) can fire when argument bodies are not captured. Secrets are redacted before the text is built, but the text still carries the argument strings, which can include file contents and message bodies. Argus uses it for detection only and does not store it. Local exporters write the event as built, so the scan text also appears in their output. Set it to `false` to stop sending it; the argument rules then only see the tool name.
 
 `SENDA_ARGUS_SCAN_INPUT` does the same for the user side of a voice session: the transcript of each utterance is sent as a redacted scan text with the same cap, so that instructions spoken into the room reach the injection rules. Raw audio is never sent. Argus uses it for detection only and does not store it.
 

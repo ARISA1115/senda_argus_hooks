@@ -28,7 +28,12 @@ from senda_argus_hooks.core.purpose_registry import (
     register_mcp_tool_source,
     selected_tool_purpose,
 )
-from senda_argus_hooks.core.result_scan import arguments_scan_fields, result_scan_fields, scan_source
+from senda_argus_hooks.core.result_scan import (
+    arguments_scan_fields,
+    result_scan_fields,
+    scan_source,
+    without_arguments_scan,
+)
 from senda_argus_hooks.core.runtime import emit_event, get_config
 from senda_argus_hooks.core.tool_result import tool_result_is_error
 from senda_argus_hooks.core.unjudged import check_before_action
@@ -216,7 +221,7 @@ class ArgusSDKInstrumentor(BaseInstrumentor):
             emit_event(
                 "mcp.tool_call.requested",
                 source={"component": "instrumentor", "sdk": "senda_argus_hooks.sdk", "operation": operation},
-                data={"mcp": base_mcp},
+                data={"mcp": without_arguments_scan(base_mcp)},
                 status="start",
                 purpose_id=purpose_id,
             )

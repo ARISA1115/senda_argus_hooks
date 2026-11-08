@@ -38,7 +38,12 @@ from senda_argus_hooks.core.resource_access import (
     classify_read_resource,
     classify_resource_access,
 )
-from senda_argus_hooks.core.result_scan import arguments_scan_fields, result_scan_fields, scan_source
+from senda_argus_hooks.core.result_scan import (
+    arguments_scan_fields,
+    result_scan_fields,
+    scan_source,
+    without_arguments_scan,
+)
 from senda_argus_hooks.core.runtime import effective_agent_id, emit_event, get_config
 from senda_argus_hooks.core.tool_definitions import (
     normalize_provider_url,
@@ -193,7 +198,7 @@ class MCPPythonInstrumentor(BaseInstrumentor):
             emit_event(
                 "mcp.tool_call.requested",
                 source={"component": "instrumentor", "sdk": "mcp_python", "operation": operation},
-                data={"mcp": meta},
+                data={"mcp": without_arguments_scan(meta)},
                 status="start",
                 purpose_id=purpose_id,
             )

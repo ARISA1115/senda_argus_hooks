@@ -98,3 +98,18 @@ export function argumentsScanFields(value: unknown): ArgumentsScanFields {
 export function resultScanText(value: unknown): string | undefined {
   return resultScanFields(value).result_scan;
 }
+
+// 受け取り側は結末の記録の走査の文だけを読むため、実行前の記録からは外す。
+export function withoutArgumentsScan(fields: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(fields).filter(([key]) => !key.startsWith("arguments_scan")));
+}
+
+// 取得した文書ごとに同じ量を割り当てる。全体で切ると、中央の順位の文書が丸ごと走査から落ちる。
+export function perDocumentScanTexts(texts: string[]): string[] {
+  const budget = Math.max(256, Math.floor(RESULT_SCAN_MAX_CHARS / Math.max(1, texts.length)) - RESULT_SCAN_ELISION.length * 2);
+  return texts.map((text) => {
+    if (text.length <= budget) return text;
+    const keep = Math.floor((budget - RESULT_SCAN_ELISION.length) / 2);
+    return text.slice(0, keep) + RESULT_SCAN_ELISION + text.slice(text.length - keep);
+  });
+}

@@ -168,6 +168,23 @@ def arguments_scan_fields(value: Any) -> dict[str, Any]:
     )
 
 
+def without_arguments_scan(fields: dict[str, Any]) -> dict[str, Any]:
+    """実行前の記録へ載せる項目。受け取り側は結末の記録の走査の文だけを読むため、実行前の記録からは外す。"""
+    return {k: v for k, v in fields.items() if not k.startswith(ARGUMENTS_SCAN_FIELD)}
+
+
+def per_document_scan_texts(texts: list[str]) -> list[str]:
+    """取得した文書ごとに同じ量を割り当てる。全体で切ると、中央の順位の文書が丸ごと走査から落ちる。"""
+    budget = max(256, RESULT_SCAN_MAX_CHARS // max(1, len(texts)) - len(RESULT_SCAN_ELISION) * 2)
+    out = []
+    for text in texts:
+        if len(text) > budget:
+            keep = (budget - len(RESULT_SCAN_ELISION)) // 2
+            text = text[:keep] + RESULT_SCAN_ELISION + text[-keep:]
+        out.append(text)
+    return out
+
+
 def _scan_fields(
     value: Any, scan_field: str, truncated_field: str, length_field: str, failed_field: str
 ) -> dict[str, Any]:

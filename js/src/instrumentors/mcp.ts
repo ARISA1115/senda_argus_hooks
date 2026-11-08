@@ -6,7 +6,7 @@ import { dataSourceHash, deriveMcpProfileId, derivePurposeId, mcpDataSourceProfi
 import { emitEvent, getConfig, observe } from "../runtime.js";
 import { getMcpToolDirectory, toolNamesOf, UNNAMED_MCP_SERVER } from "../core/mcp_tools.js";
 import { normalizeProviderUrl, toolDefinitionHashes } from "../core/tool_definitions.js";
-import { argumentsScanFields, resultScanFields } from "../core/result_scan.js";
+import { argumentsScanFields, resultScanFields, withoutArgumentsScan } from "../core/result_scan.js";
 
 const patched = Symbol.for("senda.argus.mcp.patched");
 
@@ -111,7 +111,7 @@ export function instrumentMCP(client: any, metadata: McpMetadata = {}): boolean 
       // 同じ呼び出しのダイジェストが識別子の値で変わらない。
       const attached = withCallId(request);
       if (attached.callId) meta.call_id = attached.callId;
-      emitEvent("mcp.tool_call.requested", { source: { component: "instrumentor", sdk: "mcp_js", operation: "callTool" }, data: { mcp: meta }, status: "start", purposeId });
+      emitEvent("mcp.tool_call.requested", { source: { component: "instrumentor", sdk: "mcp_js", operation: "callTool" }, data: { mcp: withoutArgumentsScan(meta) }, status: "start", purposeId });
       let result: any;
       try {
         result = await original.call(this, attached.request, ...rest);

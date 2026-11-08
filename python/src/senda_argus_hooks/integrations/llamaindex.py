@@ -13,6 +13,7 @@ from senda_argus_hooks.core.identity import (
     derive_retrieval_purpose_id,
     rag_data_source_profile,
 )
+from senda_argus_hooks.core.result_scan import per_document_scan_texts, result_scan_fields
 from senda_argus_hooks.core.runtime import emit_event, get_config
 
 
@@ -573,7 +574,7 @@ def _call_query_engine_method_with_argus(
             error={"type": exc.__class__.__name__, "message": str(exc)},
         )
         raise
-    completed = {**data, "result_hash": sha256_value(result), **_rag_context_hash_payload(result)}
+    completed = {**data, "result_hash": sha256_value(result), **_rag_context_hash_payload(result), **_rag_context_scan_fields(result)}
     if get_config().capture_result:
         completed["result"] = _safe_value(result)
     emit_event(
@@ -622,7 +623,7 @@ async def _acall_query_engine_method_with_argus(
             error={"type": exc.__class__.__name__, "message": str(exc)},
         )
         raise
-    completed = {**data, "result_hash": sha256_value(result), **_rag_context_hash_payload(result)}
+    completed = {**data, "result_hash": sha256_value(result), **_rag_context_hash_payload(result), **_rag_context_scan_fields(result)}
     if get_config().capture_result:
         completed["result"] = _safe_value(result)
     emit_event(
@@ -944,7 +945,7 @@ def query_with_argus(
             purpose_id=purpose_id,
         )
         raise
-    completed = {**data, "result_hash": sha256_value(result), **_rag_context_hash_payload(result)}
+    completed = {**data, "result_hash": sha256_value(result), **_rag_context_hash_payload(result), **_rag_context_scan_fields(result)}
     if get_config().capture_result:
         completed["result"] = _safe_value(result)
     emit_event(
@@ -1022,6 +1023,7 @@ def _retrieval_result_payload(framework: str, results: Any, meta: dict[str, Any]
     )
     if get_config().capture_result:
         payload["result"] = _safe_value(results)
+    payload.update(_retrieved_text_scan_fields(items))
     return {k: v for k, v in payload.items() if v is not None}
 
 
@@ -1199,13 +1201,16 @@ def _node_text(item: Any) -> str | None:
             text = get_content()
             if text is not None:
                 return str(text)
-    text = getattr(node, "text", None)
-    if text is not None:
-        return str(text)
-    if isinstance(node, dict):
-        text = node.get("text")
+    # text は LlamaIndex、page_content は LangChain の Document の本文の項目である。
+    for name in ("text", "page_content"):
+        text = getattr(node, name, None)
         if text is not None:
             return str(text)
+    if isinstance(node, dict):
+        for name in ("text", "page_content"):
+            text = node.get(name)
+            if text is not None:
+                return str(text)
     return None
 
 
@@ -1269,6 +1274,34 @@ def _vector_count(vector: Any) -> int | None:
         return 1
     return None
 
+
+
+def _retrieved_text_scan_fields(items: list[Any]) -> dict[str, Any]:
+    """取得した文書の本文から、検知の走査だけに使う文を作る。
+
+    ハッシュと件数だけでは、文書に埋め込まれた指示が注入の規則に届かない。tool の戻り値と同じ秘匿と
+    上限を通し、Argus は判定の後に捨てる。送るかは tool の戻り値と同じ scan_result が決める。
+    """
+    if not get_config().scan_result:
+        return {}
+    texts = [text for text in (_node_text(item) for item in items) if text and text.strip()]
+    return result_scan_fields(per_document_scan_texts(texts)) if texts else {}
+
+
+def _rag_context_scan_fields(result: Any) -> dict[str, Any]:
+    """クエリエンジンの応答が LLM へ渡した検索コンテキストの走査の文を作る。形は context_hash の抽出と同じ。"""
+    source_nodes = getattr(result, "source_nodes", None)
+    if source_nodes is None and isinstance(result, dict):
+        source_nodes = result.get("source_nodes")
+    if source_nodes is not None:
+        return _retrieved_text_scan_fields(_as_list(source_nodes))
+    safe = _safe_value(result)
+    context = safe.get("context") if isinstance(safe, dict) else None
+    if not isinstance(context, list) or not get_config().scan_result:
+        return {}
+    texts = [item if isinstance(item, str) else _node_text(item) for item in context]
+    texts = [text for text in texts if text and text.strip()]
+    return result_scan_fields(per_document_scan_texts(texts)) if texts else {}
 
 
 def _rag_context_hash_payload(result: Any) -> dict[str, Any]:
