@@ -93,3 +93,39 @@ def test_every_retrieved_document_keeps_its_tail(tmp_path):
     for i in range(6):
         assert f"end-of-document-{i}" in fields[SCAN_FIELD]
 
+
+def _fields(docs):
+    from senda_argus_hooks.core.result_scan import retrieved_documents_scan_fields
+
+    return retrieved_documents_scan_fields(docs)
+
+
+def test_a_secret_across_the_cut_point_is_not_left_in_the_tail():
+    """切り詰めの前に秘匿する。切れ目をまたぐ値の残りが、そのまま残らないことを見る。"""
+    value = "S3cr3tTail" * 4000
+    text = _fields(["password=" + value])[SCAN_FIELD]
+    assert "S3cr3tTail" not in text
+
+
+def test_a_cut_document_reports_truncation_and_the_original_length():
+    docs = ["x " * 20000, "y " * 20000]
+    fields = _fields(docs)
+    assert fields["result_scan_truncated"] is True
+    assert fields["result_scan_length"] == sum(len(d) for d in docs) + 1
+
+
+def test_short_documents_are_not_reported_as_truncated():
+    fields = _fields(["short one", "short two"])
+    assert "result_scan_truncated" not in fields
+
+
+def test_many_documents_stay_within_the_limit_and_keep_the_top_ranked():
+    from senda_argus_hooks.core.result_scan import RESULT_SCAN_MAX_CHARS
+
+    docs = [f"doc-{i} " + "z " * 400 + f"end-{i}" for i in range(300)]
+    fields = _fields(docs)
+    assert len(fields[SCAN_FIELD]) <= RESULT_SCAN_MAX_CHARS
+    assert "end-0" in fields[SCAN_FIELD]
+    assert "end-100" in fields[SCAN_FIELD]
+    assert fields["result_scan_truncated"] is True
+

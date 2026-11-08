@@ -1,5 +1,5 @@
 import { getConfig } from "../runtime.js";
-import { perDocumentScanTexts, resultScanFields } from "../core/result_scan.js";
+import { retrievedDocumentsScanFields } from "../core/result_scan.js";
 
 // 取得した文書の 1 件から本文を読む。node は LlamaIndex、pageContent は LangChain の形である。
 function documentText(item: any): string | undefined {
@@ -25,5 +25,5 @@ export function retrievedTextScanFields(result: any): Record<string, unknown> {
   const items = Array.isArray(result) ? result : result?.sourceNodes ?? result?.source_nodes ?? [];
   if (!Array.isArray(items)) return {};
   const texts = items.map(documentText).filter((text): text is string => typeof text === "string" && text.trim() !== "");
-  return texts.length ? { ...resultScanFields(perDocumentScanTexts(texts)) } : {};
+  return texts.length ? { ...retrievedDocumentsScanFields(texts) } : {};
 }

@@ -13,7 +13,7 @@ from senda_argus_hooks.core.identity import (
     derive_retrieval_purpose_id,
     rag_data_source_profile,
 )
-from senda_argus_hooks.core.result_scan import per_document_scan_texts, result_scan_fields
+from senda_argus_hooks.core.result_scan import retrieved_documents_scan_fields
 from senda_argus_hooks.core.runtime import emit_event, get_config
 
 
@@ -1285,7 +1285,7 @@ def _retrieved_text_scan_fields(items: list[Any]) -> dict[str, Any]:
     if not get_config().scan_result:
         return {}
     texts = [text for text in (_node_text(item) for item in items) if text and text.strip()]
-    return result_scan_fields(per_document_scan_texts(texts)) if texts else {}
+    return retrieved_documents_scan_fields(texts) if texts else {}
 
 
 def _rag_context_scan_fields(result: Any) -> dict[str, Any]:
@@ -1301,7 +1301,7 @@ def _rag_context_scan_fields(result: Any) -> dict[str, Any]:
         return {}
     texts = [item if isinstance(item, str) else _node_text(item) for item in context]
     texts = [text for text in texts if text and text.strip()]
-    return result_scan_fields(per_document_scan_texts(texts)) if texts else {}
+    return retrieved_documents_scan_fields(texts) if texts else {}
 
 
 def _rag_context_hash_payload(result: Any) -> dict[str, Any]:
