@@ -25,6 +25,10 @@ class RuntimeConfig:
     # 使う文を送る。本文の保存は capture_prompt が決める。既定で送らないと、話し言葉に紛れた指示が
     # 規則に届かない。
     scan_input: bool = True
+    # ツールの実行の前に Argus の判定を問い合わせ、拒否と承認待ちの呼び出しを止める。既定は無効。
+    enforce_precheck: bool = False
+    # 判定に接続できないときに通すか。
+    precheck_fail_open: bool = True
     capture_hash: bool = True
     redact: bool = True
     actor: dict[str, Any] = field(default_factory=dict)

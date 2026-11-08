@@ -4,6 +4,7 @@ import { newTraceId, runWithContext } from "../core/context.js";
 import { emitEvent, getConfig } from "../runtime.js";
 import { safeValue } from "../instrumentors/common.js";
 import { argumentsScanFields, resultScanFields } from "../core/result_scan.js";
+import { checkToolCall, precheckEnabled } from "../core/precheck.js";
 import { retrievedTextScanFields } from "./retrieval_scan.js";
 
 const starts = new Map<string, number>();
@@ -36,6 +37,16 @@ function finish(runId?: unknown): { traceId: string; latencyMs?: number } {
   return { traceId, latencyMs: started == null ? undefined : Math.round(performance.now() - started) };
 }
 
+// ツールの入力を構造のまま返す。JSON の文字列のままだと改行が 2 文字になり、2 行目の命令を読めない。
+function structuredInput(input: unknown): unknown {
+  if (typeof input !== "string" || !/^[{[]/.test(input)) return input;
+  try {
+    return JSON.parse(input);
+  } catch {
+    return input;
+  }
+}
+
 function maybeBody(value: unknown, capture: boolean) {
   return capture ? safeValue(value) : { hash: sha256Value(safeValue(value)) };
 }
@@ -51,6 +62,9 @@ function toolResult(output: unknown): Record<string, unknown> {
 
 export class SendaArgusLangChainCallbackHandler {
   name = "senda_argus";
+  // LangChain は raiseError の無いハンドラーの例外を握りつぶす。実行前の判定を有効にしたときだけ立てる。
+  get raiseError(): boolean { return precheckEnabled(); }
+  awaitHandlers = true;
 
   handleLLMStart(serialized: any, prompts: any, runId?: unknown) {
     const traceId = begin(runId);
@@ -110,13 +124,21 @@ export class SendaArgusLangChainCallbackHandler {
     }));
   }
 
-  handleToolStart(tool: any, input: any, runId?: unknown) {
+  async handleToolStart(tool: any, input: any, runId?: unknown) {
     const traceId = begin(runId);
-    return runWithContext({ traceId, runId: key(runId) || undefined }, () => emitEvent("tool_call.requested", {
+    // 記録の後に問い合わせる。止めた呼び出しも、試みとして記録に残す。
+    await runWithContext({ traceId, runId: key(runId) || undefined }, () => emitEvent("tool_call.requested", {
       source: { component: "integration", framework: "langchain", sdk: "langchain", operation: "tool" },
-      data: { tool: { framework: "langchain", name: tool?.name ?? tool?.id?.at?.(-1), arguments: maybeBody(input, getConfig().captureArguments), ...(getConfig().scanArguments ? argumentsScanFields(input) : {}) } },
+      data: { tool: { framework: "langchain", name: tool?.name ?? tool?.id?.at?.(-1), arguments: maybeBody(input, getConfig().captureArguments), ...(getConfig().scanArguments ? argumentsScanFields(structuredInput(input)) : {}) } },
       status: "requested"
     }));
+    try {
+      await checkToolCall(tool?.name ?? tool?.id?.at?.(-1), structuredInput(input), "langchain");
+    } catch (error) {
+      // 止めた呼び出しには終了の通知が来ない。控えを残すと、拒否のたびに増える。
+      finish(runId);
+      throw error;
+    }
   }
 
   handleToolEnd(output: any, runId?: unknown) {
@@ -172,6 +194,21 @@ export class SendaArgusLangChainCallbackHandler {
       status: "success"
     }));
   }
+}
+
+// raiseError はハンドラーの全コールバックに効くため、実行の判定以外の観測の例外は止める。
+for (const name of Object.getOwnPropertyNames(SendaArgusLangChainCallbackHandler.prototype)) {
+  if (!name.startsWith("handle") || name === "handleToolStart") continue;
+  const proto = SendaArgusLangChainCallbackHandler.prototype as any;
+  const original = proto[name];
+  proto[name] = function (this: unknown, ...args: unknown[]) {
+    try {
+      const result = original.apply(this, args);
+      return result && typeof result.catch === "function" ? result.catch(() => undefined) : result;
+    } catch {
+      return undefined;
+    }
+  };
 }
 
 export function langChainCallbackHandler() {

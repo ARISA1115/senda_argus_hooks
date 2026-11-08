@@ -11,7 +11,7 @@ import { ArgusExporter } from "./exporters/argus.js";
 
 let config: RuntimeConfig = {
   project: "default", environment: "dev", capturePrompt: false, captureResponse: false,
-  captureArguments: false, captureResult: false, scanResult: true, scanArguments: true, captureHash: true, redact: true, actor: {}
+  captureArguments: false, captureResult: false, scanResult: true, scanArguments: true, enforcePrecheck: false, precheckFailOpen: true, captureHash: true, redact: true, actor: {}
 };
 let exporters: Exporter[] = [];
 // 収集が動いているか。configure で立て、shutdown で下ろす。canary はこれが立っている間だけ送る。
@@ -21,6 +21,7 @@ let instrumented = false;
 const shutdownHooks: Array<() => void> = [];
 
 export function isCollecting(): boolean { return collecting && instrumented; }
+export function isCollectionRunning(): boolean { return collecting; }
 
 // 計装した呼び出しが送った事象の agent_id。導入の確認と canary は、見張る対象と同じ識別子で送る。
 // 識別子を明示しないとき、計装の事象は SDK ごとの値から識別子を導くため、導入の処理が自分で導くと
@@ -81,6 +82,8 @@ export function configure(options: RegisterOptions = {}): void {
     captureResult: options.captureResult ?? false,
     scanResult: options.scanResult ?? true,
     scanArguments: options.scanArguments ?? true,
+    enforcePrecheck: options.enforcePrecheck ?? false,
+    precheckFailOpen: options.precheckFailOpen ?? true,
     captureHash: options.captureHash ?? true,
     redact: options.redact ?? true,
     actor: options.actor ?? {},

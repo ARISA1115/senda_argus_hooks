@@ -51,14 +51,15 @@ export interface ResultScanFields {
 
 // 事象へ載せる走査の文と印。切り詰めたら印と元の長さを載せる。作成に失敗しても例外を出さず、
 // 落としたことを示す印だけを返す。事象は送る。
-export function resultScanFields(value: unknown): ResultScanFields {
+export function resultScanFields(value: unknown, joiner = " "): ResultScanFields {
   try {
     const parts: string[] = [];
     const cut = { hit: false };
     collect(redactValue(value), parts, 0, cut);
     const kept = parts.filter((part) => part.trim() !== "");
     if (kept.length === 0) return cut.hit ? { result_scan_truncated: true } : {};
-    let text = kept.join(" ");
+    // 引数は値ごとに改行で分ける。命令の規則は行頭を見るため、前の項目の後ろに続くと外れる。
+    let text = kept.join(joiner);
     const out: ResultScanFields = {};
     if (text.length > RESULT_SCAN_MAX_CHARS) {
       out.result_scan_truncated = true;
@@ -86,7 +87,7 @@ export interface ArgumentsScanFields {
 // 導出を 2 つ持たない。引数の側だけ別に書くと、秘匿か上限の片方だけが変わったときに、秘密が通るか、
 // 長い前置きの後ろの命令が落ちる。
 export function argumentsScanFields(value: unknown): ArgumentsScanFields {
-  const fields = resultScanFields(value);
+  const fields = resultScanFields(value, "\n");
   const out: ArgumentsScanFields = {};
   if (fields.result_scan !== undefined) out.arguments_scan = fields.result_scan;
   if (fields.result_scan_truncated) out.arguments_scan_truncated = true;

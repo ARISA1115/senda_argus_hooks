@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import ast
 import contextlib
+import functools
+import json
+import logging
 import time
 from typing import Any
 
@@ -12,6 +16,7 @@ from senda_argus_hooks.core.instruction_files import (
     system_prompt_pair_digests,
     system_prompt_semantic_digests,
 )
+from senda_argus_hooks.core.precheck import ToolCallBlocked, check_tool_call, precheck_enabled
 from senda_argus_hooks.core.result_scan import arguments_scan_fields, result_scan_fields
 from senda_argus_hooks.core.runtime import emit_event, get_config
 from senda_argus_hooks.integrations.llamaindex import _retrieval_payload, _retrieval_result_payload
@@ -27,6 +32,9 @@ except Exception:  # noqa: BLE001  # pragma: no cover - 任意の依存の impor
 MAX_PENDING_RUNS: int = 1024
 
 
+logger = logging.getLogger("senda_argus_hooks.langchain")
+
+
 def _remember(store: dict, key: str, value: Any) -> None:
     """控えへ 1 件積む。上限を超えた分は古い順に落とす。
 
@@ -37,6 +45,18 @@ def _remember(store: dict, key: str, value: Any) -> None:
     if len(store) > MAX_PENDING_RUNS:
         for stale in list(store)[: len(store) - MAX_PENDING_RUNS]:
             store.pop(stale, None)
+
+
+def _structured_input(input_str: Any, kwargs: dict[str, Any]) -> Any:
+    """ツールの入力を構造のまま返す。文字列にした dict は改行が 2 文字になり、2 行目の命令を読めない。"""
+    inputs = kwargs.get("inputs")
+    if isinstance(inputs, dict):
+        return inputs
+    if isinstance(input_str, str) and input_str[:1] in "{[":
+        for parse in (json.loads, ast.literal_eval):
+            with contextlib.suppress(ValueError, SyntaxError, RecursionError, MemoryError, TypeError):
+                return parse(input_str)
+    return input_str
 
 
 def _retriever_meta(serialized: Any, query: Any) -> dict[str, Any]:
@@ -54,6 +74,11 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
     dependency. Add it to LangChain callback configuration when you want to
     capture framework-level events without application-level audit calls.
     """
+
+    @property
+    def raise_error(self) -> bool:
+        """実行前の判定が有効なときだけ例外を伝える。登録の前に作ったハンドラーでも、呼び出しの時の設定に従う。"""
+        return precheck_enabled()
 
     def __init__(self, *, framework: str = "langchain", capture_payloads: bool | None = None):
         with contextlib.suppress(TypeError):
@@ -182,8 +207,9 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
         }
         if get_config().capture_arguments:
             tool["arguments"] = input_str
+        structured = _structured_input(input_str, kwargs)
         if get_config().scan_arguments:
-            tool.update(arguments_scan_fields(input_str))
+            tool.update(arguments_scan_fields(structured))
         emit_event(
             "tool_call.requested",
             source={"component": "integration", "sdk": self.framework, "operation": "on_tool_start"},
@@ -191,6 +217,14 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
             status="start",
             purpose_id=purpose_id,
         )
+        # 記録の後に問い合わせる。止めた呼び出しも、試みとして記録に残す。
+        try:
+            check_tool_call(tool_name, structured)
+        except ToolCallBlocked:
+            # 止めた呼び出しには終了の通知が来ない。控えを残すと、拒否のたびに増える。
+            self._starts.pop(run_id, None)
+            self._tool_types.pop(run_id, None)
+            raise
 
     def on_tool_end(self, output: Any, **kwargs: Any) -> None:
         run_id = _run_key(kwargs)
@@ -341,6 +375,24 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
 
     def _capture_response(self) -> bool:
         return get_config().capture_response if self.capture_payloads is None else self.capture_payloads
+
+
+def _contained(method: Any) -> Any:
+    """観測の例外を止める。raise_error はハンドラーの全コールバックに効くため、実行の判定以外は伝えない。"""
+
+    @functools.wraps(method)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return method(*args, **kwargs)
+        except Exception:  # noqa: BLE001 - 観測の失敗で利用者の処理を止めない
+            logger.warning("langchain_callback_failed", exc_info=True)
+            return None
+
+    return wrapper
+
+
+for _callback in [n for n in vars(SendaArgusCallbackHandler) if n.startswith("on_") and n != "on_tool_start"]:
+    setattr(SendaArgusCallbackHandler, _callback, _contained(getattr(SendaArgusCallbackHandler, _callback)))
 
 
 def _payload_or_hash(key: str, value: Any, capture: bool) -> dict[str, Any]:

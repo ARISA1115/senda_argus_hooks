@@ -52,6 +52,8 @@ def register(
     scan_result: bool = True,
     scan_arguments: bool = True,
     scan_input: bool = True,
+    enforce_precheck: bool = False,
+    precheck_fail_open: bool = True,
     capture_hash: bool = True,
     redact: bool = True,
     actor: dict[str, Any] | None = None,
@@ -82,6 +84,8 @@ def register(
         capture_result=capture_result,
         scan_result=scan_result,
         scan_arguments=scan_arguments,
+        enforce_precheck=enforce_precheck,
+        precheck_fail_open=precheck_fail_open,
         scan_input=scan_input,
         capture_hash=capture_hash,
         redact=redact,
@@ -146,14 +150,17 @@ def register(
 
 def _configure_unjudged_guard(exporters: list[Any]) -> None:
     """Argus の送出器があれば、行動の前の確認をその宛先で有効にする。無ければ無効にする。"""
+    from senda_argus_hooks.core.precheck import configure_precheck
     from senda_argus_hooks.core.unjudged import configure_guard
     from senda_argus_hooks.exporters.argus import ArgusExporter
 
     argus = next((e for e in exporters if isinstance(e, ArgusExporter)), None)
     if argus is None:
         configure_guard(None)
+        configure_precheck(None)
         return
     configure_guard(argus.endpoint, argus.api_key, timeout=argus.admission_timeout)
+    configure_precheck(argus.endpoint, argus.api_key)
 
 
 def _activate(instrumentor) -> bool:
@@ -183,6 +190,10 @@ def shutdown() -> None:
         from senda_argus_hooks.core.unjudged import configure_guard
 
         configure_guard(None)
+    with contextlib.suppress(Exception):
+        from senda_argus_hooks.core.precheck import reset_precheck
+
+        reset_precheck()
     flush()
     for rag_handle in list(_ACTIVE_RAG_INSTRUMENTATIONS):  # noqa: PERF101 - 後始末の間に一覧が書き換わっても回す対象を固定する
         with contextlib.suppress(Exception):
