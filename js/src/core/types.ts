@@ -63,6 +63,10 @@ export interface RegisterOptions {
   scanResult?: boolean;
   // 呼び出しの引数から、検知の走査だけに使う文を送る。本文の保存は captureArguments が決める。既定は送らない。
   scanArguments?: boolean;
+  // ツールの実行の前に Argus の判定を問い合わせ、拒否と承認待ちの呼び出しを止める。既定は無効。
+  enforcePrecheck?: boolean;
+  // 判定に接続できないときに通すか。既定は通す。
+  precheckFailOpen?: boolean;
   captureHash?: boolean;
   redact?: boolean;
   actor?: Record<string, unknown>;

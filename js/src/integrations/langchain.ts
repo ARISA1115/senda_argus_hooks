@@ -4,6 +4,7 @@ import { newTraceId, runWithContext } from "../core/context.js";
 import { emitEvent, getConfig } from "../runtime.js";
 import { safeValue } from "../instrumentors/common.js";
 import { argumentsScanFields, resultScanFields } from "../core/result_scan.js";
+import { checkToolCall } from "../core/precheck.js";
 import { retrievedTextScanFields } from "./retrieval_scan.js";
 
 const starts = new Map<string, number>();
@@ -51,6 +52,9 @@ function toolResult(output: unknown): Record<string, unknown> {
 
 export class SendaArgusLangChainCallbackHandler {
   name = "senda_argus";
+  // LangChain は raiseError の無いハンドラーの例外を握りつぶす。実行前の判定を有効にしたときだけ立てる。
+  get raiseError(): boolean { return Boolean(getConfig().enforcePrecheck); }
+  awaitHandlers = true;
 
   handleLLMStart(serialized: any, prompts: any, runId?: unknown) {
     const traceId = begin(runId);
@@ -110,13 +114,15 @@ export class SendaArgusLangChainCallbackHandler {
     }));
   }
 
-  handleToolStart(tool: any, input: any, runId?: unknown) {
+  async handleToolStart(tool: any, input: any, runId?: unknown) {
     const traceId = begin(runId);
-    return runWithContext({ traceId, runId: key(runId) || undefined }, () => emitEvent("tool_call.requested", {
+    // 記録の後に問い合わせる。止めた呼び出しも、試みとして記録に残す。
+    await runWithContext({ traceId, runId: key(runId) || undefined }, () => emitEvent("tool_call.requested", {
       source: { component: "integration", framework: "langchain", sdk: "langchain", operation: "tool" },
       data: { tool: { framework: "langchain", name: tool?.name ?? tool?.id?.at?.(-1), arguments: maybeBody(input, getConfig().captureArguments), ...(getConfig().scanArguments ? argumentsScanFields(input) : {}) } },
       status: "requested"
     }));
+    await checkToolCall(tool?.name ?? tool?.id?.at?.(-1), input, "langchain");
   }
 
   handleToolEnd(output: any, runId?: unknown) {
@@ -172,6 +178,21 @@ export class SendaArgusLangChainCallbackHandler {
       status: "success"
     }));
   }
+}
+
+// raiseError はハンドラーの全コールバックに効くため、実行の判定以外の観測の例外は止める。
+for (const name of Object.getOwnPropertyNames(SendaArgusLangChainCallbackHandler.prototype)) {
+  if (!name.startsWith("handle") || name === "handleToolStart") continue;
+  const proto = SendaArgusLangChainCallbackHandler.prototype as any;
+  const original = proto[name];
+  proto[name] = function (this: unknown, ...args: unknown[]) {
+    try {
+      const result = original.apply(this, args);
+      return result && typeof result.catch === "function" ? result.catch(() => undefined) : result;
+    } catch {
+      return undefined;
+    }
+  };
 }
 
 export function langChainCallbackHandler() {

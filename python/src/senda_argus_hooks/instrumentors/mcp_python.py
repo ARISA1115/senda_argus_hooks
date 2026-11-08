@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import inspect
 import logging
@@ -50,6 +51,7 @@ from senda_argus_hooks.core.tool_definitions import (
     tool_definition_hashes,
 )
 from senda_argus_hooks.core.tool_result import tool_result_is_error
+from senda_argus_hooks.core.precheck import ToolCallBlocked, check_tool_call, precheck_enabled
 from senda_argus_hooks.core.unjudged import Unjudged, get_guard
 
 from .base import BaseInstrumentor, audit_guard
@@ -146,7 +148,7 @@ class MCPPythonInstrumentor(BaseInstrumentor):
 
         def sync_wrapper(obj, *args, **kwargs):
             call_id = _attach_call_id(kwargs, accepts_meta) if operation == "call_tool" else None
-            if guarded and get_guard() is not None:
+            if guarded and (get_guard() is not None or precheck_enabled()):
                 # ツールの実行の前に Argus の判定の可否を確認する。止めるときは元の呼び出しの
                 # コルーチンを作らずに例外を投げ、ツールを実行しない。
                 async def checked():
@@ -154,6 +156,19 @@ class MCPPythonInstrumentor(BaseInstrumentor):
                     unjudged = None
                     if guard is not None:
                         unjudged = await guard.before_action_async(_tool_name_of_call(args, kwargs))
+                    if precheck_enabled():
+                        # 判定の HTTP の待ちで、イベントループを止めない。
+                        try:
+                            await asyncio.to_thread(
+                                check_tool_call,
+                                _tool_name_of_call(args, kwargs),
+                                arguments_of_call(args, kwargs),
+                                mcp_server=_precheck_server_name(obj),
+                            )
+                        except ToolCallBlocked:
+                            # 止めた呼び出しも、試みとして記録に残す。
+                            _emit_blocked_call(obj, args, kwargs)
+                            raise
                     result = original(obj, *args, **kwargs)
                     return await self._observe_async_call(
                         original_result=result, operation=operation, obj=obj, args=args, kwargs=kwargs, unjudged=unjudged, call_id=call_id
@@ -402,6 +417,22 @@ def _remember_server_info_name(obj: Any, response: Any) -> None:
     elif hasattr(obj, SERVER_INFO_VERSION_ATTR):
         # 最新の名乗りに正しい版が無い。前の版を残すと、今名乗っていない版で照合する。
         delattr(obj, SERVER_INFO_VERSION_ATTR)
+
+
+def _emit_blocked_call(obj: Any, args: Any, kwargs: Any) -> None:
+    meta = _mcp_metadata(obj, "call_tool", args, kwargs)
+    emit_event(
+        "mcp.tool_call.requested",
+        source={"component": "instrumentor", "sdk": "mcp_python", "operation": "call_tool"},
+        data={"mcp": without_arguments_scan(meta)},
+        status="start",
+        purpose_id=meta["purpose_id"],
+    )
+
+
+def _precheck_server_name(obj: Any) -> str:
+    """実行前の判定へ渡すサーバーの名前。空にすると判定の側で組み込みのツールと区別できない。"""
+    return str(_session_server_name(obj) or "unknown")
 
 
 def _tool_name_of_call(args, kwargs) -> str | None:

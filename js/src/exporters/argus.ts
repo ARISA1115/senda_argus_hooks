@@ -71,6 +71,7 @@ export class ArgusExporter implements Exporter {
   get ingestUrl(): string { return this.url; }
   chainPosition(): { session: string; lastSeq: number } { return this.chain.position(); }
   get key(): string { return this.apiKey; }
+  get base(): string { return this.url.replace(/\/v1\/agent-runs\/ingest$/, ""); }
   get discardWindows(): DiscardWindow[] { return this.discards.map((w) => ({ ...w })); }
 
   constructor(endpoint = "http://localhost:8000", apiKey = "", runId?: string, timeoutMs = 10000) {

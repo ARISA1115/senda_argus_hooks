@@ -6,6 +6,7 @@ import { dataSourceHash, deriveMcpProfileId, derivePurposeId, mcpDataSourceProfi
 import { emitEvent, getConfig, observe } from "../runtime.js";
 import { getMcpToolDirectory, toolNamesOf, UNNAMED_MCP_SERVER } from "../core/mcp_tools.js";
 import { normalizeProviderUrl, toolDefinitionHashes } from "../core/tool_definitions.js";
+import { checkToolCall } from "../core/precheck.js";
 import { argumentsScanFields, resultScanFields, withoutArgumentsScan } from "../core/result_scan.js";
 
 const patched = Symbol.for("senda.argus.mcp.patched");
@@ -112,6 +113,8 @@ export function instrumentMCP(client: any, metadata: McpMetadata = {}): boolean 
       const attached = withCallId(request);
       if (attached.callId) meta.call_id = attached.callId;
       emitEvent("mcp.tool_call.requested", { source: { component: "instrumentor", sdk: "mcp_js", operation: "callTool" }, data: { mcp: withoutArgumentsScan(meta) }, status: "start", purposeId });
+      // 記録の後に問い合わせる。止めた呼び出しも、試みとして記録に残す。
+      await checkToolCall(toolName, request?.arguments, "mcp_js", String(serverName ?? "unknown"));
       let result: any;
       try {
         result = await original.call(this, attached.request, ...rest);

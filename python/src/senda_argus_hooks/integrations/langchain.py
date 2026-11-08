@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import contextlib
+import functools
+import logging
 import time
 from typing import Any
 
@@ -12,6 +14,7 @@ from senda_argus_hooks.core.instruction_files import (
     system_prompt_pair_digests,
     system_prompt_semantic_digests,
 )
+from senda_argus_hooks.core.precheck import check_tool_call
 from senda_argus_hooks.core.result_scan import arguments_scan_fields, result_scan_fields
 from senda_argus_hooks.core.runtime import emit_event, get_config
 from senda_argus_hooks.integrations.llamaindex import _retrieval_payload, _retrieval_result_payload
@@ -25,6 +28,9 @@ except Exception:  # noqa: BLE001  # pragma: no cover - 任意の依存の impor
 # 呼び出しごとに積む控えの上限。鍵は呼び出し側が決める値で、終了も失敗も呼ばれずに打ち切られる
 # 経路がある。上限が無いと、その打ち切りが続くだけで控えが際限なく伸びる。
 MAX_PENDING_RUNS: int = 1024
+
+
+logger = logging.getLogger("senda_argus_hooks.langchain")
 
 
 def _remember(store: dict, key: str, value: Any) -> None:
@@ -54,6 +60,11 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
     dependency. Add it to LangChain callback configuration when you want to
     capture framework-level events without application-level audit calls.
     """
+
+    @property
+    def raise_error(self) -> bool:
+        """実行前の判定が有効なときだけ例外を伝える。登録の前に作ったハンドラーでも、呼び出しの時の設定に従う。"""
+        return bool(get_config().enforce_precheck)
 
     def __init__(self, *, framework: str = "langchain", capture_payloads: bool | None = None):
         with contextlib.suppress(TypeError):
@@ -191,6 +202,8 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
             status="start",
             purpose_id=purpose_id,
         )
+        # 記録の後に問い合わせる。止めた呼び出しも、試みとして記録に残す。
+        check_tool_call(tool_name, input_str)
 
     def on_tool_end(self, output: Any, **kwargs: Any) -> None:
         run_id = _run_key(kwargs)
@@ -341,6 +354,24 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
 
     def _capture_response(self) -> bool:
         return get_config().capture_response if self.capture_payloads is None else self.capture_payloads
+
+
+def _contained(method: Any) -> Any:
+    """観測の例外を止める。raise_error はハンドラーの全コールバックに効くため、実行の判定以外は伝えない。"""
+
+    @functools.wraps(method)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return method(*args, **kwargs)
+        except Exception:  # noqa: BLE001 - 観測の失敗で利用者の処理を止めない
+            logger.warning("langchain_callback_failed", exc_info=True)
+            return None
+
+    return wrapper
+
+
+for _callback in [n for n in vars(SendaArgusCallbackHandler) if n.startswith("on_") and n != "on_tool_start"]:
+    setattr(SendaArgusCallbackHandler, _callback, _contained(getattr(SendaArgusCallbackHandler, _callback)))
 
 
 def _payload_or_hash(key: str, value: Any, capture: bool) -> dict[str, Any]:

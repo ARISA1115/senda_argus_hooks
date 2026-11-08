@@ -157,6 +157,8 @@ if (enabledValue(process.env.SENDA_ARGUS_ENABLED, true)) {
       captureResult: truthy(process.env.SENDA_ARGUS_CAPTURE_RESULT),
       scanResult: enabledValue(process.env.SENDA_ARGUS_SCAN_RESULT, true),
       scanArguments: enabledValue(process.env.SENDA_ARGUS_SCAN_ARGUMENTS, true),
+      enforcePrecheck: enabledValue(process.env.SENDA_ARGUS_ENFORCE_PRECHECK, false),
+      precheckFailOpen: enabledValue(process.env.SENDA_ARGUS_PRECHECK_FAIL_OPEN, true),
       captureHash: enabledValue(process.env.SENDA_ARGUS_CAPTURE_HASH, true),
       redact: enabledValue(process.env.SENDA_ARGUS_REDACT, true),
       tenantId: process.env.SENDA_ARGUS_TENANT_ID,

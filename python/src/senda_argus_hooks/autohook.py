@@ -125,6 +125,8 @@ def bootstrap() -> dict[str, Any] | None:
             scan_result=_bool("SENDA_ARGUS_SCAN_RESULT", True),
             scan_arguments=_bool("SENDA_ARGUS_SCAN_ARGUMENTS", True),
             scan_input=_bool("SENDA_ARGUS_SCAN_INPUT", True),
+            enforce_precheck=_bool("SENDA_ARGUS_ENFORCE_PRECHECK", False),
+            precheck_fail_open=_bool("SENDA_ARGUS_PRECHECK_FAIL_OPEN", True),
             capture_hash=_bool("SENDA_ARGUS_CAPTURE_HASH", True),
             redact=_bool("SENDA_ARGUS_REDACT", True),
             actor=_actor(),
