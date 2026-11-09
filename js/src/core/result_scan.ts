@@ -81,6 +81,7 @@ export interface ArgumentsScanFields {
   arguments_scan_truncated?: boolean;
   arguments_scan_length?: number;
   arguments_scan_failed?: boolean;
+  arguments_scan_named?: Record<string, string>;
 }
 
 // 呼び出しの引数から、検知の走査だけに使う文と印を作る。秘匿と上限は戻り値の走査の文と同じ実装を通す。
@@ -93,7 +94,62 @@ export function argumentsScanFields(value: unknown): ArgumentsScanFields {
   if (fields.result_scan_truncated) out.arguments_scan_truncated = true;
   if (fields.result_scan_length !== undefined) out.arguments_scan_length = fields.result_scan_length;
   if (fields.result_scan_failed) out.arguments_scan_failed = true;
+  const named = namedArguments(value);
+  if (Object.keys(named.values).length > 0) out.arguments_scan_named = named.values;
+  if (named.cut) out.arguments_scan_truncated = true;
   return out;
+}
+
+const NAMED_ARGUMENT_KEYS = new Set([
+  "command",
+  "cmd",
+  "commandline",
+  "command_line",
+  "script",
+  "shell",
+  "exec",
+  "run",
+  "path",
+  "file",
+  "file_path",
+  "filepath",
+  "filename",
+  "target_file",
+  "absolute_path",
+]);
+const NAMED_ARGUMENT_MAX_CHARS = 4096;
+const NAMED_ELISION = " ... ";
+
+// 実行と宛先の項目の、秘匿した値。文へ畳むと本文と区別できないため、項目の名前を残して別に載せる。
+function namedArguments(value: unknown): { values: Record<string, string>; cut: boolean } {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return { values: {}, cut: false };
+  }
+  try {
+    const joined: Record<string, string> = {};
+    for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+      const name = key.toLowerCase();
+      if (!NAMED_ARGUMENT_KEYS.has(name)) continue;
+      const parts: string[] = [];
+      collect(redactValue(child), parts, 0, { hit: false });
+      const text = parts.filter((p) => p.trim()).join("\n");
+      if (text) joined[name] = joined[name] ? `${joined[name]}\n${text}` : text;
+    }
+    let cut = false;
+    const values: Record<string, string> = {};
+    for (const [name, text] of Object.entries(joined)) {
+      if (text.length > NAMED_ARGUMENT_MAX_CHARS) {
+        const keep = Math.floor((NAMED_ARGUMENT_MAX_CHARS - NAMED_ELISION.length) / 2);
+        values[name] = text.slice(0, keep) + NAMED_ELISION + text.slice(-keep);
+        cut = true;
+      } else {
+        values[name] = text;
+      }
+    }
+    return { values, cut };
+  } catch {
+    return { values: {}, cut: false };
+  }
 }
 
 export function resultScanText(value: unknown): string | undefined {

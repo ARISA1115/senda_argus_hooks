@@ -9,7 +9,6 @@ import queue
 import threading
 import time
 
-import pytest
 from senda_argus_hooks.core.record_chain import CHAIN_FIELD, RecordChain, digest_of, seq_range
 from senda_argus_hooks.exporters.argus import ArgusExporter
 

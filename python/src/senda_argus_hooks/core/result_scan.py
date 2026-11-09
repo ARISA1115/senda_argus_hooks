@@ -40,7 +40,9 @@ _REDACTED = "***REDACTED***"
 
 # 文字列の中に書かれた鍵と値の組。構造を解析できない応答や、辞書を文字列にした値でも、鍵名で
 # 資格情報と分かる値を伏せる。鍵の前は語の続きでないこと、引用符は前に逆斜線があってもよい。
-_KEYS = "|".join(re.escape(k) for k in sorted(DEFAULT_REDACT_FIELDS, key=len, reverse=True))
+_KEYS = "|".join(
+    re.escape(k) for k in sorted(DEFAULT_REDACT_FIELDS, key=len, reverse=True)
+)
 _KV_PATTERN = re.compile(
     r"(^|[^A-Za-z0-9_-])(\\?[\"']?)(" + _KEYS + r")(\\?[\"']?)(\s*[:=]\s*)"
     r"(\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*'|[^\s,;&}\]]+)",
@@ -50,7 +52,12 @@ _KV_PATTERN = re.compile(
 
 def redact_scan_string(value: str) -> str:
     """走査の文に入れる文字列から、形式で分かる秘密と、文字列の中の鍵と値の組の値を伏せる。"""
-    return _KV_PATTERN.sub(lambda m: f"{m.group(1)}{m.group(2)}{m.group(3)}{m.group(4)}{m.group(5)}\"{_REDACTED}\"", _redact_str(value))
+    return _KV_PATTERN.sub(
+        lambda m: (
+            f'{m.group(1)}{m.group(2)}{m.group(3)}{m.group(4)}{m.group(5)}"{_REDACTED}"'
+        ),
+        _redact_str(value),
+    )
 
 
 def scan_source(response: Any) -> Any:
@@ -140,7 +147,11 @@ def input_scan_fields(value: Any) -> dict[str, Any]:
     文字起こしだけ秘密が通るか、長い前置きの後ろの指示が落ちる。
     """
     return _scan_fields(
-        value, INPUT_SCAN_FIELD, INPUT_TRUNCATED_FIELD, INPUT_LENGTH_FIELD, INPUT_FAILED_FIELD
+        value,
+        INPUT_SCAN_FIELD,
+        INPUT_TRUNCATED_FIELD,
+        INPUT_LENGTH_FIELD,
+        INPUT_FAILED_FIELD,
     )
 
 
@@ -150,6 +161,28 @@ ARGUMENTS_SCAN_FIELD = "arguments_scan"
 ARGUMENTS_TRUNCATED_FIELD = "arguments_scan_truncated"
 ARGUMENTS_LENGTH_FIELD = "arguments_scan_length"
 ARGUMENTS_FAILED_FIELD = "arguments_scan_failed"
+# 実行と宛先を表す項目の値。文へ畳むと本文と区別できないため、項目の名前を残して別に載せる。
+ARGUMENTS_NAMED_FIELD = "arguments_scan_named"
+_NAMED_ARGUMENT_KEYS = frozenset(
+    {
+        "command",
+        "cmd",
+        "commandline",
+        "command_line",
+        "script",
+        "shell",
+        "exec",
+        "run",
+        "path",
+        "file",
+        "file_path",
+        "filepath",
+        "filename",
+        "target_file",
+        "absolute_path",
+    }
+)
+_NAMED_ARGUMENT_MAX_CHARS = 4096
 
 
 def arguments_scan_fields(value: Any) -> dict[str, Any]:
@@ -159,7 +192,7 @@ def arguments_scan_fields(value: Any) -> dict[str, Any]:
     引数を読む規則に一度も届かない。導出を 2 つ持たない。引数の側だけ別に書くと、秘匿か上限の片方だけが
     変わったときに、秘密が通るか、長い前置きの後ろの指示が落ちる。
     """
-    return _scan_fields(
+    fields = _scan_fields(
         value,
         ARGUMENTS_SCAN_FIELD,
         ARGUMENTS_TRUNCATED_FIELD,
@@ -167,6 +200,40 @@ def arguments_scan_fields(value: Any) -> dict[str, Any]:
         ARGUMENTS_FAILED_FIELD,
         joiner="\n",
     )
+    named, named_cut = _named_arguments(value)
+    if named:
+        fields[ARGUMENTS_NAMED_FIELD] = named
+    if named_cut:
+        fields[ARGUMENTS_TRUNCATED_FIELD] = True
+    return fields
+
+
+def _named_arguments(value: Any) -> tuple[dict[str, str], bool]:
+    """実行と宛先の項目の、秘匿した値と、打ち切ったか。作れなければ空を返す。"""
+    if not isinstance(value, dict):
+        return {}, False
+    try:
+        joined: dict[str, str] = {}
+        for key, child in value.items():
+            if isinstance(key, str) and key.lower() in _NAMED_ARGUMENT_KEYS:
+                parts, _cut = _collect(child)
+                text = "\n".join(p for p in parts if p.strip())
+                if text:
+                    # 大文字と小文字だけが違う鍵で、前の値を消さない。
+                    name = key.lower()
+                    joined[name] = f"{joined[name]}\n{text}" if name in joined else text
+        out: dict[str, str] = {}
+        cut = False
+        for name, text in joined.items():
+            if len(text) > _NAMED_ARGUMENT_MAX_CHARS:
+                # 長い前置きの後ろの命令を落とさない。
+                keep = (_NAMED_ARGUMENT_MAX_CHARS - len(RESULT_SCAN_ELISION)) // 2
+                text = text[:keep] + RESULT_SCAN_ELISION + text[-keep:]
+                cut = True
+            out[name] = text
+        return out, cut
+    except Exception:  # noqa: BLE001
+        return {}, False
 
 
 def without_arguments_scan(fields: dict[str, Any]) -> dict[str, Any]:
@@ -191,7 +258,9 @@ def retrieved_documents_scan_fields(texts: list[str]) -> dict[str, Any]:
         budget = max(_DOCUMENT_MIN_CHARS, RESULT_SCAN_MAX_CHARS // len(selected) - 1)
         keep = (budget - len(RESULT_SCAN_ELISION)) // 2
         sliced = [
-            text if len(text) <= budget else text[:keep] + RESULT_SCAN_ELISION + text[-keep:]
+            text
+            if len(text) <= budget
+            else text[:keep] + RESULT_SCAN_ELISION + text[-keep:]
             for text in selected
         ]
         fields = result_scan_fields(sliced)
