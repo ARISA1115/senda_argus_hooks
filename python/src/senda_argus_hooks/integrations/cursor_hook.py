@@ -22,6 +22,9 @@ from .coding_agent_hooks import (
 class CursorAdapter(ProductAdapter):
     product = "cursor"
 
+    # beforeSubmitPrompt の文書の応答の形。failClosed の構成では空の出力が失敗になる。
+    prompt_response = {"continue": True}
+
     def _parse(self, data: dict[str, Any]) -> ToolCall:
         return ToolCall(
             product=self.product,

