@@ -215,6 +215,8 @@ class ClineAdapter(SpecAdapter):
 
     deny_exit_code = 0
 
+    prompt_response = {"cancel": False}
+
     def render_deny(self, reason: str) -> dict[str, Any]:
         return {"cancel": True, "errorMessage": reason}
 
@@ -275,6 +277,15 @@ _CLAUDE_LIKE = InputSpec(
     response=("tool_response",),
     error=("error",),
 )
+
+
+def _with_prompt_response(
+    adapter: SpecAdapter, response: dict[str, Any]
+) -> SpecAdapter:
+    """応答の JSON を必ず求める製品の、依頼の hook の応答を置く。"""
+    adapter.prompt_response = response
+    return adapter
+
 
 ADAPTERS: dict[str, Callable[[], ProductAdapter]] = {
     "claude_code": ClaudeCodeAdapter,
@@ -356,18 +367,21 @@ ADAPTERS: dict[str, Callable[[], ProductAdapter]] = {
     # https://antigravity.google/docs/hooks/
     # decision は必須で、allow は次の hook か既定の方針へ委ねる。終了コードの意味は書かれていないため、
     # 遮断も標準出力の JSON と終了コード 0 で返す。
-    "antigravity_cli": lambda: DecisionAdapter(
-        "antigravity_cli",
-        InputSpec(
-            session=("conversationId",),
-            tool_name="name",
-            tool_input="args",
-            pre_container="toolCall",
-            post_container="toolCall",
-            error=("error",),
+    "antigravity_cli": lambda: _with_prompt_response(
+        DecisionAdapter(
+            "antigravity_cli",
+            InputSpec(
+                session=("conversationId",),
+                tool_name="name",
+                tool_input="args",
+                pre_container="toolCall",
+                post_container="toolCall",
+                error=("error",),
+            ),
+            allow={"decision": "allow"},
+            deny_exit_code=0,
+            post_output={},
         ),
-        allow={"decision": "allow"},
-        deny_exit_code=0,
-        post_output={},
+        {},
     ),
 }

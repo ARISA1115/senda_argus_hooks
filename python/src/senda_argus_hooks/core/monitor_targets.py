@@ -101,6 +101,8 @@ _PATH_SEGMENTS: Final[tuple[tuple[str, str], ...]] = (
     # 語は空白で分かれるので、Application Support の場所は空白の後ろの区間で照合する。
     ("/.claude/settings.json/", COLLECTOR_CONFIG),
     ("/.claude/settings.local.json/", COLLECTOR_CONFIG),
+    # 導入が置く包みの .sh の名前の頭。設定が実行するため、書き換えると判定が止まる。
+    ("/senda-argus-hook-", COLLECTOR_CONFIG),
     ("/etc/claude-code/managed-settings.json/", COLLECTOR_CONFIG),
     ("/claudecode/managed-settings.json/", COLLECTOR_CONFIG),
     ("/.codex/hooks.json/", COLLECTOR_CONFIG),

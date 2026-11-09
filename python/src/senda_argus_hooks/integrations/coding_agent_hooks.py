@@ -15,11 +15,13 @@ PRODUCTS の各製品の hook から呼ばれ、製品の入力を読み、POST 
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import socket
 import stat
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -612,6 +614,8 @@ class ProductAdapter:
     # 返し方で、終了コードの意味が書かれていない製品は 0 にする。0 以外を hook の失敗として標準出力を
     # 捨てる製品で、遮断の JSON を読ませずに許可へ倒さないため。
     deny_exit_code: int = 2
+    # 依頼の hook の標準出力。応答の形を決めている製品だけが持つ。
+    prompt_response: dict[str, Any] | None = None
 
     def render_deny(self, reason: str) -> dict[str, Any] | None:
         """遮断のときの標準出力。None は何も書かず、終了コードと標準エラー出力だけで遮断を返す。"""
@@ -689,13 +693,35 @@ def run_post(
     )
 
 
+def _repeated_invocation(data: dict[str, Any], session_id: str, prompt: str) -> bool:
+    """モデルの呼び出しごとに発火する製品で、同じ依頼の 2 回目以降か。
+
+    Antigravity は同じ依頼で複数回発火し、invocationNum が 1 回目で 0 になる。会話の範囲の連番でも依頼を落とさないよう、
+    直前に送った依頼と同じときだけ送らない。控えは依頼のダイジェストだけで、本文を持たない。読めないときは送る。
+    """
+    invocation = data.get("invocationNum")
+    if not isinstance(invocation, int):
+        return False
+    digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+    try:
+        folder = Path(tempfile.gettempdir()) / "senda-argus-prompts"
+        folder.mkdir(mode=0o700, exist_ok=True)
+        path = folder / hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+        repeated = invocation > 0 and path.exists() and path.read_text() == digest
+        path.write_text(digest)
+        return repeated
+    except OSError:
+        return False
+
+
 def run_prompt(
     adapter: ProductAdapter, stream: TextIO, config_path: str | None
 ) -> HookOutput:
     """依頼の送信の hook の 1 回。依頼の値の HMAC だけを送り、製品の処理を止めない。"""
     try:
-        session_id, prompt = adapter.parse_prompt(read_stdin_json(stream))
-        if prompt and session_id:
+        data = read_stdin_json(stream)
+        session_id, prompt = adapter.parse_prompt(data)
+        if prompt and session_id and not _repeated_invocation(data, session_id, prompt):
             config = load_hook_config(adapter.product, config_path)
             post_json(
                 config.endpoint + REQUEST_PATH,
@@ -710,7 +736,9 @@ def run_prompt(
             )
     except Exception:  # noqa: BLE001, S110 - 記録の失敗で製品の実行を止めない
         pass
-    return HookOutput(stdout="", stderr="", exit_code=0)
+    response = adapter.prompt_response
+    stdout = "" if response is None else json.dumps(response)
+    return HookOutput(stdout=stdout, stderr="", exit_code=0)
 
 
 def adapter_for(product: str) -> ProductAdapter:
