@@ -304,6 +304,42 @@ def _cline_entries(pre: str, post: str, timeout: int) -> dict[str, Any]:
     return {"PreToolUse": pre, "PostToolUse": post}
 
 
+# 依頼の送信の hook。(イベントの名前, 項目を作る関数)。公式の文書で名前と本文の項目を
+# 確かめた製品だけを置く。Kiro は設定の値が文書に書かれていないため置かず、
+# Crush は PreToolUse しか無いため、依頼の値が届かない製品として規則の側で扱う。
+def _prompt_group(command: str, timeout: int) -> dict[str, Any]:
+    return _group(command, timeout=timeout)
+
+
+PROMPT_ENTRIES: dict[str, tuple[str, Callable[[str, int], Any]]] = {
+    "claude_code": ("UserPromptSubmit", _prompt_group),
+    "codex": ("UserPromptSubmit", _prompt_group),
+    "factory_droid": ("UserPromptSubmit", _prompt_group),
+    "junie_cli": ("UserPromptSubmit", _prompt_group),
+    "goose": ("UserPromptSubmit", _prompt_group),
+    "antigravity_cli": ("PreInvocation", _prompt_group),
+    "copilot_cli": (
+        "userPromptSubmitted",
+        lambda c, t: {"type": "command", "bash": c, "timeoutSec": t},
+    ),
+    "vscode_copilot": (
+        "UserPromptSubmit",
+        lambda c, t: {"type": "command", "command": c, "timeout": t},
+    ),
+    "cursor": ("beforeSubmitPrompt", lambda c, t: {"command": c, "timeout": t}),
+    "windsurf": ("pre_user_prompt", lambda c, t: {"command": c}),
+    "gemini_cli": (
+        "BeforeAgent",
+        lambda c, t: _group(c, name=_NAMED_KEY, timeout=t * 1000),
+    ),
+    "augment_code": (
+        "PromptSubmit",
+        lambda c, t: _group(c, timeout=t * 1000, metadata={"includeUserContext": True}),
+    ),
+    "cline": ("UserPromptSubmit", lambda c, t: c),
+}
+
+
 def _no_hook_entries(pre: str, post: str, timeout: int) -> dict[str, Any]:
     raise InstallError("hook を持たない製品")
 
@@ -643,7 +679,16 @@ def _hook_entries(
         hook_command(product, "pre", scope, python=python),
         hook_command(product, "post", scope, python=python),
     )
-    return spec.entries(pre, post, PRODUCT_HOOK_TIMEOUT_SEC)
+    entries = spec.entries(pre, post, PRODUCT_HOOK_TIMEOUT_SEC)
+    prompt = PROMPT_ENTRIES.get(product)
+    if prompt is not None:
+        command = (
+            commands[0].replace("pre.sh", "prompt.sh")
+            if commands
+            else hook_command(product, "prompt", scope, python=python)
+        )
+        entries[prompt[0]] = prompt[1](command, PRODUCT_HOOK_TIMEOUT_SEC)
+    return entries
 
 
 def _merge_events(target: dict[str, Any], entries: dict[str, Any], where: str) -> None:
@@ -787,7 +832,7 @@ def _plan_scripts(
     """包みの .sh か、Cline のイベントのファイルを用意する。他者のファイルは上書きしない。"""
     mode = 0o755 if scope == "managed" else 0o700
     planned: list[_PlannedFile] = []
-    for phase in ("pre", "post"):
+    for phase in tuple(paths):
         path = paths[phase]
         text = wrapper_script(hook_command(product, phase, scope, python=python))
         original = _read_text(path)
@@ -847,7 +892,11 @@ def _plan(
             product,
             scope,
             python,
-            {"pre": path, "post": path.with_name("PostToolUse")},
+            {
+                "pre": path,
+                "post": path.with_name("PostToolUse"),
+                "prompt": path.with_name("UserPromptSubmit"),
+            },
         )
         return planned
     planned: list[_PlannedFile] = []
@@ -863,7 +912,7 @@ def _plan(
             python,
             {
                 phase: hooks_dir / f"{WRAPPER_PREFIX}{phase}.sh"
-                for phase in ("pre", "post")
+                for phase in ("pre", "post", "prompt")
             },
         )
         for item in planned:

@@ -52,8 +52,11 @@ PRODUCTS = (
 )
 DECISIONS = frozenset({"allow", "deny", "pending"})
 
+from senda_argus_hooks.core.request_values import request_values  # noqa: E402
+
 PRECHECK_PATH = "/v1/hooks/precheck"
 POSTCALL_PATH = "/v1/hooks/postcall"
+REQUEST_PATH = "/v1/hooks/request"
 
 # 管理の導入で読む設定ファイル。root の所有で、グループと他者に書き込みの無いときだけ信頼する。
 MANAGED_CONFIG_PATH = Path("/etc/senda-argus/hooks.env")
@@ -457,6 +460,21 @@ def decide(
     return verdict
 
 
+def read_prompt_text(data: dict[str, Any]) -> str:
+    """製品ごとの依頼の本文の項目。項目の名前は各製品の公式の文書のもの。"""
+    for key in ("prompt", "user_prompt", "message", "lastUserInput"):
+        value = data.get(key)
+        if isinstance(value, str) and value:
+            return value
+    nested = data.get("userPromptSubmit")
+    if isinstance(nested, dict) and isinstance(nested.get("prompt"), str):
+        return nested["prompt"]
+    info = data.get("tool_info")
+    if isinstance(info, dict) and isinstance(info.get("user_prompt"), str):
+        return info["user_prompt"]
+    return ""
+
+
 def _keep_head_and_tail(text: str) -> str:
     if len(text) <= TOOL_RESPONSE_MAX_CHARS:
         return text
@@ -580,6 +598,16 @@ class ProductAdapter:
     def parse_post(self, data: dict[str, Any]) -> ToolCall:
         raise NotImplementedError
 
+    def parse_prompt(self, data: dict[str, Any]) -> tuple[str, str]:
+        """依頼の送信の入力から (セッション, 依頼の本文) を返す。"""
+        session = (
+            data.get("session_id")
+            or data.get("conversation_id")
+            or data.get("trajectory_id")
+            or ""
+        )
+        return str(session), read_prompt_text(data)
+
     # 遮断の終了コード。終了コード 2 を遮断と公式に書く製品は 2。標準出力の JSON だけが公式の遮断の
     # 返し方で、終了コードの意味が書かれていない製品は 0 にする。0 以外を hook の失敗として標準出力を
     # 捨てる製品で、遮断の JSON を読ませずに許可へ倒さないため。
@@ -661,6 +689,30 @@ def run_post(
     )
 
 
+def run_prompt(
+    adapter: ProductAdapter, stream: TextIO, config_path: str | None
+) -> HookOutput:
+    """依頼の送信の hook の 1 回。依頼の値の HMAC だけを送り、製品の処理を止めない。"""
+    try:
+        session_id, prompt = adapter.parse_prompt(read_stdin_json(stream))
+        if prompt and session_id:
+            config = load_hook_config(adapter.product, config_path)
+            post_json(
+                config.endpoint + REQUEST_PATH,
+                {
+                    "product": adapter.product,
+                    "agent_id": config.agent_id,
+                    "session_id": session_id,
+                    "request_values": request_values(prompt),
+                },
+                config.api_key,
+                POSTCALL_TIMEOUT_SEC,
+            )
+    except Exception:  # noqa: BLE001, S110 - 記録の失敗で製品の実行を止めない
+        pass
+    return HookOutput(stdout="", stderr="", exit_code=0)
+
+
 def adapter_for(product: str) -> ProductAdapter:
     from .hook_products import ADAPTERS
 
@@ -683,6 +735,8 @@ def main(
         output = run_pre(adapter, source, config_path)
     elif phase == "post":
         output = run_post(adapter, source, config_path)
+    elif phase == "prompt":
+        output = run_prompt(adapter, source, config_path)
     else:
         raise ValueError(f"未対応の段階: {phase}")
     if output.stdout:

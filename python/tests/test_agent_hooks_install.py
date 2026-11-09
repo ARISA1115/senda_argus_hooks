@@ -156,7 +156,9 @@ def test_install_is_idempotent(tmp_path, product):
     text = before
     assert text.count(HOOK_MARKER) == text.count(
         "hook " + product + " pre"
-    ) + text.count("hook " + product + " post")
+    ) + text.count("hook " + product + " post") + text.count(
+        "hook " + product + " prompt"
+    )
     for entries in json.loads(before)["hooks"].values():
         assert len(entries) == 1
 
@@ -493,7 +495,9 @@ def test_windsurf_registers_every_tool_hook(tmp_path):
         assert hooks_[f"post_{action}"][0]["command"].endswith(
             "hook windsurf post --config /etc/senda-argus/hooks.env"
         )
-    assert "pre_user_prompt" not in hooks_
+    assert hooks_["pre_user_prompt"][0]["command"].endswith(
+        "hook windsurf prompt --config /etc/senda-argus/hooks.env"
+    )
 
 
 def test_gemini_shape_timeout_in_milliseconds(tmp_path):
@@ -586,7 +590,9 @@ def test_cline_writes_executable_scripts(tmp_path):
     assert "hook cline pre" in pre.read_text()
     assert "hook cline post" in post.read_text()
     assert os.stat(pre).st_mode & 0o100
-    assert result.files == [str(pre), str(post)]
+    prompt = tmp_path / "home/Documents/Cline/Hooks/UserPromptSubmit"
+    assert "hook cline prompt" in prompt.read_text()
+    assert result.files == [str(pre), str(post), str(prompt)]
 
 
 def test_cline_does_not_overwrite_a_foreign_hook(tmp_path):
@@ -646,13 +652,13 @@ def test_factory_events_are_at_the_top_level(tmp_path):
     )
 
 
-def test_crush_and_junie_have_only_a_pre_hook(tmp_path):
+def test_crush_has_only_a_pre_hook_and_junie_adds_the_prompt(tmp_path):
     crush = _read(_install("crush", "user", tmp_path))["hooks"]
     assert list(crush) == ["PreToolUse"]
     assert crush["PreToolUse"][0]["matcher"] == ".*"
     assert crush["PreToolUse"][0]["timeout"] == inst.PRODUCT_HOOK_TIMEOUT_SEC
     junie = _read(_install("junie_cli", "user", tmp_path))["hooks"]
-    assert list(junie) == ["PreToolUse"]
+    assert list(junie) == ["PreToolUse", "UserPromptSubmit"]
     assert (
         junie["PreToolUse"][0]["hooks"][0]["timeout"] == inst.PRODUCT_HOOK_TIMEOUT_SEC
     )
