@@ -568,7 +568,7 @@ def build_parser() -> argparse.ArgumentParser:
         "hook", help="Run as a coding agent hook and return the Argus decision"
     )
     hook_p.add_argument("product", choices=list(HOOK_PRODUCTS))
-    hook_p.add_argument("phase", choices=["pre", "post"])
+    hook_p.add_argument("phase", choices=["pre", "post", "prompt"])
     hook_p.add_argument(
         "--config", help="Managed config file; when set, only this file is read"
     )

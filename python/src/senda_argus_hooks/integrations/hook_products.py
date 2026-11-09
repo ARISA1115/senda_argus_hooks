@@ -27,6 +27,7 @@ from .coding_agent_hooks import (
     coerce_tool_input,
     optional_str,
     read_permission_mode,
+    read_prompt_text,
     required_str,
 )
 from .copilot_cli_hook import CopilotCliAdapter
@@ -123,6 +124,12 @@ class SpecAdapter(ProductAdapter):
 
     def parse_post(self, data: dict[str, Any]) -> ToolCall:
         return self._parse(data, post=True)
+
+    def parse_prompt(self, data: dict[str, Any]) -> tuple[str, str]:
+        session_id = _first_str(data, self.spec.session)
+        if session_id is None:
+            session_id = process_session_id()
+        return session_id, read_prompt_text(data)
 
 
 def _first_str(data: dict[str, Any], keys: tuple[str, ...]) -> str | None:
