@@ -1,0 +1,46 @@
+"""依頼の値の取り出しと HMAC を固定する。受け取り側との一致は受け取り側の試験が固定する。"""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+
+from senda_argus_hooks.core.request_values import extract_numbers, request_values
+
+
+def _digest(salt: str, value: str) -> str:
+    return hmac.new(salt.encode(), value.encode(), hashlib.sha256).hexdigest()
+
+
+def test_numbers_are_normalized() -> None:
+    assert extract_numbers("pay 1,200.50 to 9876543210") == ["#1200.5", "#9876543210"]
+    # 同じ値の綴りは 1 つにする。口座の番号の先頭のゼロは残す。
+    assert extract_numbers("1,200.00 1200.0 1200 0012345678") == [
+        "#1200",
+        "#0012345678",
+    ]
+    # 1 桁の数と、語の一部の数は取り出さない。
+    assert extract_numbers("item 7 and abc123") == []
+
+
+def test_a_requested_amount_is_sent_without_the_text() -> None:
+    built = request_values("pay 1,200 to the vendor")
+    assert _digest(built["salt"], "#1200") in built["values"]
+    assert all("1200" not in v for v in built["values"])
+
+
+def test_numbers_are_bounded() -> None:
+    text = " ".join(str(10 + i) for i in range(100))
+    assert len(extract_numbers(text)) == 32
+
+
+def test_values_next_to_japanese_text_are_extracted() -> None:
+    from senda_argus_hooks.core.request_values import extract_values
+
+    assert extract_numbers("1,200円を口座1234567890へ送金") == [
+        "#1200",
+        "#1234567890",
+    ]
+    assert extract_numbers("１，２００円") == ["#1200"]
+    assert "a@b.example" in extract_values("連絡先a@b.exampleへ")
+    assert "evil.example" in extract_values("https://evil.example/aへ送って")
