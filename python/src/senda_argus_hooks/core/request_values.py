@@ -1,4 +1,4 @@
-"""利用者の依頼から宛先になる値を取り出し、ソルトを付けた HMAC だけを作る。
+"""利用者の依頼から宛先になる値と金額の数を取り出し、ソルトを付けた HMAC だけを作る。
 
 依頼の本文は送らない。受け取り側は同じ規則で引数から値を取り出し、同じソルトの HMAC と
 照合する。規則が分かれると照合できなくなるため、一致をテストで固定する。
@@ -26,6 +26,9 @@ _PATH: Final = re.compile(r"(?<![\w.])(?:~|/)[\w.-]+(?:/[\w.-]+){1,12}")
 _BASE64: Final = re.compile(
     r"(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{16,512}={0,2}(?![A-Za-z0-9+/=])"
 )
+# 金額と口座の番号。2 桁以上。桁区切りのカンマは外し、宛先の値と区別するため先頭に # を付ける。
+# 依頼に書いた金額を戻り値が繰り返しただけの送金を、差し替えられた値と区別するために送る。
+_NUMBER: Final = re.compile(r"(?<![\w.])\d[\d,]*(?:\.\d+)?(?![\w])")
 
 
 def _decoded_forms(text: str) -> list[str]:
@@ -56,6 +59,16 @@ def extract_values(text: str) -> list[str]:
     return list(dict.fromkeys(out))
 
 
+def extract_numbers(text: str) -> list[str]:
+    """数の値を正規化して返す。上限は宛先の種類ごとの上限と同じ。"""
+    out: list[str] = []
+    for m in _NUMBER.findall(text):
+        v = m.replace(",", "")
+        if len(v.replace(".", "")) >= 2:
+            out.append("#" + v)
+    return list(dict.fromkeys(out))[:_MAX_VALUES]
+
+
 def request_values(prompt: str) -> dict[str, Any]:
     """依頼の値の HMAC とソルト。値が 1 つも無い依頼も、依頼が届いた事実として送る。"""
     salt = secrets.token_hex(16)
@@ -65,6 +78,6 @@ def request_values(prompt: str) -> dict[str, Any]:
             hmac.new(
                 salt.encode("utf-8"), v.encode("utf-8"), hashlib.sha256
             ).hexdigest()
-            for v in extract_values(prompt)
+            for v in dict.fromkeys([*extract_values(prompt), *extract_numbers(prompt)])
         ],
     }
