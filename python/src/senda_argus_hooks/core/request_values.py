@@ -12,6 +12,7 @@ import hashlib
 import hmac
 import re
 import secrets
+import unicodedata
 from typing import Any, Final
 from urllib.parse import unquote
 
@@ -19,19 +20,30 @@ from senda_argus_hooks.core.egress_hosts import hosts_in_text
 
 # 種類ごとの上限。全体で 1 つの上限にすると、URL を並べるだけで他の種類が押し出される。
 _MAX_VALUES: Final[int] = 32
-_EMAIL: Final = re.compile(r"[\w.+-]{1,64}@[\w-]{1,63}(?:\.[\w-]{1,63})+")
-_IBAN: Final = re.compile(r"\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b")
-_PHONE: Final = re.compile(r"(?<![\w.])\+\d[\d -]{8,16}\d(?![\w.])")
-_PATH: Final = re.compile(r"(?<![\w.])(?:~|/)[\w.-]+(?:/[\w.-]+){1,12}")
+# 境界と文字は ASCII に限る。Python の \w と \b は日本語の文字も語に含め、「1,200円」や「口座DE89…へ」の
+# 値を取り出せなくなる。取り出す前に NFKC で全角の英数字と記号を半角にする。
+_EMAIL: Final = re.compile(
+    r"[A-Za-z0-9_.+-]{1,64}@[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63})+"
+)
+_IBAN: Final = re.compile(
+    r"(?<![A-Za-z0-9])[A-Z]{2}[0-9]{2}[A-Z0-9]{11,30}(?![A-Za-z0-9])"
+)
+_PHONE: Final = re.compile(
+    r"(?<![A-Za-z0-9_.])\+[0-9][0-9 -]{8,16}[0-9](?![A-Za-z0-9_.])"
+)
+_PATH: Final = re.compile(r"(?<![A-Za-z0-9_.])(?:~|/)[\w.-]+(?:/[\w.-]+){1,12}")
 _BASE64: Final = re.compile(
     r"(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{16,512}={0,2}(?![A-Za-z0-9+/=])"
 )
 # 金額と口座の番号。2 桁以上。桁区切りのカンマは外し、宛先の値と区別するため先頭に # を付ける。
 # 依頼に書いた金額を戻り値が繰り返しただけの送金を、差し替えられた値と区別するために送る。
-_NUMBER: Final = re.compile(r"(?<![\w.])\d[\d,]*(?:\.\d+)?(?![\w])")
+_NUMBER: Final = re.compile(
+    r"(?<![A-Za-z0-9_.])[0-9][0-9,]*(?:\.[0-9]+)?(?![A-Za-z0-9_])"
+)
 
 
 def _decoded_forms(text: str) -> list[str]:
+    text = unicodedata.normalize("NFKC", text)
     forms = [text]
     unquoted = unquote(text)
     if unquoted != text:
@@ -62,7 +74,7 @@ def extract_values(text: str) -> list[str]:
 def extract_numbers(text: str) -> list[str]:
     """数の値を正規化して返す。上限は宛先の種類ごとの上限と同じ。"""
     out: list[str] = []
-    for m in _NUMBER.findall(text):
+    for m in _NUMBER.findall(unicodedata.normalize("NFKC", text)):
         v = _canonical_number(m)
         if len(v.replace(".", "")) >= 2:
             out.append("#" + v)

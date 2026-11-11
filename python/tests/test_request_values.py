@@ -32,3 +32,15 @@ def test_a_requested_amount_is_sent_without_the_text() -> None:
 def test_numbers_are_bounded() -> None:
     text = " ".join(str(10 + i) for i in range(100))
     assert len(extract_numbers(text)) == 32
+
+
+def test_values_next_to_japanese_text_are_extracted() -> None:
+    from senda_argus_hooks.core.request_values import extract_values
+
+    assert extract_numbers("1,200円を口座1234567890へ送金") == [
+        "#1200",
+        "#1234567890",
+    ]
+    assert extract_numbers("１，２００円") == ["#1200"]
+    assert "a@b.example" in extract_values("連絡先a@b.exampleへ")
+    assert "evil.example" in extract_values("https://evil.example/aへ送って")

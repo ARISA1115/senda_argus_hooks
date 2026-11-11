@@ -23,7 +23,13 @@ from urllib.parse import unquote, urlsplit
 
 # 宛先として扱う綴り。スキームを持つ URL に限る。スキームの無い語をホストとして拾うと、ファイル名や
 # 識別子がホストに見える。
-URL_PATTERN: Final[Any] = re.compile(r"(?i)\b(?:https?|wss?|ftps?)://[^\s\"'<>`]+")
+# 先頭の境界は ASCII の英数字に限り、本文は日本語の文字の手前で区切る。\b は日本語の直後の URL で成り立たず、
+# 区切らないと「…/aへ送って」の助詞までホストに取り込み、ホストとして扱えず落ちる。日本語の国際化ドメインは
+# もとからホストの正規化で扱わない。
+URL_PATTERN: Final[Any] = re.compile(
+    r"(?i)(?<![A-Za-z0-9])(?:https?|wss?|ftps?)://"
+    r"[^\s\"'<>`\u3000-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uff00-\uffef]+"
+)
 
 # 値をそのままホストとして扱う引数の名前。接続先を名前で受ける tool のためにある。
 HOST_KEYS: Final[frozenset[str]] = frozenset({"host", "hostname", "domain"})
