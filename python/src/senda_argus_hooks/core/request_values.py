@@ -63,10 +63,22 @@ def extract_numbers(text: str) -> list[str]:
     """数の値を正規化して返す。上限は宛先の種類ごとの上限と同じ。"""
     out: list[str] = []
     for m in _NUMBER.findall(text):
-        v = m.replace(",", "")
+        v = _canonical_number(m)
         if len(v.replace(".", "")) >= 2:
             out.append("#" + v)
     return list(dict.fromkeys(out))[:_MAX_VALUES]
+
+
+def _canonical_number(raw: str) -> str:
+    """同じ値の綴りを 1 つにする。桁区切りのカンマと、小数の末尾のゼロと小数点を落とす。
+
+    依頼の 1,200 と、ツールの引数の 1200.0 を同じ値として照合させる。口座の番号の先頭のゼロは
+    意味を持つため落とさない。
+    """
+    v = raw.replace(",", "")
+    if "." in v:
+        v = v.rstrip("0").rstrip(".")
+    return v
 
 
 def request_values(prompt: str) -> dict[str, Any]:

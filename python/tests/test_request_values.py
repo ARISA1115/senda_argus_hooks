@@ -13,7 +13,12 @@ def _digest(salt: str, value: str) -> str:
 
 
 def test_numbers_are_normalized() -> None:
-    assert extract_numbers("pay 1,200.50 to 9876543210") == ["#1200.50", "#9876543210"]
+    assert extract_numbers("pay 1,200.50 to 9876543210") == ["#1200.5", "#9876543210"]
+    # 同じ値の綴りは 1 つにする。口座の番号の先頭のゼロは残す。
+    assert extract_numbers("1,200.00 1200.0 1200 0012345678") == [
+        "#1200",
+        "#0012345678",
+    ]
     # 1 桁の数と、語の一部の数は取り出さない。
     assert extract_numbers("item 7 and abc123") == []
 
